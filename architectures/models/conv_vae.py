@@ -1,8 +1,10 @@
 """1D temporal convolutional VAE ([ARCH §3]).
 
 Three residual blocks widen the channel count and halve T twice. The
-decoder mirrors the encoder with transposed convolutions. An optional
-inpainting head takes the mask as a decoder input, for Recipe 3.
+decoder mirrors the encoder with transposed convolutions. For Recipe 3
+the decoder branches into two heads on top of a shared trunk: a full
+head that reconstructs the whole clip, and a mask-conditioned inpainting
+head scored only on hidden positions ([MVAE §5]).
 """
 
 from __future__ import annotations
@@ -48,8 +50,10 @@ class ConvVAE(nn.Module):
     transposed-convolution blocks return to (C, T), and a final Conv1d
     projects to the (3J, T) output.
 
-    The `inpainting` flag toggles Recipe 3's decoder head, which
-    concatenates the mask before the output projection.
+    The `inpainting` flag adds Recipe 3's second decoder head. The
+    shared decoder trunk feeds a `dec_output_full` that reconstructs the
+    whole clip, and a `dec_output_inp` that concatenates the mask before
+    projecting — the inpainting head is told which joints it must fill in.
     """
 
     def __init__(self, T: int, J: int, d_z: int = 32, base_channels: int = 64,
@@ -79,18 +83,22 @@ class ConvVAE(nn.Module):
         flat = self.bottleneck_channels * self.T_bottleneck
         self.heads = BottleneckHeads(flat, d_z)
 
-        # Decoder ([ARCH §3.2]). The last block returns to width C, then
-        # a final Conv1d projects to 3J output channels.
+        # Decoder trunk ([ARCH §3.2]). The last block returns to width C.
         self.lift = nn.Linear(d_z, flat)
         self.dec_upsample = nn.Sequential(
             _conv_transpose_block(2 * C, 2 * C, kernels[2], strides[2]),
             _conv_transpose_block(2 * C, C,     kernels[1], strides[1]),
         )
-        # For Recipe 3 the last layer sees the mask as J extra channels.
-        final_in = C + (J if inpainting else 0)
-        self.dec_output = nn.Conv1d(final_in, out_channels,
-                                    kernel_size=kernels[0], stride=1,
-                                    padding=(kernels[0] - 1) // 2)
+        # Full-clip head. Not mask-conditioned; used by all three recipes.
+        self.dec_output_full = nn.Conv1d(C, out_channels,
+                                         kernel_size=kernels[0], stride=1,
+                                         padding=(kernels[0] - 1) // 2)
+        # Recipe 3 inpainting head. Mask-conditioned so the decoder is
+        # told which joints it must fill in ([MVAE §5.1]).
+        if inpainting:
+            self.dec_output_inp = nn.Conv1d(C + J, out_channels,
+                                            kernel_size=kernels[0], stride=1,
+                                            padding=(kernels[0] - 1) // 2)
 
     # ---- Encoder ---------------------------------------------------------
     def encode(self, X, M):
@@ -107,28 +115,39 @@ class ConvVAE(nn.Module):
         return self.heads(h.flatten(1))
 
     # ---- Decoder ---------------------------------------------------------
-    def decode(self, z, M=None):
-        """Map z to reconstructed clip.
-
-        Args:
-            z: (B, d_z).
-            M: (B, T, J) if `inpainting`; ignored otherwise.
-        Returns:
-            X_hat, (B, T, J, 3).
-        """
+    def _decode_trunk(self, z):
         B = z.shape[0]
         g = self.lift(z).view(B, self.bottleneck_channels, self.T_bottleneck)
-        g = self.dec_upsample(g)                     # (B, C, T)
-        if self.inpainting:
-            if M is None:
-                raise ValueError("Inpainting decoder needs the mask.")
-            g = torch.cat([g, M.transpose(1, 2)], dim=1)  # (B, C + J, T)
-        x_hat = self.dec_output(g)                   # (B, 3J, T)
+        return self.dec_upsample(g)                  # (B, C, T)
+
+    def decode_full(self, z):
+        """Full-clip reconstruction head, ignoring the mask."""
+        g = self._decode_trunk(z)
+        x_hat = self.dec_output_full(g)              # (B, 3J, T)
+        B = z.shape[0]
+        return x_hat.transpose(1, 2).reshape(B, self.T, self.J, 3)
+
+    def decode_inp(self, z, M):
+        """Mask-conditioned inpainting head (Recipe 3 only)."""
+        if not self.inpainting:
+            raise RuntimeError("Model was built without the inpainting head.")
+        g = self._decode_trunk(z)
+        g = torch.cat([g, M.transpose(1, 2)], dim=1)  # (B, C + J, T)
+        x_hat = self.dec_output_inp(g)               # (B, 3J, T)
+        B = z.shape[0]
         return x_hat.transpose(1, 2).reshape(B, self.T, self.J, 3)
 
     # ---- Combined --------------------------------------------------------
     def forward(self, X, M):
+        """Encode, sample, decode.
+
+        Returns:
+            (X_hat_full, mu, logvar) when built without the inpainting head.
+            (X_hat_full, X_hat_inp, mu, logvar) for Recipe 3.
+        """
         mu, logvar = self.encode(X, M)
         z = reparameterise(mu, logvar)
-        X_hat = self.decode(z, M if self.inpainting else None)
-        return X_hat, mu, logvar
+        X_hat_full = self.decode_full(z)
+        if self.inpainting:
+            return X_hat_full, self.decode_inp(z, M), mu, logvar
+        return X_hat_full, mu, logvar

@@ -1,13 +1,14 @@
-"""ELBO components and the split reconstruction loss for Recipe 3.
+"""ELBO components and the reconstruction losses for the three recipes.
 
-Three functions the training loop calls each step:
+The training loop calls these each step:
 
-    kl_gaussian            KL between the diagonal Gaussian posterior
-                           and the standard-normal prior, per sample.
-    reconstruction_mse     mean squared error over all joints; used for
-                           Recipes 1 and 2.
-    split_reconstruction   separate mean squared errors on visible and
-                           hidden joints; used for Recipe 3.
+    kl_gaussian                KL between the diagonal Gaussian posterior
+                               and the standard-normal prior, per sample.
+    reconstruction_mse         mean squared error over all joints; the
+                               full-clip term used by every recipe.
+    reconstruction_mse_hidden  mean squared error over hidden joints only;
+                               the inpainting term for Recipe 3's
+                               second head ([MVAE §5.2]).
 """
 
 from __future__ import annotations
@@ -49,30 +50,22 @@ def reconstruction_mse(x_hat, x):
     return (x_hat - x).pow(2).mean()
 
 
-def split_reconstruction(x_hat, x, M, lambda_visible: float,
-                         lambda_inpainted: float):
-    """Weighted mean squared error split by joint visibility (Recipe 3).
+def reconstruction_mse_hidden(x_hat, x, M):
+    """Mean squared error over hidden joints only ([MVAE §5.2]).
 
-    Divides the pixel-wise squared error into visible-joint and
-    hidden-joint parts, each normalised by its own count, and weights
-    them for the total.
+    Normalises by the number of hidden coordinates in this batch so the
+    magnitude stays stable across masks with different hide-fractions.
 
     Args:
         x_hat, x: (B, T, J, 3).
         M: (B, T, J), 1 for visible.
-        lambda_visible, lambda_inpainted: weights that should sum to 1.
     Returns:
-        (total, visible_mse, inpainted_mse), the total for the optimiser
-        and the two parts for logging.
+        Scalar mean over hidden joint coordinates.
     """
-    err_sq = (x_hat - x).pow(2)                       # (B, T, J, 3)
-    M_ext = M.unsqueeze(-1)                           # (B, T, J, 1)
-    n_vis = (M.sum() * 3).clamp_min(1.0)
-    n_inp = ((1 - M).sum() * 3).clamp_min(1.0)
-    loss_vis = (err_sq * M_ext).sum() / n_vis
-    loss_inp = (err_sq * (1 - M_ext)).sum() / n_inp
-    total = lambda_visible * loss_vis + lambda_inpainted * loss_inp
-    return total, loss_vis, loss_inp
+    err_sq = (x_hat - x).pow(2)                        # (B, T, J, 3)
+    hidden = (1 - M).unsqueeze(-1)                     # (B, T, J, 1)
+    n_inp = (hidden.sum() * 3).clamp_min(1.0)
+    return (err_sq * hidden).sum() / n_inp
 
 
 def beta_schedule(epoch: int, warmup_epochs: int, beta_max: float) -> float:

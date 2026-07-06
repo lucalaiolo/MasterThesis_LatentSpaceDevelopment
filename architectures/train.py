@@ -5,13 +5,17 @@ videos into clips, splits by time within each video, builds the model
 and optimiser, and runs the recipe-appropriate loop for `n_epochs`
 epochs.
 
-The three recipes ([MVAE §3-5]) share almost every step and differ only
-in the mask policy and the reconstruction loss:
+The three recipes ([MVAE §3-5]) share the encoder and decoder and differ
+in how many forward passes the batch does and how the loss is composed:
 
-    Recipe 1  masked input, unmasked target, MSE on all joints.
-    Recipe 2  unmasked input, unmasked target, MSE on all joints.
-    Recipe 3  masked input, mask-aware decoder, weighted split MSE on
-              visible and hidden joints.
+    Recipe 1  one pass with the masked clip; MSE on the full clip,
+              plus KL. [MVAE §3]
+    Recipe 2  two passes: primary with the clean clip contributes MSE
+              + KL, auxiliary with the masked clip contributes MSE
+              only. [MVAE §4]
+    Recipe 3  one pass with the masked clip; dual decoder heads —
+              full-clip MSE from the full head, hidden-only MSE from
+              the mask-conditioned inpainting head, plus KL. [MVAE §5]
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ import numpy as np
 
 from .config import TrainingConfig
 from .data import build_clips, make_loader, train_val_split
-from .losses import kl_gaussian, reconstruction_mse, split_reconstruction, beta_schedule
+from .losses import (kl_gaussian, reconstruction_mse,
+                     reconstruction_mse_hidden, beta_schedule)
 from .mask_policies import build_policy
 from .models import build_model
 
@@ -131,35 +136,38 @@ def train(config: TrainingConfig,
 
     with open(out / "history.json", "w") as f:
         json.dump(history, f, indent=2)
+
+    # Best-effort summary plots. Skipped silently if matplotlib is missing.
+    try:
+        from .visualize import plot_training_summary
+        written = plot_training_summary(
+            history, out_dir=out / "plots", config=config,
+            model=model, loader=val_loader, device=str(device),
+        )
+        print(f"[plots] wrote {len(written)} figure(s) to {out / 'plots'}")
+    except ImportError as e:
+        print(f"[plots] skipped: {e}")
+
     return {"model": model, "history": history, "checkpoint": last_ckpt}
 
 
 def _run_epoch(model, loader, config, beta, opt, device, train: bool) -> dict:
-    """Run one training or validation epoch and return the mean losses."""
-    totals = {"loss": 0.0, "rec": 0.0, "kl": 0.0, "vis": 0.0, "inp": 0.0}
+    """Run one training or validation epoch and return the mean losses.
+
+    `rec_full` is the full-clip reconstruction (primary MSE for Recipes
+    1, 2, 3). `rec_aux` is the auxiliary MSE — Recipe 2's masked-pass
+    reconstruction, or Recipe 3's hidden-only inpainting MSE. Recipe 1
+    leaves `rec_aux` at zero.
+    """
+    torch = _torch()
+    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0, "kl": 0.0}
     n_batches = 0
 
     for step, (X, M) in enumerate(loader):
         X = X.to(device, non_blocking=True)
         M = M.to(device, non_blocking=True)
 
-        # Recipe 2 passes an all-ones mask to the encoder.
-        M_in = M if config.recipe in (1, 3) else _ones_like(M)
-
-        X_hat, mu, logvar = model(X, M_in)
-
-        if config.recipe == 3:
-            rec, vis, inp = split_reconstruction(
-                X_hat, X, M,
-                lambda_visible=config.lambda_visible,
-                lambda_inpainted=config.lambda_inpainted,
-            )
-        else:
-            rec = reconstruction_mse(X_hat, X)
-            vis = inp = rec.detach()
-
-        kl = kl_gaussian(mu, logvar).mean()
-        loss = rec + beta * kl
+        loss, parts = _step_loss(model, X, M, config, beta)
 
         if train:
             opt.zero_grad()
@@ -167,20 +175,67 @@ def _run_epoch(model, loader, config, beta, opt, device, train: bool) -> dict:
             opt.step()
 
         totals["loss"] += float(loss)
-        totals["rec"] += float(rec)
-        totals["kl"] += float(kl)
-        totals["vis"] += float(vis)
-        totals["inp"] += float(inp)
+        totals["rec_full"] += float(parts["rec_full"])
+        totals["rec_aux"] += float(parts["rec_aux"])
+        totals["kl"] += float(parts["kl"])
         n_batches += 1
 
         if train and config.log_every and step % config.log_every == 0:
             print(f"    step {step:4d}  loss={float(loss):.4f}  "
-                  f"rec={float(rec):.4f}  kl={float(kl):.3f}")
+                  f"rec_full={float(parts['rec_full']):.4f}  "
+                  f"rec_aux={float(parts['rec_aux']):.4f}  "
+                  f"kl={float(parts['kl']):.3f}")
 
     return {k: v / max(n_batches, 1) for k, v in totals.items()}
 
 
-def _ones_like(M):
-    """torch.ones_like without touching the import at module top."""
-    import torch
-    return torch.ones_like(M)
+def _step_loss(model, X, M, config, beta):
+    """Compute the loss for one batch under the configured recipe.
+
+    Recipe 1 ([MVAE §3.6]):
+        L = MSE(X, X_hat_masked_in) + beta * KL.
+
+    Recipe 2 ([MVAE §4.2]):
+        primary pass with an all-ones mask contributes MSE + KL.
+        auxiliary pass with the drawn mask contributes MSE only.
+        L = MSE_primary + lambda * MSE_aux + beta * KL_primary.
+
+    Recipe 3 ([MVAE §5.2]):
+        one masked-input pass with two decoder heads.
+        L = MSE(X, X_hat_full) + lambda * MSE_hidden(X, X_hat_inp, M)
+            + beta * KL.
+    """
+    torch = _torch()
+    zero = torch.zeros((), device=X.device)
+
+    if config.recipe == 1:
+        X_hat, mu, logvar = model(X, M)
+        rec = reconstruction_mse(X_hat, X)
+        kl = kl_gaussian(mu, logvar).mean()
+        loss = rec + beta * kl
+        return loss, {"rec_full": rec, "rec_aux": zero, "kl": kl}
+
+    if config.recipe == 2:
+        # Primary pass: clean clip in, full-clip MSE + KL.
+        M_ones = torch.ones_like(M)
+        X_hat_primary, mu, logvar = model(X, M_ones)
+        rec_primary = reconstruction_mse(X_hat_primary, X)
+        kl = kl_gaussian(mu, logvar).mean()
+
+        # Auxiliary pass: masked clip in, full-clip MSE, no KL.
+        X_hat_aux, _, _ = model(X, M)
+        rec_aux = reconstruction_mse(X_hat_aux, X)
+
+        loss = rec_primary + config.lambda_aux * rec_aux + beta * kl
+        return loss, {"rec_full": rec_primary, "rec_aux": rec_aux, "kl": kl}
+
+    if config.recipe == 3:
+        # Single masked pass; two decoder heads.
+        X_hat_full, X_hat_inp, mu, logvar = model(X, M)
+        rec_full = reconstruction_mse(X_hat_full, X)
+        rec_inp = reconstruction_mse_hidden(X_hat_inp, X, M)
+        kl = kl_gaussian(mu, logvar).mean()
+        loss = rec_full + config.lambda_aux * rec_inp + beta * kl
+        return loss, {"rec_full": rec_full, "rec_aux": rec_inp, "kl": kl}
+
+    raise ValueError(f"unknown recipe: {config.recipe!r}")

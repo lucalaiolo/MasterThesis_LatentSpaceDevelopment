@@ -38,9 +38,11 @@ def conv_param_count(config: TrainingConfig) -> dict[str, int]:
         "decoder_lift": linear(d_z, 2 * C * T_bot),
         "decoder_block_3": conv1d(2 * C, 2 * C, k[2]),
         "decoder_block_2": conv1d(2 * C, C, k[1]),
-        "decoder_output": conv1d(C + (J if config.recipe == 3 else 0),
-                                 3 * J, k[0]),
+        "decoder_output_full": conv1d(C, 3 * J, k[0]),
     }
+    # Recipe 3 adds a second, mask-conditioned output head ([MVAE §5.1]).
+    if config.recipe == 3:
+        parts["decoder_output_inp"] = conv1d(C + J, 3 * J, k[0])
     parts["total"] = sum(parts.values())
     return parts
 
@@ -76,9 +78,11 @@ def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
         "bottleneck_heads": 2 * linear(dm, d_z),
         "decoder_query_lift": linear(d_z, dm),
         "decoder_stack": L * transformer_block(),
-        "decoder_output": linear(dm + (J if config.recipe == 3 else 0),
-                                 3 * J),
+        "decoder_output_full": linear(dm, 3 * J),
     }
+    # Recipe 3 adds a second, mask-conditioned output head ([MVAE §5.1]).
+    if config.recipe == 3:
+        parts["decoder_output_inp"] = linear(dm + J, 3 * J)
     parts["total"] = sum(parts.values())
     return parts
 

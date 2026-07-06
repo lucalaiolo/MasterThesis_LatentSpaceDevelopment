@@ -46,14 +46,16 @@ synthetic data for two epochs; read it as a full worked example.
 
 ## The three recipes ([MVAE §3-5])
 
-| Recipe | Encoder input | Decoder input | Loss |
+| Recipe | Forward passes | Reconstruction terms | Where the KL comes from |
 |:---:|:---|:---|:---|
-| 1 | masked   | z          | MSE on all joints |
-| 2 | unmasked | z          | MSE on all joints |
-| 3 | masked   | z and mask | weighted split MSE on visible and hidden |
+| 1 | one masked pass                 | MSE(X, X̂) on all joints                                                        | the same masked pass |
+| 2 | one unmasked + one masked pass  | MSE(X, X̂_primary) + λ·MSE(X, X̂_aux)                                          | the unmasked (primary) pass only |
+| 3 | one masked pass, two heads      | MSE(X, X̂_full) from the full head + λ·MSE_hidden(X, X̂_inp, M) from the inp head | the masked pass |
 
-The configuration enforces the pairing between recipe and mask policy;
-Recipe 2 refuses a non-empty mask, Recipes 1 and 3 refuse `mask_policy="none"`.
+Recipes 2 and 3 require a masking policy (Recipe 2's auxiliary pass
+needs hidden joints, Recipe 3's inpainting head has nothing to score on
+otherwise). Recipe 1 accepts `mask_policy="none"` as a plain-VAE
+ablation ([MVAE §8]).
 
 ## Files
 
@@ -62,12 +64,13 @@ Recipe 2 refuses a non-empty mask, Recipes 1 and 3 refuse `mask_policy="none"`.
 | `config.py`         | TrainingConfig dataclass |
 | `mask_policies.py`  | NoMask, UniformMask, LimbMask ([MVAE §2]) |
 | `data.py`           | video slicing, DataLoader, time-based train/val split |
-| `losses.py`         | KL, MSE, split MSE, beta schedule |
+| `losses.py`         | KL, full-clip MSE, hidden-only MSE, beta schedule |
 | `models/common.py`  | LayerNorm across channels, sinusoidal PE, reparameterisation |
 | `models/conv_vae.py`         | 1D temporal convolutional VAE ([ARCH §3]) |
 | `models/transformer_vae.py`  | frame-token transformer VAE ([ARCH §4.1, §4.2]) |
 | `train.py`          | end-to-end loop, per-epoch validation, checkpoints |
 | `evaluate.py`       | MPJPE reconstruction, MPJPE inpainting ([MVAE §7]) |
+| `visualize.py`      | loss curves, latent diagnostics, pose reconstructions, mask previews |
 | `param_counts.py`   | analytical parameter counts, no torch needed |
 
 ## Parameter budgets
@@ -89,6 +92,28 @@ The design note argues Recipe 1 first, with the convolutional model,
 because it has the fewest failure modes and the fastest iteration
 ([ARCH §5]). Move to Recipe 3 once you have Recipe 1 trained end to end
 and its MPJPE numbers on record.
+
+## Visualising a run
+
+`train(...)` writes `history.json` and, if matplotlib is installed, a
+directory of PNGs to `<out_dir>/plots/`:
+
+| PNG | What it shows |
+|:---|:---|
+| `loss_curves.png`         | train/val curves for total loss, KL, full-clip MSE, auxiliary MSE |
+| `beta_schedule.png`       | the KL-weight warmup ([MVAE §6.2]) |
+| `latent_kl_per_dim.png`   | per-dim KL bar chart — spots posterior collapse ([MVAE §6.5]) |
+| `active_units.png`        | Var(E[z_d ∣ X]) per dim, active-unit count highlighted |
+| `latent_pca.png`          | 2-D PCA of posterior means over the val set |
+| `reconstruction_frames.png` | ground-truth vs predicted pose at three frames |
+| `joint0_trajectory.png`   | x/y/z of joint 0 over time, true vs predicted |
+| `mpjpe_per_joint.png`     | per-joint MPJPE, split into visible and hidden |
+| `mpjpe_per_frame.png`     | MPJPE aggregated across joints, one point per frame |
+| `mask_examples.png`       | heatmaps of the first few masks in a batch |
+
+For ad-hoc plots the `visualize` module also exposes `plot_latent_traversal`
+(sweep a single latent dimension and decode) and `collect_latent_stats`
+(returns the numpy arrays behind the diagnostics).
 
 ## Two small warnings
 

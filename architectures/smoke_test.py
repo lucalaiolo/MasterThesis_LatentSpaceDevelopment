@@ -38,9 +38,10 @@ def one_run(arch: str, recipe: int, epochs: int = 2):
     """Train one architecture under one recipe for a couple of epochs."""
     print(f"\n=== {arch} VAE, Recipe {recipe} ===")
 
-    mask_policy = {1: "uniform", 2: "none", 3: "limb"}[recipe]
-    lambda_visible = 0.5 if recipe == 3 else 0.5
-    lambda_inpainted = 0.5 if recipe == 3 else 0.5
+    # Every recipe now trains with a masking policy: Recipe 1 uses the
+    # masked input directly, Recipe 2's auxiliary pass needs one, and
+    # Recipe 3's inpainting head needs hidden joints to score against.
+    mask_policy = {1: "uniform", 2: "uniform", 3: "limb"}[recipe]
 
     cfg = TrainingConfig(
         architecture=arch,
@@ -48,7 +49,7 @@ def one_run(arch: str, recipe: int, epochs: int = 2):
         recipe=recipe,
         mask_policy=mask_policy,
         mask_limb_names=list(limbs) if recipe == 3 else [],
-        lambda_visible=lambda_visible, lambda_inpainted=lambda_inpainted,
+        lambda_aux=1.0,
         batch_size=16, n_epochs=epochs, warmup_epochs=1, beta_max=0.1,
         learning_rate=1e-3, device="cpu", log_every=0, save_every=0,
         out_dir=f"/tmp/vae_ckpts_{arch}_r{recipe}",
@@ -70,14 +71,13 @@ def one_run(arch: str, recipe: int, epochs: int = 2):
     # Held-out MPJPE for a sanity look.
     test_clips = np.stack([videos[0][i:i + 32] for i in range(200, 260, 8)])
     policy = {1: UniformMask(0.3),
-              2: NoMask(),
+              2: UniformMask(0.3),
               3: LimbMask(limbs=limbs)}[recipe]
     metrics = evaluate(out["model"], test_clips, policy,
                        batch_size=8, device="cpu", recipe=recipe)
     print(f"held-out mpjpe_all       {metrics['mpjpe_all']:.4f}")
-    if recipe in (1, 3):
-        print(f"held-out mpjpe_visible   {metrics['mpjpe_visible']:.4f}")
-        print(f"held-out mpjpe_inpainted {metrics['mpjpe_inpainted']:.4f}")
+    print(f"held-out mpjpe_visible   {metrics['mpjpe_visible']:.4f}")
+    print(f"held-out mpjpe_inpainted {metrics['mpjpe_inpainted']:.4f}")
 
     return out
 

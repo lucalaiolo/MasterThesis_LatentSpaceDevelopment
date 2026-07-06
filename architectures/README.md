@@ -26,8 +26,9 @@ config = TrainingConfig(
     n_joints=J,                # your J
     latent_dim=32,
     recipe=1,                  # 1, 2, or 3
-    mask_policy="uniform",     # "none", "uniform", or "limb"
-    mask_uniform_rho=0.3,
+    mask_policy="uniform",     # "none", "uniform", "top_k_speed",
+                               # "softmax_speed", "per_frame_speed", "limb"
+    mask_rho=0.3,              # target hidden fraction (ignored by "none" / "limb")
     batch_size=64,
     n_epochs=100,
     device="cuda",
@@ -62,7 +63,7 @@ ablation ([MVAE §8]).
 | File | What it does |
 |:---|:---|
 | `config.py`         | TrainingConfig dataclass |
-| `mask_policies.py`  | NoMask, UniformMask, LimbMask ([MVAE §2]) |
+| `mask_policies.py`  | NoMask, UniformMask, TopKSpeedMask, SoftmaxSpeedMask, PerFrameSpeedMask, LimbMask ([MVAE §2]) |
 | `data.py`           | video slicing, DataLoader, time-based train/val split |
 | `losses.py`         | KL, full-clip MSE, hidden-only MSE, beta schedule |
 | `models/common.py`  | LayerNorm across channels, sinusoidal PE, reparameterisation |

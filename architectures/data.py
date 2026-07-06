@@ -85,8 +85,12 @@ class ClipDataset:
         return len(self.clips)
 
     def __getitem__(self, i: int):
-        M = self.policy.sample(self.T, self.J, self.rng)
-        return (self.torch.from_numpy(self.clips[i]),
+        X = self.clips[i]
+        # Pass the clip to the policy so speed-based policies ([MVAE
+        # §2.3–2.5]) can compute their scores. Score-free policies
+        # ignore it.
+        M = self.policy.sample(self.T, self.J, self.rng, X=X)
+        return (self.torch.from_numpy(X),
                 self.torch.from_numpy(M))
 
 

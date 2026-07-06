@@ -80,7 +80,8 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
 
     with torch.no_grad():
         for i in range(0, len(clips), batch_size):
-            X = torch.from_numpy(clips[i:i + batch_size].astype(np.float32)).to(device)
+            X_np = clips[i:i + batch_size].astype(np.float32)
+            X = torch.from_numpy(X_np).to(device)
             B = X.shape[0]
 
             # ---- Reconstruction pass: unmasked input, full head -----
@@ -91,7 +92,9 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
             n_all += err_full.numel()
 
             # ---- Inpainting pass: masked input, mask-aware head -----
-            M = np.stack([mask_policy.sample(T, J, rng) for _ in range(B)])
+            # Speed-based policies score joints off the clip, so pass X.
+            M = np.stack([mask_policy.sample(T, J, rng, X=X_np[b])
+                          for b in range(B)])
             Mt = torch.from_numpy(M).to(device)
             X_hat_inp = _decode_inpaint(model, X, Mt)
             err_inp = torch.linalg.norm(X_hat_inp - X, dim=-1)     # (B, T, J)

@@ -28,8 +28,9 @@ import numpy as np
 
 from .config import TrainingConfig
 from .data import build_clips, make_loader, train_val_split
-from .losses import (kl_gaussian, reconstruction_mse,
-                     reconstruction_mse_hidden, beta_schedule)
+from .losses import (kl_gaussian, kl_gaussian_free_bits,
+                     reconstruction_mse, reconstruction_mse_hidden,
+                     beta_schedule)
 from .mask_policies import build_policy
 from .models import build_model
 
@@ -189,6 +190,18 @@ def _run_epoch(model, loader, config, beta, opt, device, train: bool) -> dict:
     return {k: v / max(n_batches, 1) for k, v in totals.items()}
 
 
+def _kl_term(mu, logvar, config):
+    """KL contribution for one forward pass, respecting `config.free_bits`.
+
+    When `config.free_bits > 0` the per-dimension free-bits variant
+    ([MVAE §6.3]) is used, so dims with KL_d < gamma stop receiving
+    gradient. Otherwise the vanilla KL is returned.
+    """
+    if config.free_bits > 0:
+        return kl_gaussian_free_bits(mu, logvar, config.free_bits).mean()
+    return kl_gaussian(mu, logvar).mean()
+
+
 def _step_loss(model, X, M, config, beta):
     """Compute the loss for one batch under the configured recipe.
 
@@ -204,6 +217,9 @@ def _step_loss(model, X, M, config, beta):
         one masked-input pass with two decoder heads.
         L = MSE(X, X_hat_full) + lambda * MSE_hidden(X, X_hat_inp, M)
             + beta * KL.
+
+    All three routes go through `_kl_term`, which picks vanilla or
+    free-bits KL from `config.free_bits`.
     """
     torch = _torch()
     zero = torch.zeros((), device=X.device)
@@ -211,7 +227,7 @@ def _step_loss(model, X, M, config, beta):
     if config.recipe == 1:
         X_hat, mu, logvar = model(X, M)
         rec = reconstruction_mse(X_hat, X)
-        kl = kl_gaussian(mu, logvar).mean()
+        kl = _kl_term(mu, logvar, config)
         loss = rec + beta * kl
         return loss, {"rec_full": rec, "rec_aux": zero, "kl": kl}
 
@@ -220,7 +236,7 @@ def _step_loss(model, X, M, config, beta):
         M_ones = torch.ones_like(M)
         X_hat_primary, mu, logvar = model(X, M_ones)
         rec_primary = reconstruction_mse(X_hat_primary, X)
-        kl = kl_gaussian(mu, logvar).mean()
+        kl = _kl_term(mu, logvar, config)
 
         # Auxiliary pass: masked clip in, full-clip MSE, no KL.
         X_hat_aux, _, _ = model(X, M)
@@ -234,7 +250,7 @@ def _step_loss(model, X, M, config, beta):
         X_hat_full, X_hat_inp, mu, logvar = model(X, M)
         rec_full = reconstruction_mse(X_hat_full, X)
         rec_inp = reconstruction_mse_hidden(X_hat_inp, X, M)
-        kl = kl_gaussian(mu, logvar).mean()
+        kl = _kl_term(mu, logvar, config)
         loss = rec_full + config.lambda_aux * rec_inp + beta * kl
         return loss, {"rec_full": rec_full, "rec_aux": rec_inp, "kl": kl}
 

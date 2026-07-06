@@ -39,6 +39,12 @@ class TrainingConfig:
         beta_max: the top of the KL weight schedule.
         warmup_epochs: linear warmup from 0 to beta_max over this many
             epochs, then hold at beta_max.
+        free_bits: when > 0, replaces the vanilla KL with the free-bits
+            KL of Kingma et al., 2016 ([MVAE §6.3]). Each latent
+            dimension gets a per-sample floor of `free_bits` nats, so
+            dims below the floor stop receiving gradient through the KL
+            term. Typical range [0.05, 0.5]. Zero (default) keeps the
+            vanilla KL and uses `beta_max` / `warmup_epochs` alone.
         recipe: one of 1, 2, or 3, matching [MVAE §3-5].
         lambda_aux: weight on the auxiliary reconstruction term. Recipe 2
             weights the masked-pass reconstruction ([MVAE §4.2]);
@@ -88,6 +94,7 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     beta_max: float = 1.0
     warmup_epochs: int = 10
+    free_bits: float = 0.0
 
     # Recipe.
     recipe: Literal[1, 2, 3] = 1

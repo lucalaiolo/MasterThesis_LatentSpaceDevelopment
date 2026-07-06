@@ -65,7 +65,7 @@ ablation ([MVAE §8]).
 | `config.py`         | TrainingConfig dataclass |
 | `mask_policies.py`  | NoMask, UniformMask, TopKSpeedMask, SoftmaxSpeedMask, PerFrameSpeedMask, LimbMask ([MVAE §2]) |
 | `data.py`           | video slicing, DataLoader, time-based train/val split |
-| `losses.py`         | KL, full-clip MSE, hidden-only MSE, beta schedule |
+| `losses.py`         | KL (vanilla and free-bits), full-clip MSE, hidden-only MSE, beta schedule |
 | `models/common.py`  | LayerNorm across channels, sinusoidal PE, reparameterisation |
 | `models/conv_vae.py`         | 1D temporal convolutional VAE ([ARCH §3]) |
 | `models/transformer_vae.py`  | frame-token transformer VAE ([ARCH §4.1, §4.2]) |
@@ -115,6 +115,22 @@ directory of PNGs to `<out_dir>/plots/`:
 For ad-hoc plots the `visualize` module also exposes `plot_latent_traversal`
 (sweep a single latent dimension and decode) and `collect_latent_stats`
 (returns the numpy arrays behind the diagnostics).
+
+## Fighting posterior collapse
+
+If `active_units.png` shows only a handful of dimensions with
+Var(E[z_d | X]) above the threshold, the encoder has collapsed most
+of the latent to the prior. Two knobs to fight this ([MVAE §6.2, §6.3]):
+
+- **β-annealing** (default): reduce `beta_max` (try 0.1 – 0.5) so the
+  KL term doesn't crush the posterior in the first epochs. Cheap and
+  usually enough.
+- **Free-bits**: set `free_bits > 0` (typical range 0.05 – 0.5). Each
+  latent dim gets that many nats "for free" before the KL term starts
+  charging, so the encoder has no incentive to squash any single dim
+  to zero. More surgical than β-annealing when the latent is small
+  and only a few dims carry all the information. Compatible with
+  `beta_max=1.0`.
 
 ## Two small warnings
 

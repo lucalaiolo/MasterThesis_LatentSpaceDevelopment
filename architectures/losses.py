@@ -4,6 +4,11 @@ The training loop calls these each step:
 
     kl_gaussian                KL between the diagonal Gaussian posterior
                                and the standard-normal prior, per sample.
+    kl_gaussian_free_bits      Per-dimension free-bits variant of the
+                               KL: dims below the threshold contribute a
+                               fixed cost, so the encoder is not pushed
+                               to squash any single dim to zero
+                               ([MVAE §6.3], Kingma et al., 2016).
     reconstruction_mse         mean squared error over all joints; the
                                full-clip term used by every recipe.
     reconstruction_mse_hidden  mean squared error over hidden joints only;
@@ -37,6 +42,30 @@ def kl_gaussian(mu, logvar):
         Tensor of shape (B,), one KL per sample.
     """
     return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+
+
+def kl_gaussian_free_bits(mu, logvar, gamma: float):
+    """Per-dimension free-bits KL ([MVAE §6.3]; Kingma et al., 2016).
+
+    Floors each dimension's KL at `gamma` before summing across dims:
+
+        KL_tilde = sum_d max(gamma, KL_d).
+
+    Effect on training: dimensions with KL_d < gamma receive no
+    gradient through the KL term, so the encoder is not pushed to
+    squash them further. More robust than beta-annealing when the
+    latent is small and a handful of dimensions carry all the
+    posterior information.
+
+    Args:
+        mu, logvar: (B, d_z).
+        gamma: per-dimension floor. Typical range [0.05, 0.5].
+    Returns:
+        Tensor of shape (B,), one free-bits KL per sample.
+    """
+    # KL_d = 1/2 * (mu_d^2 + sigma_d^2 - log sigma_d^2 - 1).
+    kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1)
+    return torch.clamp(kl_per_dim, min=gamma).sum(dim=1)
 
 
 def reconstruction_mse(x_hat, x):

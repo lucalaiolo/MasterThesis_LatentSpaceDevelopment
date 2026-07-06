@@ -126,6 +126,12 @@ of the latent to the prior. Three knobs to fight this:
   `beta_max` (try 0.1 – 0.5) or extend `warmup_epochs` so the KL term
   doesn't crush the posterior in the first epochs. Cheap and often
   enough ([MVAE §6.2]).
+- **Delayed warmup** (`beta_mode="delayed_warmup"`): hold β at
+  `beta_min` for `delay_epochs` before starting the ramp to `beta_max`
+  over `warmup_epochs`. Reconstruction trains lightly-regularised
+  first, and KL only starts to matter once the AE is already good at
+  reconstructing. Useful when plain warmup starts KL pressure before
+  the model has enough capacity to survive it.
 - **Free-bits**: set `free_bits > 0` (typical range 0.05 – 0.5). Each
   latent dim gets that many nats "for free" before the KL term starts
   charging, so the encoder has no incentive to squash any single dim

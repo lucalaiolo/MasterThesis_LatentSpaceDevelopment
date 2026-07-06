@@ -30,7 +30,7 @@ from .config import TrainingConfig
 from .data import build_clips, make_loader, train_val_split
 from .losses import (kl_gaussian, kl_gaussian_free_bits,
                      reconstruction_mse, reconstruction_mse_hidden,
-                     beta_schedule)
+                     beta_schedule, delayed_warmup_schedule)
 from .mask_policies import build_policy
 from .models import build_model
 
@@ -220,6 +220,10 @@ def _resolve_beta(config, epoch: int, kl_state: dict, rec_full,
     `warmup` mode: linear ramp from 0 to `beta_max` over `warmup_epochs`
     ([MVAE §6.2]).
 
+    `delayed_warmup` mode: hold beta at `beta_min` for `delay_epochs`,
+    then linearly ramp to `beta_max` over `warmup_epochs`. Reconstruction
+    trains lightly-regularised first, then KL kicks in.
+
     `computed` mode: Asperti-Trentin 2020. Track gamma_sq as the
     running minimum of the training batch MSE and return `2 * gamma_sq`.
     On the very first batch (before any update) fall back to 1.0.
@@ -236,6 +240,11 @@ def _resolve_beta(config, epoch: int, kl_state: dict, rec_full,
                 kl_state["gamma_sq"] = g2_new
         g2 = kl_state.get("gamma_sq")
         return 2.0 * g2 if g2 is not None else 1.0
+    if config.beta_mode == "delayed_warmup":
+        return delayed_warmup_schedule(
+            epoch, config.delay_epochs, config.warmup_epochs,
+            config.beta_min, config.beta_max,
+        )
     return beta_schedule(epoch, config.warmup_epochs, config.beta_max)
 
 

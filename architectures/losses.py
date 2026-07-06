@@ -102,3 +102,28 @@ def beta_schedule(epoch: int, warmup_epochs: int, beta_max: float) -> float:
     if warmup_epochs <= 0:
         return beta_max
     return min(1.0, epoch / warmup_epochs) * beta_max
+
+
+def delayed_warmup_schedule(epoch: int, delay_epochs: int,
+                            warmup_epochs: int,
+                            beta_min: float, beta_max: float) -> float:
+    """Two-phase KL warmup: hold at `beta_min`, then linearly ramp.
+
+    Phase 1 (epoch < delay_epochs): beta = beta_min. Reconstruction
+    trains largely unregularised so the encoder / decoder reach a good
+    fitting regime before any KL pressure kicks in.
+
+    Phase 2 (delay_epochs <= epoch < delay_epochs + warmup_epochs):
+    linear ramp from beta_min to beta_max.
+
+    Phase 3 (epoch >= delay_epochs + warmup_epochs): beta = beta_max.
+
+    Useful when a plain warmup starts KL pressure too early and the
+    model can't recover from the initial poor reconstruction.
+    """
+    if epoch < delay_epochs:
+        return beta_min
+    if warmup_epochs <= 0:
+        return beta_max
+    progress = (epoch - delay_epochs) / warmup_epochs
+    return beta_min + (beta_max - beta_min) * min(1.0, progress)

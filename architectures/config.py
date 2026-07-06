@@ -44,12 +44,21 @@ class TrainingConfig:
         beta_mode: how the KL weight is chosen at each training step.
             "warmup" (default) — linear ramp from 0 to `beta_max` over
             `warmup_epochs`, matching [MVAE §6.2].
+            "delayed_warmup" — hold beta at `beta_min` for
+            `delay_epochs`, then linearly ramp to `beta_max` over
+            `warmup_epochs`. Lets the AE settle into a good
+            reconstruction regime before KL pressure kicks in.
             "computed" — Asperti-Trentin 2020 recipe: track gamma_sq
             as the running minimum of batch MSE and set the effective
             KL weight to 2 * gamma_sq. Keeps the ratio between
             reconstruction and KL constant across training, so latents
             get activated one at a time as reconstruction improves.
             `beta_max` and `warmup_epochs` are ignored in this mode.
+        beta_min: floor for the KL weight during phase 1 of
+            `delayed_warmup`. 0.0 (default) disables KL entirely during
+            pre-training; small positive values keep some regularisation.
+        delay_epochs: number of epochs to hold beta at `beta_min` before
+            the ramp in `delayed_warmup` mode.
         free_bits: when > 0, replaces the vanilla KL with the free-bits
             KL of Kingma et al., 2016 ([MVAE §6.3]). Each latent
             dimension gets a per-sample floor of `free_bits` nats, so
@@ -105,7 +114,9 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     beta_max: float = 1.0
     warmup_epochs: int = 10
-    beta_mode: Literal["warmup", "computed"] = "warmup"
+    beta_mode: Literal["warmup", "delayed_warmup", "computed"] = "warmup"
+    beta_min: float = 0.0
+    delay_epochs: int = 20
     free_bits: float = 0.0
 
     # Recipe.

@@ -113,21 +113,49 @@ def plot_loss_curves(history: dict, log_y: bool = True):
     return fig
 
 
-def plot_beta_schedule(warmup_epochs: int, beta_max: float, n_epochs: int):
-    """The linear KL-weight warmup used in [MVAE §6.2] (warmup mode only)."""
+def plot_beta_schedule(config, n_epochs: int):
+    """Intended KL-weight schedule for `warmup` or `delayed_warmup` modes.
+
+    Reads `config.beta_mode`, `warmup_epochs`, `beta_max`, `beta_min`,
+    and `delay_epochs`. Not meaningful for `computed` mode (β is
+    data-dependent) — that path relies on `plot_beta_trajectory` on
+    recorded history instead.
+    """
     plt = _import_matplotlib()
     epochs = np.arange(n_epochs)
-    betas = np.minimum(1.0, epochs / max(warmup_epochs, 1)) * beta_max
-    if warmup_epochs <= 0:
-        betas[:] = beta_max
+    mode = getattr(config, "beta_mode", "warmup")
+    beta_max = config.beta_max
+    warmup_epochs = config.warmup_epochs
+
+    if mode == "delayed_warmup":
+        beta_min = getattr(config, "beta_min", 0.0)
+        delay_epochs = getattr(config, "delay_epochs", 0)
+        betas = np.full(n_epochs, beta_min, dtype=float)
+        for e in range(n_epochs):
+            if e >= delay_epochs:
+                progress = (e - delay_epochs) / max(warmup_epochs, 1)
+                betas[e] = beta_min + (beta_max - beta_min) * min(1.0, progress)
+    else:  # "warmup"
+        betas = np.minimum(1.0, epochs / max(warmup_epochs, 1)) * beta_max
+        if warmup_epochs <= 0:
+            betas[:] = beta_max
+
     fig, ax = plt.subplots(figsize=(6, 3.2))
     ax.plot(epochs, betas, "-", linewidth=2)
     ax.axhline(beta_max, linestyle=":", color="0.5",
                label=f"beta_max = {beta_max}")
-    ax.axvline(warmup_epochs, linestyle=":", color="0.5")
+    if mode == "delayed_warmup":
+        beta_min = getattr(config, "beta_min", 0.0)
+        delay_epochs = getattr(config, "delay_epochs", 0)
+        ax.axhline(beta_min, linestyle=":", color="0.5")
+        ax.axvline(delay_epochs, linestyle=":", color="firebrick",
+                   label=f"delay_epochs = {delay_epochs}")
+        ax.axvline(delay_epochs + warmup_epochs, linestyle=":", color="firebrick")
+    else:
+        ax.axvline(warmup_epochs, linestyle=":", color="0.5")
     ax.set_xlabel("epoch")
     ax.set_ylabel(r"$\beta$")
-    ax.set_title("KL weight schedule (warmup mode)")
+    ax.set_title(f"KL weight schedule ({mode} mode)")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -560,10 +588,11 @@ def plot_training_summary(history: dict, out_dir: str | Path,
     if history.get("train"):
         _save(plot_beta_trajectory(history), "beta_trajectory.png")
 
-    if config is not None and getattr(config, "beta_mode", "warmup") == "warmup":
+    if config is not None and getattr(config, "beta_mode", "warmup") in (
+        "warmup", "delayed_warmup"
+    ):
         n_epochs = len(history.get("train", [])) or getattr(config, "n_epochs", 1)
-        fig = plot_beta_schedule(config.warmup_epochs, config.beta_max, n_epochs)
-        _save(fig, "beta_schedule.png")
+        _save(plot_beta_schedule(config, n_epochs), "beta_schedule.png")
 
     if model is not None and loader is not None:
         stats = collect_latent_stats(model, loader, device=device, max_batches=32)

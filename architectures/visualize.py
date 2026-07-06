@@ -70,37 +70,45 @@ def _stack_history(history: dict) -> dict[str, dict[str, np.ndarray]]:
 
 
 def plot_loss_curves(history: dict, log_y: bool = True):
-    """Total loss, KL, and the reconstruction terms over epochs.
+    """All losses on one axis so their scales are directly comparable.
 
-    Four subplots: total loss, KL, `rec_full` (full-clip MSE), `rec_aux`
-    (Recipe 2's masked-pass MSE or Recipe 3's hidden-only MSE). Recipe 1
-    leaves `rec_aux` at zero, so that panel stays flat.
+    Four series overlaid — total loss, KL, `rec_full`, `rec_aux` — each
+    plotted for both train (solid) and val (dashed). One shared colour
+    per component makes the split easy to read. Log-y by default since
+    reconstruction and KL usually sit at different orders of magnitude
+    early in training; pass `log_y=False` for linear.
     """
     plt = _import_matplotlib()
     stacked = _stack_history(history)
     epochs = np.arange(len(stacked["train"].get("loss", [])))
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True)
-    panels = [
-        ("loss", "Total loss", axes[0, 0]),
-        ("kl", "KL divergence", axes[0, 1]),
-        ("rec_full", "Full-clip MSE", axes[1, 0]),
-        ("rec_aux", "Auxiliary MSE (Recipes 2, 3)", axes[1, 1]),
+    # One colour per component; split by linestyle.
+    series = [
+        ("loss",     "total loss",       "#1f77b4"),
+        ("rec_full", "full-clip MSE",    "#2ca02c"),
+        ("rec_aux",  "auxiliary MSE",    "#d62728"),
+        ("kl",       "KL divergence",    "#9467bd"),
     ]
-    for key, title, ax in panels:
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for key, label, color in series:
         for split, style in (("train", "-"), ("val", "--")):
             ys = stacked[split].get(key)
             if ys is None or len(ys) == 0:
                 continue
-            ax.plot(epochs, ys, style, label=split, linewidth=1.6)
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=9)
-        if log_y and key in ("loss", "rec_full", "rec_aux"):
-            ax.set_yscale("log")
-    for ax in axes[1, :]:
-        ax.set_xlabel("epoch")
-    fig.suptitle("Training curves")
+            # Log-y can't render zeros; guard rec_aux for Recipe 1.
+            if log_y and np.all(ys <= 0):
+                continue
+            ax.plot(epochs, ys, style, color=color, linewidth=1.6,
+                    label=f"{label} ({split})")
+
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("value" + (" (log scale)" if log_y else ""))
+    ax.set_title("Training curves — all losses on one axis")
+    ax.grid(True, alpha=0.3, which="both")
+    ax.legend(loc="best", fontsize=9, ncol=2)
     fig.tight_layout()
     return fig
 

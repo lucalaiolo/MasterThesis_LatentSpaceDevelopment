@@ -70,6 +70,7 @@ ablation ([MVAE §8]).
 | `models/transformer_vae.py`  | frame-token transformer VAE ([ARCH §4.1, §4.2]) |
 | `train.py`          | end-to-end loop, per-epoch validation, checkpoints |
 | `evaluate.py`       | MPJPE reconstruction, MPJPE inpainting ([MVAE §7]) |
+| `visualize.py`      | loss curves, latent diagnostics, pose reconstructions, mask previews |
 | `param_counts.py`   | analytical parameter counts, no torch needed |
 
 ## Parameter budgets
@@ -91,6 +92,28 @@ The design note argues Recipe 1 first, with the convolutional model,
 because it has the fewest failure modes and the fastest iteration
 ([ARCH §5]). Move to Recipe 3 once you have Recipe 1 trained end to end
 and its MPJPE numbers on record.
+
+## Visualising a run
+
+`train(...)` writes `history.json` and, if matplotlib is installed, a
+directory of PNGs to `<out_dir>/plots/`:
+
+| PNG | What it shows |
+|:---|:---|
+| `loss_curves.png`         | train/val curves for total loss, KL, full-clip MSE, auxiliary MSE |
+| `beta_schedule.png`       | the KL-weight warmup ([MVAE §6.2]) |
+| `latent_kl_per_dim.png`   | per-dim KL bar chart — spots posterior collapse ([MVAE §6.5]) |
+| `active_units.png`        | Var(E[z_d ∣ X]) per dim, active-unit count highlighted |
+| `latent_pca.png`          | 2-D PCA of posterior means over the val set |
+| `reconstruction_frames.png` | ground-truth vs predicted pose at three frames |
+| `joint0_trajectory.png`   | x/y/z of joint 0 over time, true vs predicted |
+| `mpjpe_per_joint.png`     | per-joint MPJPE, split into visible and hidden |
+| `mpjpe_per_frame.png`     | MPJPE aggregated across joints, one point per frame |
+| `mask_examples.png`       | heatmaps of the first few masks in a batch |
+
+For ad-hoc plots the `visualize` module also exposes `plot_latent_traversal`
+(sweep a single latent dimension and decode) and `collect_latent_stats`
+(returns the numpy arrays behind the diagnostics).
 
 ## Two small warnings
 

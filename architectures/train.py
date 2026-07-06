@@ -136,6 +136,18 @@ def train(config: TrainingConfig,
 
     with open(out / "history.json", "w") as f:
         json.dump(history, f, indent=2)
+
+    # Best-effort summary plots. Skipped silently if matplotlib is missing.
+    try:
+        from .visualize import plot_training_summary
+        written = plot_training_summary(
+            history, out_dir=out / "plots", config=config,
+            model=model, loader=val_loader, device=str(device),
+        )
+        print(f"[plots] wrote {len(written)} figure(s) to {out / 'plots'}")
+    except ImportError as e:
+        print(f"[plots] skipped: {e}")
+
     return {"model": model, "history": history, "checkpoint": last_ckpt}
 
 

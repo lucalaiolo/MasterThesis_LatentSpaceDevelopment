@@ -446,6 +446,97 @@ def plot_pose_comparison(x_true: np.ndarray, x_pred: np.ndarray,
     return fig
 
 
+def animate_pose_comparison(clip_true: np.ndarray, clip_pred: np.ndarray,
+                            edges: Iterable[tuple[int, int]] | None = None,
+                            fps: int = 25,
+                            elev: float = 15.0, azim: float = -70.0,
+                            figsize: tuple[float, float] = (11.0, 5.0),
+                            colors: tuple[str, str] = ("black", "tomato")):
+    """Side-by-side 3D animation of ground-truth vs reconstructed poses.
+
+    Both panels share the same bounding box so their scales match. The
+    skeleton is drawn from `edges` (a list of (joint_a, joint_b) index
+    pairs). In Colab, display with
+    `IPython.display.HTML(anim.to_jshtml())`; export with
+    `anim.save('out.mp4', writer='ffmpeg', fps=..., dpi=...)`.
+
+    Args:
+        clip_true, clip_pred: (T, J, 3).
+        edges: skeleton connectivity; scatter-only when None.
+        fps: playback speed (sets matplotlib's frame interval).
+        elev, azim: 3D camera angles.
+        figsize: (width, height) in inches.
+        colors: (ground_truth_colour, reconstruction_colour).
+    Returns:
+        (fig, anim). Close `fig` after building anim to suppress the
+        static preview PNG a notebook would otherwise render.
+    """
+    plt = _import_matplotlib()
+    from matplotlib.animation import FuncAnimation
+
+    clips = [np.asarray(clip_true), np.asarray(clip_pred)]
+    T = clips[0].shape[0]
+
+    fig = plt.figure(figsize=figsize)
+    axes = [fig.add_subplot(1, 2, i + 1, projection="3d") for i in range(2)]
+    titles = ["Ground truth", "Reconstruction"]
+
+    # Shared bounding box, equal aspect on all three axes.
+    all_pts = np.concatenate([c.reshape(-1, 3) for c in clips], axis=0)
+    mins = all_pts.min(axis=0)
+    maxs = all_pts.max(axis=0)
+    center = 0.5 * (mins + maxs)
+    half = 0.55 * (maxs - mins).max()
+    lims = [(center[i] - half, center[i] + half) for i in range(3)]
+
+    scatters, lines_per_ax = [], []
+    for ax, title, clip, color in zip(axes, titles, clips, colors):
+        scat = ax.scatter(clip[0, :, 0], clip[0, :, 1], clip[0, :, 2],
+                          s=6, color=color)
+        scatters.append(scat)
+        lines = []
+        if edges is not None:
+            for a, b in edges:
+                (ln,) = ax.plot(
+                    [clip[0, a, 0], clip[0, b, 0]],
+                    [clip[0, a, 1], clip[0, b, 1]],
+                    [clip[0, a, 2], clip[0, b, 2]],
+                    color=color, linewidth=0.9)
+                lines.append(ln)
+        lines_per_ax.append(lines)
+        ax.set_xlim(*lims[0])
+        ax.set_ylim(*lims[1])
+        ax.set_zlim(*lims[2])
+        try:
+            ax.set_box_aspect((1, 1, 1))
+        except Exception:  # pragma: no cover — very old matplotlib
+            pass
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_zlabel("z")
+
+    caption = fig.suptitle("", fontsize=10)
+
+    def update(t):
+        for scat, lines, clip in zip(scatters, lines_per_ax, clips):
+            scat._offsets3d = (clip[t, :, 0], clip[t, :, 1], clip[t, :, 2])
+            if edges is not None:
+                for (a, b), ln in zip(edges, lines):
+                    ln.set_data_3d(
+                        [clip[t, a, 0], clip[t, b, 0]],
+                        [clip[t, a, 1], clip[t, b, 1]],
+                        [clip[t, a, 2], clip[t, b, 2]],
+                    )
+        caption.set_text(f"frame {t + 1} / {T}")
+        return []
+
+    anim = FuncAnimation(fig, update, frames=T,
+                         interval=1000.0 / max(fps, 1), blit=False)
+    return fig, anim
+
+
 def plot_joint_trajectory(x_true: np.ndarray, x_pred: np.ndarray,
                           joint_idx: int = 0):
     """Coordinate trajectories for one joint over time — true vs predicted.

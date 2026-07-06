@@ -29,11 +29,18 @@ except ValueError as e:
     print(f"clean error on bad clip length: {str(e)[:60]}...")
 
 try:
-    bad = TrainingConfig(recipe=2, mask_policy="uniform")
+    bad = TrainingConfig(recipe=2, mask_policy="none")
     bad.validate()
-    print("ERROR: expected a ValueError on Recipe 2 + mask")
+    print("ERROR: expected a ValueError on Recipe 2 without a mask policy")
 except ValueError as e:
-    print(f"clean error on Recipe 2 + mask: {str(e)[:60]}...")
+    print(f"clean error on Recipe 2 without a mask policy: {str(e)[:60]}...")
+
+try:
+    bad = TrainingConfig(recipe=3, mask_policy="none")
+    bad.validate()
+    print("ERROR: expected a ValueError on Recipe 3 without a mask policy")
+except ValueError as e:
+    print(f"clean error on Recipe 3 without a mask policy: {str(e)[:60]}...")
 
 
 # ---- Mask policies ----------------------------------------------------

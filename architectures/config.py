@@ -40,8 +40,10 @@ class TrainingConfig:
         warmup_epochs: linear warmup from 0 to beta_max over this many
             epochs, then hold at beta_max.
         recipe: one of 1, 2, or 3, matching [MVAE §3-5].
-        lambda_visible: Recipe 3 weight on the visible-joint loss.
-        lambda_inpainted: Recipe 3 weight on the hidden-joint loss.
+        lambda_aux: weight on the auxiliary reconstruction term. Recipe 2
+            weights the masked-pass reconstruction ([MVAE §4.2]);
+            Recipe 3 weights the hidden-only inpainting head ([MVAE §5.2]).
+            Ignored for Recipe 1.
         mask_policy: "none", "uniform", or "limb".
         mask_uniform_rho: fraction of joints hidden per frame under the
             uniform policy.
@@ -82,8 +84,7 @@ class TrainingConfig:
 
     # Recipe.
     recipe: Literal[1, 2, 3] = 1
-    lambda_visible: float = 0.5
-    lambda_inpainted: float = 0.5
+    lambda_aux: float = 1.0
 
     # Masking.
     mask_policy: Literal["none", "uniform", "limb"] = "uniform"
@@ -116,13 +117,9 @@ class TrainingConfig:
                 f"d_model ({self.d_model}) must divide by n_heads "
                 f"({self.n_heads})."
             )
-        if self.recipe == 3 and abs(self.lambda_visible + self.lambda_inpainted - 1) > 1e-6:
+        if self.recipe in (2, 3) and self.mask_policy == "none":
             raise ValueError(
-                "For Recipe 3, lambda_visible + lambda_inpainted should sum to 1."
-            )
-        if self.recipe == 2 and self.mask_policy != "none":
-            raise ValueError("Recipe 2 uses unmasked input; set mask_policy='none'.")
-        if self.recipe in (1, 3) and self.mask_policy == "none":
-            raise ValueError(
-                f"Recipe {self.recipe} needs a mask policy; set 'uniform' or 'limb'."
+                f"Recipe {self.recipe} needs a mask policy; set 'uniform' or 'limb'. "
+                f"Recipe 2's auxiliary pass and Recipe 3's inpainting head "
+                f"both require joints to be hidden."
             )

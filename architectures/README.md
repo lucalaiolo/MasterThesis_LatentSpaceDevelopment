@@ -46,14 +46,16 @@ synthetic data for two epochs; read it as a full worked example.
 
 ## The three recipes ([MVAE §3-5])
 
-| Recipe | Encoder input | Decoder input | Loss |
+| Recipe | Forward passes | Reconstruction terms | Where the KL comes from |
 |:---:|:---|:---|:---|
-| 1 | masked   | z          | MSE on all joints |
-| 2 | unmasked | z          | MSE on all joints |
-| 3 | masked   | z and mask | weighted split MSE on visible and hidden |
+| 1 | one masked pass                 | MSE(X, X̂) on all joints                                                        | the same masked pass |
+| 2 | one unmasked + one masked pass  | MSE(X, X̂_primary) + λ·MSE(X, X̂_aux)                                          | the unmasked (primary) pass only |
+| 3 | one masked pass, two heads      | MSE(X, X̂_full) from the full head + λ·MSE_hidden(X, X̂_inp, M) from the inp head | the masked pass |
 
-The configuration enforces the pairing between recipe and mask policy;
-Recipe 2 refuses a non-empty mask, Recipes 1 and 3 refuse `mask_policy="none"`.
+Recipes 2 and 3 require a masking policy (Recipe 2's auxiliary pass
+needs hidden joints, Recipe 3's inpainting head has nothing to score on
+otherwise). Recipe 1 accepts `mask_policy="none"` as a plain-VAE
+ablation ([MVAE §8]).
 
 ## Files
 
@@ -62,7 +64,7 @@ Recipe 2 refuses a non-empty mask, Recipes 1 and 3 refuse `mask_policy="none"`.
 | `config.py`         | TrainingConfig dataclass |
 | `mask_policies.py`  | NoMask, UniformMask, LimbMask ([MVAE §2]) |
 | `data.py`           | video slicing, DataLoader, time-based train/val split |
-| `losses.py`         | KL, MSE, split MSE, beta schedule |
+| `losses.py`         | KL, full-clip MSE, hidden-only MSE, beta schedule |
 | `models/common.py`  | LayerNorm across channels, sinusoidal PE, reparameterisation |
 | `models/conv_vae.py`         | 1D temporal convolutional VAE ([ARCH §3]) |
 | `models/transformer_vae.py`  | frame-token transformer VAE ([ARCH §4.1, §4.2]) |

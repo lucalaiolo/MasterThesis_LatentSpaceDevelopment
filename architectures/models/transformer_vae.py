@@ -2,9 +2,10 @@
 
 Each frame is one token. The encoder prepends a class token and reads
 the posterior parameters off it. The decoder broadcasts the latent into
-T positioned queries and runs a stack of self-attention blocks. An
-optional inpainting head concatenates the mask before the output layer,
-for Recipe 3.
+T positioned queries and runs a stack of self-attention blocks. For
+Recipe 3 the decoder branches into two heads on top of the shared
+transformer trunk: a full head and a mask-conditioned inpainting head
+scored only on hidden positions ([MVAE §5]).
 """
 
 from __future__ import annotations
@@ -73,9 +74,11 @@ class TransformerVAE(nn.Module):
         )
         self.decoder = nn.TransformerEncoder(dec_layer, num_layers=n_layers)
 
-        # For Recipe 3 the output projection sees J extra channels.
-        out_in = d_model + (J if inpainting else 0)
-        self.dec_output = nn.Linear(out_in, 3 * J)
+        # Full-clip head. Not mask-conditioned; used by all three recipes.
+        self.dec_output_full = nn.Linear(d_model, 3 * J)
+        # Recipe 3 inpainting head: mask-conditioned ([MVAE §5.1]).
+        if inpainting:
+            self.dec_output_inp = nn.Linear(d_model + J, 3 * J)
 
         # Small initialisation for the class token, so early training has
         # a well-behaved scale in the attention.
@@ -101,30 +104,41 @@ class TransformerVAE(nn.Module):
         return self.heads(out[:, 0])                      # class-token slot
 
     # ---- Decoder ---------------------------------------------------------
-    def decode(self, z, M=None):
-        """Map z to reconstructed clip.
-
-        Args:
-            z: (B, d_z).
-            M: (B, T, J) if `inpainting`; ignored otherwise.
-        Returns:
-            X_hat, (B, T, J, 3).
-        """
+    def _decode_trunk(self, z):
         B = z.shape[0]
         q = self.query_lift(z)                            # (B, d_model)
         q = q.unsqueeze(1).expand(B, self.T, self.d_model)
         q = q + self.dec_pos.unsqueeze(0)                 # (B, T, d_model)
-        out = self.decoder(q)                             # (B, T, d_model)
-        if self.inpainting:
-            if M is None:
-                raise ValueError("Inpainting decoder needs the mask.")
-            out = torch.cat([out, M], dim=-1)             # (B, T, d_model + J)
-        x_hat = self.dec_output(out)                      # (B, T, 3J)
+        return self.decoder(q)                            # (B, T, d_model)
+
+    def decode_full(self, z):
+        """Full-clip reconstruction head, ignoring the mask."""
+        B = z.shape[0]
+        out = self._decode_trunk(z)
+        x_hat = self.dec_output_full(out)                 # (B, T, 3J)
+        return x_hat.reshape(B, self.T, self.J, 3)
+
+    def decode_inp(self, z, M):
+        """Mask-conditioned inpainting head (Recipe 3 only)."""
+        if not self.inpainting:
+            raise RuntimeError("Model was built without the inpainting head.")
+        B = z.shape[0]
+        out = self._decode_trunk(z)
+        out = torch.cat([out, M], dim=-1)                 # (B, T, d_model + J)
+        x_hat = self.dec_output_inp(out)                  # (B, T, 3J)
         return x_hat.reshape(B, self.T, self.J, 3)
 
     # ---- Combined --------------------------------------------------------
     def forward(self, X, M):
+        """Encode, sample, decode.
+
+        Returns:
+            (X_hat_full, mu, logvar) when built without the inpainting head.
+            (X_hat_full, X_hat_inp, mu, logvar) for Recipe 3.
+        """
         mu, logvar = self.encode(X, M)
         z = reparameterise(mu, logvar)
-        X_hat = self.decode(z, M if self.inpainting else None)
-        return X_hat, mu, logvar
+        X_hat_full = self.decode_full(z)
+        if self.inpainting:
+            return X_hat_full, self.decode_inp(z, M), mu, logvar
+        return X_hat_full, mu, logvar

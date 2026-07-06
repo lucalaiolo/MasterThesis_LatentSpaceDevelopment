@@ -1,15 +1,15 @@
 """Mask policies for the three training recipes.
 
 Every step, the training loop draws a fresh mask per clip from the
-policy. Three policies map to the three regimes of [MVAE §3-5]:
+policy. Three policies:
 
-    "none"     Recipe 2. The mask is all ones. The encoder sees the
-               unmasked clip.
-    "uniform"  Recipe 1 or 3. Each joint at each frame is hidden with
+    "none"     The mask is all ones. Only valid for Recipe 1, where it
+               reduces the model to a plain VAE ablation ([MVAE §8]).
+    "uniform"  Any recipe. Each joint at each frame is hidden with
                probability rho, independently. [MVAE §2.2]
-    "limb"     Recipe 1 or 3. One named limb is hidden for the whole
-               clip. Every joint of the limb goes; every other joint
-               stays. [MVAE §2.6]
+    "limb"     Any recipe. One named limb is hidden for the whole clip.
+               Every joint of the limb goes; every other joint stays.
+               [MVAE §2.6]
 
 The policies return NumPy arrays of shape (T, J) with 1 for visible.
 The training loop converts to torch. Nothing here needs torch.
@@ -37,7 +37,7 @@ class MaskPolicy:
 
 @dataclass
 class NoMask(MaskPolicy):
-    """Recipe 2. Every joint visible."""
+    """Every joint visible; the plain-VAE baseline for Recipe 1 ablations."""
 
     def sample(self, T: int, J: int, rng: np.random.Generator) -> np.ndarray:
         return np.ones((T, J), dtype=np.float32)

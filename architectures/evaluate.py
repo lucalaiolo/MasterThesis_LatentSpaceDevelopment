@@ -3,9 +3,13 @@
 Mean per-joint position error is the average Euclidean distance between
 predicted and true joint positions. Two variants:
 
-    mpjpe_reconstruction  averaged over every joint of every clip.
-    mpjpe_inpainting      averaged over hidden joints only, useful for
-                          Recipe 3.
+    mpjpe_reconstruction  averaged over every joint of every clip; the
+                          model sees the unmasked clip at inference
+                          ([MVAE §7.1]).
+    mpjpe_inpainting      averaged over hidden joints only; the model
+                          sees the masked clip at inference. For
+                          Recipe 3 this reads off the mask-conditioned
+                          inpainting head ([MVAE §7.2]).
 """
 
 from __future__ import annotations
@@ -21,6 +25,29 @@ def _torch():
         raise ImportError("Evaluation needs PyTorch.") from e
 
 
+def _decode_full(model, X, M):
+    """Return the full-clip reconstruction from `model(X, M)`.
+
+    Handles both the two-tuple return (Recipes 1, 2) and the three-tuple
+    return (Recipe 3, where the first element is the full head).
+    """
+    out = model(X, M)
+    return out[0]
+
+
+def _decode_inpaint(model, X, M):
+    """Return the inpainting reconstruction for a masked input.
+
+    For Recipe 3 the model returns (X_hat_full, X_hat_inp, mu, logvar);
+    we use the mask-conditioned head. For Recipes 1 and 2 there is only
+    one head, so we use it.
+    """
+    out = model(X, M)
+    if len(out) == 4:                       # Recipe 3: (full, inp, mu, logvar)
+        return out[1]
+    return out[0]
+
+
 def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
              device: str = "cpu", seed: int = 0,
              recipe: int = 1) -> dict:
@@ -29,14 +56,17 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
     Args:
         model: a trained VAE.
         clips: shape (N, T, J, 3).
-        mask_policy: draws test-time masks.
+        mask_policy: draws test-time masks for the inpainting metric.
         batch_size: minibatch size.
         device: "cuda" or "cpu".
         seed: seeds the mask draws.
-        recipe: 1, 2, or 3, matching the model that produced X_hat.
+        recipe: 1, 2, or 3, matching the model that produced X_hat. Only
+            affects which head answers the inpainting query.
     Returns:
         Dict with mean per-joint position error over all joints, over
-        visible joints, and over hidden joints.
+        visible joints, and over hidden joints. `mpjpe_all` comes from
+        the unmasked-input reconstruction pass; `mpjpe_visible` and
+        `mpjpe_inpainted` come from the masked-input inference pass.
     """
     torch = _torch()
     model.eval()
@@ -53,23 +83,26 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
             X = torch.from_numpy(clips[i:i + batch_size].astype(np.float32)).to(device)
             B = X.shape[0]
 
+            # ---- Reconstruction pass: unmasked input, full head -----
+            M_ones = torch.ones((B, T, J), device=device)
+            X_hat_full = _decode_full(model, X, M_ones)
+            err_full = torch.linalg.norm(X_hat_full - X, dim=-1)   # (B, T, J)
+            tot_all += float(err_full.sum())
+            n_all += err_full.numel()
+
+            # ---- Inpainting pass: masked input, mask-aware head -----
             M = np.stack([mask_policy.sample(T, J, rng) for _ in range(B)])
             Mt = torch.from_numpy(M).to(device)
-            M_in = Mt if recipe in (1, 3) else torch.ones_like(Mt)
-
-            X_hat, _, _ = model(X, M_in)
-            err = torch.linalg.norm(X_hat - X, dim=-1)   # (B, T, J), per-joint distance
-
-            tot_all += float(err.sum())
-            n_all += err.numel()
+            X_hat_inp = _decode_inpaint(model, X, Mt)
+            err_inp = torch.linalg.norm(X_hat_inp - X, dim=-1)     # (B, T, J)
 
             vis = Mt > 0.5
             hid = ~vis
             if vis.any():
-                tot_vis += float(err[vis].sum())
+                tot_vis += float(err_inp[vis].sum())
                 n_vis += int(vis.sum())
             if hid.any():
-                tot_inp += float(err[hid].sum())
+                tot_inp += float(err_inp[hid].sum())
                 n_inp += int(hid.sum())
 
     return {

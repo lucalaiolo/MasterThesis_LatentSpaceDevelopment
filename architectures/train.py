@@ -100,24 +100,29 @@ def train(config: TrainingConfig,
     best_val = float("inf")
     last_ckpt = None
 
+    # State for the Asperti-Trentin "computed" KL-weight mode. Holds the
+    # running minimum of batch MSE across training. Kept as a dict so
+    # `_step_loss` can mutate it in place.
+    kl_state: dict[str, float | None] = {"gamma_sq": None}
+
     # ---- Loop ---------------------------------------------------------
     for epoch in range(config.n_epochs):
-        beta = beta_schedule(epoch, config.warmup_epochs, config.beta_max)
         t0 = time.time()
 
         model.train()
-        train_stats = _run_epoch(model, train_loader, config, beta, opt,
-                                 device, train=True)
+        train_stats = _run_epoch(model, train_loader, config, epoch,
+                                 kl_state, opt, device, train=True)
         model.eval()
         with torch.no_grad():
-            val_stats = _run_epoch(model, val_loader, config, beta, None,
-                                   device, train=False)
+            val_stats = _run_epoch(model, val_loader, config, epoch,
+                                   kl_state, None, device, train=False)
 
         history["train"].append(train_stats)
         history["val"].append(val_stats)
 
         dt = time.time() - t0
-        print(f"[epoch {epoch:3d}] beta={beta:.3f} "
+        print(f"[epoch {epoch:3d}] "
+              f"beta={train_stats['beta']:.4f} "
               f"train_loss={train_stats['loss']:.4f} "
               f"val_loss={val_stats['loss']:.4f}  ({dt:.1f} s)")
 
@@ -152,23 +157,27 @@ def train(config: TrainingConfig,
     return {"model": model, "history": history, "checkpoint": last_ckpt}
 
 
-def _run_epoch(model, loader, config, beta, opt, device, train: bool) -> dict:
+def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
+               train: bool) -> dict:
     """Run one training or validation epoch and return the mean losses.
 
     `rec_full` is the full-clip reconstruction (primary MSE for Recipes
     1, 2, 3). `rec_aux` is the auxiliary MSE — Recipe 2's masked-pass
     reconstruction, or Recipe 3's hidden-only inpainting MSE. Recipe 1
-    leaves `rec_aux` at zero.
+    leaves `rec_aux` at zero. `beta` is the effective KL weight used
+    on each step, averaged over the epoch — the same in warmup mode,
+    but data-dependent in the computed mode.
     """
-    torch = _torch()
-    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0, "kl": 0.0}
+    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0,
+              "kl": 0.0, "beta": 0.0}
     n_batches = 0
 
     for step, (X, M) in enumerate(loader):
         X = X.to(device, non_blocking=True)
         M = M.to(device, non_blocking=True)
 
-        loss, parts = _step_loss(model, X, M, config, beta)
+        loss, parts = _step_loss(model, X, M, config, epoch,
+                                 kl_state, update=train)
 
         if train:
             opt.zero_grad()
@@ -179,13 +188,15 @@ def _run_epoch(model, loader, config, beta, opt, device, train: bool) -> dict:
         totals["rec_full"] += float(parts["rec_full"])
         totals["rec_aux"] += float(parts["rec_aux"])
         totals["kl"] += float(parts["kl"])
+        totals["beta"] += float(parts["beta"])
         n_batches += 1
 
         if train and config.log_every and step % config.log_every == 0:
             print(f"    step {step:4d}  loss={float(loss):.4f}  "
                   f"rec_full={float(parts['rec_full']):.4f}  "
                   f"rec_aux={float(parts['rec_aux']):.4f}  "
-                  f"kl={float(parts['kl']):.3f}")
+                  f"kl={float(parts['kl']):.3f}  "
+                  f"beta={float(parts['beta']):.4f}")
 
     return {k: v / max(n_batches, 1) for k, v in totals.items()}
 
@@ -202,7 +213,34 @@ def _kl_term(mu, logvar, config):
     return kl_gaussian(mu, logvar).mean()
 
 
-def _step_loss(model, X, M, config, beta):
+def _resolve_beta(config, epoch: int, kl_state: dict, rec_full,
+                  update: bool) -> float:
+    """Pick the effective KL weight for this batch.
+
+    `warmup` mode: linear ramp from 0 to `beta_max` over `warmup_epochs`
+    ([MVAE §6.2]).
+
+    `computed` mode: Asperti-Trentin 2020. Track gamma_sq as the
+    running minimum of the training batch MSE and return `2 * gamma_sq`.
+    On the very first batch (before any update) fall back to 1.0.
+
+    `update=True` allows the running minimum to move; `update=False`
+    (validation) freezes it at the current value so val loss stays
+    comparable to train loss within the same epoch.
+    """
+    if config.beta_mode == "computed":
+        if update:
+            g2_new = float(rec_full.detach())
+            g2_prev = kl_state.get("gamma_sq")
+            if g2_prev is None or g2_new < g2_prev:
+                kl_state["gamma_sq"] = g2_new
+        g2 = kl_state.get("gamma_sq")
+        return 2.0 * g2 if g2 is not None else 1.0
+    return beta_schedule(epoch, config.warmup_epochs, config.beta_max)
+
+
+def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
+               update: bool = True):
     """Compute the loss for one batch under the configured recipe.
 
     Recipe 1 ([MVAE §3.6]):
@@ -218,40 +256,43 @@ def _step_loss(model, X, M, config, beta):
         L = MSE(X, X_hat_full) + lambda * MSE_hidden(X, X_hat_inp, M)
             + beta * KL.
 
-    All three routes go through `_kl_term`, which picks vanilla or
-    free-bits KL from `config.free_bits`.
+    All three routes go through `_kl_term` (vanilla or free-bits KL)
+    and `_resolve_beta` (linear warmup or Asperti-Trentin computed).
     """
     torch = _torch()
     zero = torch.zeros((), device=X.device)
 
     if config.recipe == 1:
         X_hat, mu, logvar = model(X, M)
-        rec = reconstruction_mse(X_hat, X)
+        rec_full = reconstruction_mse(X_hat, X)
+        rec_aux = zero
         kl = _kl_term(mu, logvar, config)
-        loss = rec + beta * kl
-        return loss, {"rec_full": rec, "rec_aux": zero, "kl": kl}
 
-    if config.recipe == 2:
+    elif config.recipe == 2:
         # Primary pass: clean clip in, full-clip MSE + KL.
         M_ones = torch.ones_like(M)
         X_hat_primary, mu, logvar = model(X, M_ones)
-        rec_primary = reconstruction_mse(X_hat_primary, X)
+        rec_full = reconstruction_mse(X_hat_primary, X)
         kl = _kl_term(mu, logvar, config)
 
         # Auxiliary pass: masked clip in, full-clip MSE, no KL.
         X_hat_aux, _, _ = model(X, M)
         rec_aux = reconstruction_mse(X_hat_aux, X)
 
-        loss = rec_primary + config.lambda_aux * rec_aux + beta * kl
-        return loss, {"rec_full": rec_primary, "rec_aux": rec_aux, "kl": kl}
-
-    if config.recipe == 3:
+    elif config.recipe == 3:
         # Single masked pass; two decoder heads.
         X_hat_full, X_hat_inp, mu, logvar = model(X, M)
         rec_full = reconstruction_mse(X_hat_full, X)
-        rec_inp = reconstruction_mse_hidden(X_hat_inp, X, M)
+        rec_aux = reconstruction_mse_hidden(X_hat_inp, X, M)
         kl = _kl_term(mu, logvar, config)
-        loss = rec_full + config.lambda_aux * rec_inp + beta * kl
-        return loss, {"rec_full": rec_full, "rec_aux": rec_inp, "kl": kl}
 
-    raise ValueError(f"unknown recipe: {config.recipe!r}")
+    else:
+        raise ValueError(f"unknown recipe: {config.recipe!r}")
+
+    beta = _resolve_beta(config, epoch, kl_state, rec_full, update=update)
+    loss = rec_full + config.lambda_aux * rec_aux + beta * kl \
+        if config.recipe in (2, 3) else rec_full + beta * kl
+
+    beta_tensor = torch.as_tensor(beta, device=X.device, dtype=rec_full.dtype)
+    return loss, {"rec_full": rec_full, "rec_aux": rec_aux,
+                  "kl": kl, "beta": beta_tensor}

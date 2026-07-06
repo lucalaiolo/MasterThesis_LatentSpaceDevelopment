@@ -114,7 +114,7 @@ def plot_loss_curves(history: dict, log_y: bool = True):
 
 
 def plot_beta_schedule(warmup_epochs: int, beta_max: float, n_epochs: int):
-    """The linear KL-weight warmup used in [MVAE §6.2]."""
+    """The linear KL-weight warmup used in [MVAE §6.2] (warmup mode only)."""
     plt = _import_matplotlib()
     epochs = np.arange(n_epochs)
     betas = np.minimum(1.0, epochs / max(warmup_epochs, 1)) * beta_max
@@ -127,8 +127,37 @@ def plot_beta_schedule(warmup_epochs: int, beta_max: float, n_epochs: int):
     ax.axvline(warmup_epochs, linestyle=":", color="0.5")
     ax.set_xlabel("epoch")
     ax.set_ylabel(r"$\beta$")
-    ax.set_title("KL weight schedule")
+    ax.set_title("KL weight schedule (warmup mode)")
     ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def plot_beta_trajectory(history: dict):
+    """Effective KL weight per epoch as it actually ran.
+
+    Reads the per-epoch mean of `beta` recorded during training. In
+    `warmup` mode this matches the pre-declared schedule. In `computed`
+    mode (Asperti-Trentin 2020) it's data-dependent — beta = 2 * gamma_sq
+    with gamma_sq tracking the running minimum of batch MSE — so this
+    is where you see how the KL weight actually evolved.
+    """
+    plt = _import_matplotlib()
+    stacked = _stack_history(history)
+    epochs = np.arange(len(stacked["train"].get("loss", [])))
+    fig, ax = plt.subplots(figsize=(6.5, 3.4))
+    for split, style in (("train", "-"), ("val", "--")):
+        ys = stacked[split].get("beta")
+        if ys is None or len(ys) == 0:
+            continue
+        # Skip log-y bounds if series contains zeros (e.g., epoch 0 of warmup).
+        ax.plot(epochs, ys, style, linewidth=1.6, label=f"β ({split})")
+    ax.set_yscale("log")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel(r"$\beta$ (log scale)")
+    ax.set_title("Effective KL weight")
+    ax.grid(True, alpha=0.3, which="both")
     ax.legend()
     fig.tight_layout()
     return fig
@@ -526,7 +555,12 @@ def plot_training_summary(history: dict, out_dir: str | Path,
     fig = plot_loss_curves(history)
     _save(fig, "loss_curves.png")
 
-    if config is not None:
+    # Always plot the effective β trajectory — matches the schedule in
+    # warmup mode and shows the data-dependent curve in computed mode.
+    if history.get("train"):
+        _save(plot_beta_trajectory(history), "beta_trajectory.png")
+
+    if config is not None and getattr(config, "beta_mode", "warmup") == "warmup":
         n_epochs = len(history.get("train", [])) or getattr(config, "n_epochs", 1)
         fig = plot_beta_schedule(config.warmup_epochs, config.beta_max, n_epochs)
         _save(fig, "beta_schedule.png")

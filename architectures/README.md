@@ -120,17 +120,27 @@ For ad-hoc plots the `visualize` module also exposes `plot_latent_traversal`
 
 If `active_units.png` shows only a handful of dimensions with
 Var(E[z_d | X]) above the threshold, the encoder has collapsed most
-of the latent to the prior. Two knobs to fight this ([MVAE §6.2, §6.3]):
+of the latent to the prior. Three knobs to fight this:
 
-- **β-annealing** (default): reduce `beta_max` (try 0.1 – 0.5) so the
-  KL term doesn't crush the posterior in the first epochs. Cheap and
-  usually enough.
+- **β-annealing** (`beta_mode="warmup"`, the default): reduce
+  `beta_max` (try 0.1 – 0.5) or extend `warmup_epochs` so the KL term
+  doesn't crush the posterior in the first epochs. Cheap and often
+  enough ([MVAE §6.2]).
 - **Free-bits**: set `free_bits > 0` (typical range 0.05 – 0.5). Each
   latent dim gets that many nats "for free" before the KL term starts
   charging, so the encoder has no incentive to squash any single dim
   to zero. More surgical than β-annealing when the latent is small
-  and only a few dims carry all the information. Compatible with
-  `beta_max=1.0`.
+  and only a few dims carry all the information ([MVAE §6.3]).
+  Compatible with either β-mode.
+- **Auto-computed β** (`beta_mode="computed"`): the Asperti-Trentin
+  (2020) recipe. Track `gamma_sq` as the running minimum of batch
+  MSE across training and set the KL weight to `2 * gamma_sq` at every
+  step. Effect: β starts high (matching the initially large
+  reconstruction error), keeping latent variables in "limbo" close to
+  the prior, and *drops* as reconstruction improves. Individual dims
+  get activated one at a time as the decoder starts to need them.
+  `beta_max` and `warmup_epochs` are ignored in this mode; look at
+  `beta_trajectory.png` for the curve that actually ran.
 
 ## Two small warnings
 

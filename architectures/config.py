@@ -44,10 +44,17 @@ class TrainingConfig:
             weights the masked-pass reconstruction ([MVAE §4.2]);
             Recipe 3 weights the hidden-only inpainting head ([MVAE §5.2]).
             Ignored for Recipe 1.
-        mask_policy: "none", "uniform", or "limb".
-        mask_uniform_rho: fraction of joints hidden per frame under the
-            uniform policy.
-        mask_limb_names: limb names to pick from for the limb policy.
+        mask_policy: one of "none", "uniform", "top_k_speed",
+            "softmax_speed", "per_frame_speed", "limb". See
+            `mask_policies.py` for the definitions ([MVAE §2]).
+        mask_rho: target hidden fraction. Used by every policy except
+            "none" and "limb".
+        mask_softmax_temperature: softmax temperature for the
+            "softmax_speed" policy. tau -> 0 recovers "top_k_speed";
+            tau -> infinity recovers "uniform".
+        mask_limb_names: limb names to pick from for the "limb" policy.
+        mask_limb_speed_weighted: sample limbs with probability
+            proportional to their mean speed instead of uniformly.
         device: "cuda" or "cpu".
         seed: seed for every stochastic step of training.
         log_every: log the running loss every this many steps.
@@ -87,9 +94,13 @@ class TrainingConfig:
     lambda_aux: float = 1.0
 
     # Masking.
-    mask_policy: Literal["none", "uniform", "limb"] = "uniform"
-    mask_uniform_rho: float = 0.3
+    mask_policy: Literal["none", "uniform", "top_k_speed",
+                         "softmax_speed", "per_frame_speed",
+                         "limb"] = "uniform"
+    mask_rho: float = 0.3
+    mask_softmax_temperature: float = 1.0
     mask_limb_names: list[str] = field(default_factory=list)
+    mask_limb_speed_weighted: bool = False
 
     # Runtime.
     device: str = "cuda"

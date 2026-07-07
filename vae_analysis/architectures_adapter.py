@@ -53,10 +53,15 @@ class ArchitecturesAdapter:
 
     # ---- Single-clip methods in torch, used by the Jacobian tools. ----
     def encode_mean_torch(self, X, M):
-        # X (T, J, 3), M (T, J); return mu (d_z,).
+        # X (T, J, 3), M (T, J); return mu (d_z,). jacrev calls this with
+        # tensors built from numpy (CPU) even when the net is on CUDA.
+        # Move them explicitly so the CUDA matmul does not complain.
+        X = X.to(self.device)
+        M = M.to(self.device)
         mu, _ = self.net.encode(X[None], M[None])
         return mu[0]
 
     def decode_torch(self, z):
-        # z (d_z,); return x_hat (T, J, 3).
+        # z (d_z,); return x_hat (T, J, 3). See note above on device.
+        z = z.to(self.device)
         return self.net.decode_full(z[None])[0]

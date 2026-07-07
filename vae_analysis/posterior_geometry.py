@@ -95,20 +95,21 @@ def mmd_prior_test(latent, n_samples: int = 2000, n_perm: int = 500,
 
 
 def intrinsic_dimension_twonn(points: np.ndarray,
-                              discard_fraction: float = 0.1) -> float:
+                              discard_fraction: float = 0.1) -> dict:
     """Estimate intrinsic dimension by the two-nearest-neighbour method.
 
     For each point, the ratio of its second-nearest to nearest-neighbour
-    distance follows a Pareto law whose shape is the intrinsic dimension
-    (Facco et al., 2017). The maximum-likelihood estimate is the point
-    count over the summed log-ratios.
+    distance follows a Pareto(d) law whose shape is the intrinsic
+    dimension (Facco et al., 2017). The MLE is M / sum_i log(mu_i), and
+    the asymptotic Fisher information gives standard error d_hat/sqrt(M).
 
     Args:
         points: sample, shape (M, d).
-        discard_fraction: drop this top fraction of ratios to blunt the
-            effect of a few outliers.
+        discard_fraction: drop this top fraction of the sorted log-ratios
+            to blunt cluster-hopping outliers (Denti et al., 2022).
     Returns:
-        The estimated intrinsic dimension.
+        Dict with `d_hat`, `standard_error`, `n_used`, and the raw
+        `mu` ratios (for the scale sweep and diagnostic plots).
     """
     from sklearn.neighbors import NearestNeighbors
 
@@ -120,8 +121,14 @@ def intrinsic_dimension_twonn(points: np.ndarray,
     mu = r2[ok] / r1[ok]
     logmu = np.sort(np.log(mu))
     keep = int(len(logmu) * (1.0 - discard_fraction))
-    logmu = logmu[:keep]
-    return float(len(logmu) / logmu.sum())
+    logmu_kept = logmu[:keep]
+    d_hat = float(len(logmu_kept) / logmu_kept.sum())
+    return {
+        "d_hat": d_hat,
+        "standard_error": d_hat / float(np.sqrt(len(logmu_kept))),
+        "n_used": int(len(logmu_kept)),
+        "mu": mu,
+    }
 
 
 def cluster_structure(latent, k_range=range(2, 13),

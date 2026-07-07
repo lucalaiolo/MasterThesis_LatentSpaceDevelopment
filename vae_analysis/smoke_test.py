@@ -67,7 +67,7 @@ results = {}
 
 # ---- Part I Section 3: posterior geometry ----
 results["mmd_prior"] = pg.mmd_prior_test(latent, n_samples=300, n_perm=50, rng=rng)
-results["intrinsic_dim"] = pg.intrinsic_dimension_twonn(latent.mu)
+results["intrinsic_dim"] = pg.intrinsic_dimension_twonn(latent.mu)["d_hat"]
 results["clusters_k"] = pg.cluster_structure(latent, k_range=range(2, 6))["k"]
 
 # ---- Part I Section 5: features ----

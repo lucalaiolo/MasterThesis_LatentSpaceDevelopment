@@ -20,6 +20,7 @@ in how many forward passes the batch does and how the loss is composed:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -33,6 +34,13 @@ from .losses import (kl_gaussian, kl_gaussian_free_bits,
                      beta_schedule, delayed_warmup_schedule)
 from .mask_policies import build_policy
 from .models import build_model
+
+
+ALL_RECIPES: tuple[int, ...] = (1, 2, 3)
+ALL_MASK_POLICIES: tuple[str, ...] = (
+    "none", "uniform", "top_k_speed",
+    "softmax_speed", "per_frame_speed", "limb",
+)
 
 
 def _torch():
@@ -305,3 +313,65 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     beta_tensor = torch.as_tensor(beta, device=X.device, dtype=rec_full.dtype)
     return loss, {"rec_full": rec_full, "rec_aux": rec_aux,
                   "kl": kl, "beta": beta_tensor}
+
+
+def train_sweep(base_config: TrainingConfig,
+                videos: list[np.ndarray],
+                limbs: dict[str, list[int]] | None = None,
+                stride: int | None = None,
+                recipes: tuple[int, ...] = ALL_RECIPES,
+                mask_policies: tuple[str, ...] = ALL_MASK_POLICIES,
+                ) -> dict[tuple[int, str], dict]:
+    """Run `train` across every valid (recipe, mask_policy) combination.
+
+    Shared knobs — architecture, latent width, batch size, epochs, beta
+    schedule, seed — come from `base_config`. For each combo we clone
+    the config with `recipe` and `mask_policy` overridden, and route the
+    run's outputs to a subdirectory `<base out_dir>/recipe{N}_{policy}`
+    so nothing collides.
+
+    Skipped combos: Recipes 2 and 3 with `mask_policy="none"` (rejected
+    by `TrainingConfig.validate`), and `"limb"` when no `limbs` map was
+    passed.
+
+    Args:
+        base_config: template config; `recipe`, `mask_policy`, and
+            `out_dir` are overridden per run.
+        videos: forwarded to `train`.
+        limbs: joint-index lists per limb name; required for the "limb"
+            policy, ignored otherwise.
+        stride: forwarded to `train`.
+        recipes: which recipes to sweep. Defaults to (1, 2, 3).
+        mask_policies: which policies to sweep. Defaults to all six.
+    Returns:
+        Dict keyed by (recipe, mask_policy) with each run's `train`
+        return value.
+    """
+    base_out = Path(base_config.out_dir)
+    results: dict[tuple[int, str], dict] = {}
+
+    for recipe in recipes:
+        for policy in mask_policies:
+            if recipe in (2, 3) and policy == "none":
+                print(f"[sweep] skip recipe={recipe} policy={policy!r}: "
+                      "recipes 2 and 3 need a mask policy.")
+                continue
+            if policy == "limb" and not limbs:
+                print(f"[sweep] skip recipe={recipe} policy={policy!r}: "
+                      "no `limbs` map provided.")
+                continue
+
+            sub = base_out / f"recipe{recipe}_{policy}"
+            cfg = dataclasses.replace(
+                base_config,
+                recipe=recipe,
+                mask_policy=policy,
+                out_dir=str(sub),
+            )
+            print(f"\n[sweep] === recipe={recipe} policy={policy!r} "
+                  f"-> {sub} ===")
+            results[(recipe, policy)] = train(
+                cfg, videos, limbs=limbs, stride=stride,
+            )
+
+    return results

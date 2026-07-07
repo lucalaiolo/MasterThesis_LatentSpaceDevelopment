@@ -387,11 +387,11 @@ def compute_predictions(model, X: np.ndarray, M: np.ndarray,
         Mt = torch.from_numpy(M.astype(np.float32)).to(device)
         mu, logvar = model.encode(Xt, Mt)
         # Use the posterior mean at eval, not a sample ([MVAE §3.7]).
+        has_inp = getattr(model, "inpainting", False)
         want_inp = (head == "inp") or (
-            head == "auto" and hasattr(model, "decode_inp")
-            and (M < 0.5).any()
+            head == "auto" and has_inp and (M < 0.5).any()
         )
-        if want_inp and hasattr(model, "decode_inp"):
+        if want_inp and has_inp:
             X_hat = model.decode_inp(mu, Mt)
         else:
             X_hat = _decode_full(model, mu, Mt)

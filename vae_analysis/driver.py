@@ -53,6 +53,9 @@ def run_all_analyses(checkpoint_path: str | Path,
                      limbs: dict[str, list[int]] | None = None,
                      n_perm: int = 200,
                      rng_seed: int = 0,
+                     include_decoder_geometry: bool = True,
+                     n_anchors: int = 16,
+                     traversal_steps: tuple[float, ...] = (-3, -2, -1, 0, 1, 2, 3),
                      ) -> dict:
     """Run the core latent-space analyses on one checkpoint.
 
@@ -89,7 +92,7 @@ def run_all_analyses(checkpoint_path: str | Path,
     from . import (posterior_geometry as pg, features as ft, masking as mk,
                    information as inf, symmetry as sym, disentanglement as dis,
                    two_sample as ts, screening as scr, honesty as hon,
-                   generation as gen)
+                   generation as gen, decoder_geometry as dg)
 
     plt = _import_matplotlib()
     rng = np.random.default_rng(rng_seed)
@@ -141,12 +144,16 @@ def run_all_analyses(checkpoint_path: str | Path,
     print("[analysis] posterior_geometry ...")
     mmd = pg.mmd_prior_test(latent, n_perm=n_perm, rng=rng)
     intr = pg.intrinsic_dimension_twonn(latent.mu)
-    clust = pg.cluster_structure(latent, k_range=range(2, 9))
+    clust = pg.cluster_structure(latent, k_range=range(2, 13))
     results["posterior_geometry"] = {
         "mmd2": mmd["mmd2"], "mmd_p_value": mmd["p_value"],
-        "intrinsic_dim": intr, "cluster_k": clust["k"],
-        "bic_curve": clust["bic"],
+        "mmd_bandwidth": mmd["bandwidth"],
+        "intrinsic_dim": intr["d_hat"],
+        "intrinsic_dim_se": intr["standard_error"],
+        "cluster_k": clust["k"], "bic_curve": clust["bic"],
     }
+    _save(_plot_mmd_summary(mmd, plt), "mmd_prior.png")
+    _save(_plot_bic_curve(clust, plt), "cluster_bic.png")
     if "composition" in clust:
         results["posterior_geometry"]["composition"] = clust["composition"]
         _save(_plot_cluster_composition(clust, plt),
@@ -290,6 +297,57 @@ def run_all_analyses(checkpoint_path: str | Path,
             results["honesty"] = {"mu_norm_ci": boot}
     except Exception as e:
         print(f"[analysis]   honesty skipped: {e}")
+
+    # ---- 11. Decoder geometry (§4) ----
+    if include_decoder_geometry:
+        try:
+            print(f"[analysis] decoder_geometry (Jacobian on {n_anchors} anchors) ...")
+            # Anchor latents: pick a subset of posterior means. Sampling
+            # a subset instead of the full set keeps the Jacobian cost
+            # bounded — one jacrev call per anchor.
+            rng_anchor = np.random.default_rng(rng_seed + 7)
+            idx = rng_anchor.choice(latent.n,
+                                    size=min(n_anchors, latent.n),
+                                    replace=False)
+            anchors = latent.mu[idx]
+
+            # §4.1 Sensitivity maps.
+            sens = dg.sensitivity_maps(adapter, anchors)
+            results["decoder_geometry"] = {
+                "sensitivity_joint_latent_mean":
+                    float(sens["joint_latent"].mean()),
+                "sensitivity_time_latent_mean":
+                    float(sens["time_latent"].mean()),
+            }
+            _save(_plot_sensitivity_joint_latent(sens["joint_latent"], plt),
+                  "sensitivity_joint_latent.png")
+            _save(_plot_sensitivity_time_latent(sens["time_latent"], plt),
+                  "sensitivity_time_latent.png")
+
+            # §4.2 Measured traversal on the median anchor.
+            if skeleton.bones and skeleton.left_right:
+                z_star = np.median(anchors, axis=0)
+                trav = dg.measured_traversal(adapter, z_star, skeleton,
+                                             steps=traversal_steps)
+                _save(_plot_traversal_displacement(trav, plt),
+                      "traversal_displacement.png")
+                _save(_plot_traversal_laterality(trav, plt),
+                      "traversal_laterality.png")
+                _save(_plot_traversal_bone_stretch(trav, plt),
+                      "traversal_bone_stretch.png")
+                results["decoder_geometry"]["traversal_max_abs_stretch"] = \
+                    float(np.abs(trav["bone_stretch"]).max())
+            else:
+                skipped.append("measured_traversal (skeleton needs bones + left_right)")
+
+            # §4.3 Pullback metric.
+            spec = dg.metric_spectrum(adapter, anchors)
+            results["decoder_geometry"]["mean_condition"] = spec["mean_condition"]
+            _save(_plot_metric_spectrum(spec, plt), "metric_spectrum.png")
+            _save(_plot_condition_hist(spec["condition"], plt),
+                  "metric_condition.png")
+        except Exception as e:
+            print(f"[analysis]   decoder_geometry skipped: {e}")
 
     # ---- Write scalar summary ----
     if skipped:
@@ -436,5 +494,150 @@ def _plot_typicality(scores, video_id, plt):
     ax.set_ylabel("count")
     ax.set_title("Typicality by video")
     ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+# ---- §3.1 / §3.3 additions -------------------------------------------------
+
+def _plot_mmd_summary(mmd, plt):
+    fig, ax = plt.subplots(figsize=(4.5, 3.2))
+    ax.bar(["MMD²(q, p)"], [mmd["mmd2"]], color="steelblue")
+    ax.set_title(f"MMD² = {mmd['mmd2']:.4g}   p = {mmd['p_value']:.3g}\n"
+                 f"bandwidth h = {mmd['bandwidth']:.3g}")
+    ax.axhline(0, color="black", linewidth=0.6)
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    return fig
+
+
+def _plot_bic_curve(clust, plt):
+    ks = sorted(clust["bic"])
+    bics = [clust["bic"][k] for k in ks]
+    fig, ax = plt.subplots(figsize=(5, 3.2))
+    ax.plot(ks, bics, "o-", color="steelblue")
+    ax.axvline(clust["k"], ls=":", color="firebrick",
+               label=f"chosen K = {clust['k']}")
+    ax.set_xlabel("K")
+    ax.set_ylabel("BIC")
+    ax.set_title("GMM model-selection curve")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+# ---- §4.1 decoder Jacobian sensitivity maps --------------------------------
+
+def _plot_sensitivity_joint_latent(M, plt):
+    """Heatmap of averaged joint × latent sensitivity."""
+    fig, ax = plt.subplots(figsize=(max(5, 0.28 * M.shape[1]),
+                                    max(4, 0.14 * M.shape[0])))
+    im = ax.imshow(M, aspect="auto", cmap="viridis")
+    ax.set_xlabel("latent dimension")
+    ax.set_ylabel("joint index")
+    ax.set_title(r"Sensitivity $S_{j,i}$ — which latents move which joints")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_sensitivity_time_latent(M, plt):
+    """Heatmap of averaged time × latent sensitivity."""
+    fig, ax = plt.subplots(figsize=(max(5, 0.28 * M.shape[1]), 3.6))
+    im = ax.imshow(M, aspect="auto", cmap="viridis", origin="lower")
+    ax.set_xlabel("latent dimension")
+    ax.set_ylabel("frame")
+    ax.set_title(r"Sensitivity $R_{t,i}$ — when in the clip each latent acts")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+# ---- §4.2 measured traversal ----------------------------------------------
+
+def _plot_traversal_displacement(trav, plt):
+    """Heatmap of dim × step displacement, aggregated over joints."""
+    # displacement (d_z, n_steps, J) -> take the L2 norm across joints
+    # so each cell is the total per-joint drift under that traversal.
+    disp = np.linalg.norm(trav["displacement"], axis=2)  # (d_z, n_steps)
+    fig, ax = plt.subplots(figsize=(max(5, 0.6 * disp.shape[1]),
+                                    max(4, 0.14 * disp.shape[0])))
+    im = ax.imshow(disp, aspect="auto", cmap="magma")
+    ax.set_xticks(np.arange(len(trav["steps"])))
+    ax.set_xticklabels([f"{s:+g}" for s in trav["steps"]])
+    ax.set_xlabel(r"traversal offset $\alpha$")
+    ax.set_ylabel("latent dimension")
+    ax.set_title(r"Traversal displacement $\|\Delta p_{j,i}(\alpha)\|_2$")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_traversal_laterality(trav, plt):
+    """Heatmap of dim × step laterality, aggregated over left-right pairs."""
+    # laterality (d_z, n_steps, n_pairs) -> mean over pairs.
+    lat = trav["laterality"].mean(axis=2)             # (d_z, n_steps)
+    m = float(np.abs(lat).max()) or 1.0
+    fig, ax = plt.subplots(figsize=(max(5, 0.6 * lat.shape[1]),
+                                    max(4, 0.14 * lat.shape[0])))
+    im = ax.imshow(lat, aspect="auto", cmap="RdBu_r", vmin=-m, vmax=m)
+    ax.set_xticks(np.arange(len(trav["steps"])))
+    ax.set_xticklabels([f"{s:+g}" for s in trav["steps"]])
+    ax.set_xlabel(r"traversal offset $\alpha$")
+    ax.set_ylabel("latent dimension")
+    ax.set_title(r"Traversal laterality $\ell_i(\alpha)$ (left − right)")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_traversal_bone_stretch(trav, plt):
+    """Heatmap of dim × step bone stretch — max over bones."""
+    # bone_stretch (d_z, n_steps, n_bones) -> max abs over bones.
+    stretch = np.abs(trav["bone_stretch"]).max(axis=2)  # (d_z, n_steps)
+    fig, ax = plt.subplots(figsize=(max(5, 0.6 * stretch.shape[1]),
+                                    max(4, 0.14 * stretch.shape[0])))
+    im = ax.imshow(stretch, aspect="auto", cmap="magma")
+    ax.set_xticks(np.arange(len(trav["steps"])))
+    ax.set_xticklabels([f"{s:+g}" for s in trav["steps"]])
+    ax.set_xlabel(r"traversal offset $\alpha$")
+    ax.set_ylabel("latent dimension")
+    ax.set_title(r"Max bone stretch $|\Delta b_{jk,i}(\alpha)|$ — anatomy check")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+# ---- §4.3 pullback metric --------------------------------------------------
+
+def _plot_metric_spectrum(spec, plt):
+    """Sorted eigenvalue spectrum of G(z), averaged over anchors."""
+    eig = spec["eigenvalues"]                            # (A, d_z)
+    order = np.argsort(-eig.mean(axis=0))
+    sorted_mean = np.sort(eig, axis=1)[:, ::-1]
+    mean_curve = sorted_mean.mean(axis=0)
+    fig, ax = plt.subplots(figsize=(6, 3.6))
+    ax.plot(np.arange(1, len(mean_curve) + 1), mean_curve,
+            "o-", color="steelblue")
+    ax.set_yscale("log")
+    ax.set_xlabel("eigenvalue rank")
+    ax.set_ylabel(r"$\lambda(G(z))$")
+    ax.set_title(r"Pullback-metric spectrum "
+                 f"(mean cond = {spec['mean_condition']:.2g})")
+    ax.grid(True, alpha=0.3, which="both")
+    fig.tight_layout()
+    return fig
+
+
+def _plot_condition_hist(conds, plt):
+    fig, ax = plt.subplots(figsize=(5, 3.2))
+    ax.hist(conds[np.isfinite(conds)], bins=15, color="steelblue")
+    ax.axvline(10, ls=":", color="firebrick",
+               label="threshold = 10")
+    ax.set_xlabel(r"condition number of $G(z)$")
+    ax.set_ylabel("anchor count")
+    ax.set_title("Local anisotropy across anchors")
+    ax.legend()
     fig.tight_layout()
     return fig

@@ -1,16 +1,44 @@
-"""Driver: run a curated set of latent-space analyses on one checkpoint.
+"""Driver: run every latent-space analysis in the toolkit on one checkpoint.
 
 `run_all_analyses(checkpoint_path, videos, skeleton, out_dir)` loads a
 trained model with `architectures.analyze.load_checkpoint`, encodes the
-validation split with `encode_dataset`, runs the core analyses (the
-ones that need only NumPy, SciPy, and scikit-learn), writes a
-`results.json` of scalar summaries, and renders a small set of
-diagnostic plots to PNG.
+validation split with `encode_dataset`, and runs the full set of
+analyses from the vae_analysis modules — one call per §:
 
-The Jacobian tools (encoder/decoder geometry) and the optional-package
-paths (persistent homology, hidden Markov model, PELT) are not touched
-here — call them yourself from a notebook once the core report tells
-you the model is worth the deeper look.
+    §3.1  posterior_geometry.mmd_prior_test
+    §3.2  posterior_geometry.intrinsic_dimension_twonn
+    §3.3  posterior_geometry.cluster_structure
+    §4.1  decoder_geometry.sensitivity_maps
+    §4.2  decoder_geometry.measured_traversal
+    §4.3  decoder_geometry.pullback_metric / metric_spectrum
+    §17   decoder_geometry.geodesic / path_curvature
+    §5    features.kinematic_features / feature_regression /
+          canonical_correlation
+    §6    masking.mask_jitter / latent_recovery / split_mpjpe
+    §7,§22 dynamics.encode_video / change_points / hmm_states /
+           ou_process
+    §8    generation.bone_plausibility / frechet_distance /
+          interpolation_curvature
+    §9,§19 information.tc_decomposition / active_units
+    §12   honesty.block_bootstrap / permutation_between_videos
+    §14   encoder_geometry.encoder_sensitivity_map / precision_spectrum /
+          read_write_mismatch
+    §15   symmetry.fit_equivariance / laterality_subspace /
+          asymmetry_score
+    §16   disentanglement.mig / sap / dci / selectivity
+    §18   two_sample.persistent_homology
+    §20   two_sample.classifier_two_sample
+    §21   screening.fit_density / typicality_score / screening_auc
+
+Skipped by design (no meaningful single-run application):
+
+    §19   information.rate_distortion_curve — needs many checkpoints.
+    §23   screening.attention_entropy / selected_frames — need the
+          transformer's raw attention weights, which our TransformerVAE
+          does not currently expose.
+
+Optional-package analyses (ripser, hmmlearn, ruptures) run when the
+package is installed and skip cleanly when it is not.
 """
 
 from __future__ import annotations
@@ -54,8 +82,13 @@ def run_all_analyses(checkpoint_path: str | Path,
                      n_perm: int = 200,
                      rng_seed: int = 0,
                      include_decoder_geometry: bool = True,
+                     include_encoder_geometry: bool = True,
+                     include_dynamics: bool = True,
+                     include_persistent_homology: bool = True,
                      n_anchors: int = 16,
+                     n_jacobian_clips: int = 8,
                      traversal_steps: tuple[float, ...] = (-3, -2, -1, 0, 1, 2, 3),
+                     clinical_labels: np.ndarray | None = None,
                      ) -> dict:
     """Run the core latent-space analyses on one checkpoint.
 
@@ -92,7 +125,8 @@ def run_all_analyses(checkpoint_path: str | Path,
     from . import (posterior_geometry as pg, features as ft, masking as mk,
                    information as inf, symmetry as sym, disentanglement as dis,
                    two_sample as ts, screening as scr, honesty as hon,
-                   generation as gen, decoder_geometry as dg)
+                   generation as gen, decoder_geometry as dg,
+                   encoder_geometry as eg, dynamics as dyn)
 
     plt = _import_matplotlib()
     rng = np.random.default_rng(rng_seed)
@@ -204,6 +238,20 @@ def run_all_analyses(checkpoint_path: str | Path,
             results["disentanglement"] = {"mig": mig["mig"], "sap": sap["sap"]}
         _save(_plot_disentanglement_scores(results["disentanglement"], plt),
               "disentanglement_scores.png")
+
+        # §16.4 selectivity control. Use GMM cluster labels as pseudo
+        # "behavioural states" when actual state labels aren't
+        # available — shuffling within a state keeps its marginal but
+        # kills the true feature relation.
+        try:
+            state_labels = clust["model"].predict(latent.mu) \
+                if "model" in clust else np.zeros(latent.n, dtype=int)
+            sel = dis.selectivity(latent, feats, state_labels,
+                                  score_fn=dis.mig, rng=rng)
+            results["disentanglement"]["selectivity_mig"] = sel["selectivity"]
+            results["disentanglement"]["selectivity_control"] = sel["control"]
+        except Exception as e:
+            print(f"[analysis]   selectivity skipped: {e}")
     else:
         skipped.append("features / disentanglement (Skeleton has no limbs)")
 
@@ -220,6 +268,15 @@ def run_all_analyses(checkpoint_path: str | Path,
     X_hat = adapter.decode(latent.z)
     split = mk.split_mpjpe(X_val, X_hat, M_val)
     results.setdefault("masking", {})["split_mpjpe"] = split
+
+    # §6.1 mask_jitter — dispersion of a clip's latent under repeated
+    # mask draws. Ratio near one means the mask, not the pose, sets the
+    # latent; below 0.1 is the target.
+    n_jitter = min(64, len(X_val))
+    sampler = mk.uniform_sampler(config.mask_rho)
+    jitter = mk.mask_jitter(adapter, X_val[:n_jitter], sampler, k=16,
+                            rng=rng)
+    results["masking"]["mask_jitter_ratio"] = jitter["ratio"]
 
     # ---- 6. Symmetry (II §15) — needs left_right pairs. ----
     if skeleton.left_right:
@@ -262,7 +319,23 @@ def run_all_analyses(checkpoint_path: str | Path,
     # ---- 8. Two-sample q(z) vs p(z) (II §20) ----
     print("[analysis] classifier two-sample ...")
     c2st = ts.classifier_two_sample(latent, rng=rng)
-    results["two_sample"] = {"c2st_accuracy": c2st["accuracy"]}
+    results["two_sample"] = {
+        "c2st_accuracy": c2st["accuracy"],
+        "c2st_auc":      c2st["auc"],
+        "c2st_p_value":  c2st["p_value"],
+    }
+
+    # §18 persistent homology — expensive; opt-in and dependency-guarded.
+    if include_persistent_homology:
+        try:
+            print("[analysis] persistent homology (ripser) ...")
+            ph = ts.persistent_homology(latent.mu[:min(600, latent.n)],
+                                        max_dim=1, n_bootstrap=25, rng=rng)
+            results["two_sample"]["persistence_band_width"] = ph["band_width"]
+            _save(_plot_persistence(ph["diagrams"], plt),
+                  "persistence_diagrams.png")
+        except Exception as e:
+            print(f"[analysis]   persistent_homology skipped: {e}")
 
     # ---- 9. Screening / typicality (II §21) ----
     print("[analysis] screening ...")
@@ -276,6 +349,15 @@ def run_all_analyses(checkpoint_path: str | Path,
         if latent.video_id is not None:
             _save(_plot_typicality(scores, latent.video_id, plt),
                   "typicality_scores.png")
+        # §21 AUC against caller-supplied clinical labels.
+        if clinical_labels is not None:
+            labels = np.asarray(clinical_labels)
+            if labels.shape[0] == latent.n:
+                results["screening"]["screening_auc"] = \
+                    scr.screening_auc(scores, labels)
+            else:
+                print(f"[analysis]   screening_auc skipped: "
+                      f"labels shape {labels.shape} != {latent.n}")
     except Exception as e:
         print(f"[analysis]   screening skipped: {e}")
 
@@ -295,6 +377,19 @@ def run_all_analyses(checkpoint_path: str | Path,
             per_clip = np.linalg.norm(latent.mu, axis=1)
             boot = hon.block_bootstrap(per_clip, blocks, n_boot=200, rng=rng)
             results["honesty"] = {"mu_norm_ci": boot}
+
+        # §12 permutation test needs exactly two videos.
+        if latent.video_id is not None and len(np.unique(latent.video_id)) == 2:
+            stat_perm = (sym.asymmetry_score(latent,
+                                             sym.laterality_subspace(
+                                                 sym.fit_equivariance(
+                                                     adapter, X_val, M_val,
+                                                     skeleton)["A"])["projector"])
+                         if skeleton.left_right
+                         else np.linalg.norm(latent.mu, axis=1))
+            perm = hon.permutation_between_videos(stat_perm, latent.video_id,
+                                                  blocks, n_perm=200, rng=rng)
+            results["honesty"]["between_video_perm"] = perm
     except Exception as e:
         print(f"[analysis]   honesty skipped: {e}")
 
@@ -346,8 +441,104 @@ def run_all_analyses(checkpoint_path: str | Path,
             _save(_plot_metric_spectrum(spec, plt), "metric_spectrum.png")
             _save(_plot_condition_hist(spec["condition"], plt),
                   "metric_condition.png")
+
+            # §17 geodesic — walk between two anchors under the metric
+            # and compare its decoded curvature to the straight-line
+            # interpolant. Ratio > 1 = the geodesic is *smoother* in
+            # pose space than the naive linear path.
+            try:
+                a, b = anchors[0], anchors[-1]
+                path_line = np.linspace(a, b, 16)
+                path_geo = dg.geodesic(adapter, a, b, n_points=16,
+                                       n_iter=80, step=5e-3)
+                c_line = dg.path_curvature(adapter, path_line)
+                c_geo = dg.path_curvature(adapter, path_geo)
+                results["decoder_geometry"]["path_curvature_line"] = c_line
+                results["decoder_geometry"]["path_curvature_geodesic"] = c_geo
+                results["decoder_geometry"]["geodesic_smoothness_ratio"] = \
+                    c_line / (c_geo + 1e-12)
+            except Exception as e:
+                print(f"[analysis]   geodesic skipped: {e}")
         except Exception as e:
             print(f"[analysis]   decoder_geometry skipped: {e}")
+
+    # ---- 12. Encoder geometry (II §14) ----
+    if include_encoder_geometry:
+        try:
+            print(f"[analysis] encoder_geometry (Jacobian on "
+                  f"{n_jacobian_clips} clips) ...")
+            n_clips_jac = min(n_jacobian_clips, len(X_val))
+            read_map = eg.encoder_sensitivity_map(
+                adapter, X_val[:n_clips_jac], M_val[:n_clips_jac],
+            )                                          # (d_z, J)
+            prec = eg.precision_spectrum(latent)
+            results["encoder_geometry"] = {
+                "n_live_units": prec["n_live"],
+                "d_z": latent.d_z,
+                "read_map_mean": float(read_map.mean()),
+            }
+            _save(_plot_encoder_sensitivity(read_map, plt),
+                  "encoder_sensitivity.png")
+            _save(_plot_precision_spectrum(prec, plt),
+                  "precision_spectrum.png")
+
+            # Read/write mismatch — we need the joint × latent decoder
+            # map from §4.1 too. Compute a small one if it isn't already
+            # in scope.
+            if include_decoder_geometry and "decoder_geometry" in results:
+                write_map = dg.sensitivity_maps(adapter, anchors)["joint_latent"]
+                mismatch = eg.read_write_mismatch(read_map, write_map.T)
+                results["encoder_geometry"]["mismatch_mean"] = \
+                    float(mismatch.mean())
+                _save(_plot_read_write_mismatch(mismatch, plt),
+                      "read_write_mismatch.png")
+        except Exception as e:
+            print(f"[analysis]   encoder_geometry skipped: {e}")
+
+    # ---- 13. Between-clip dynamics (§7 / II §22) ----
+    if include_dynamics and videos:
+        try:
+            print("[analysis] dynamics (sliding-window trajectory) ...")
+            # Pick the longest video and encode it with non-overlapping
+            # windows — overlap inflates change-point counts.
+            longest = max(range(len(videos)), key=lambda i: len(videos[i]))
+            v = videos[longest]
+            if len(v) >= config.clip_length:
+                # Encode without masking so the trajectory reflects the
+                # pose signal, not the masking noise.
+                traj = dyn.encode_video(adapter, v,
+                                        window=config.clip_length,
+                                        stride=config.clip_length)
+                cps = dyn.change_points(traj, penalty=10.0)
+                stride_s = config.clip_length / float(config.fps)
+                ou = dyn.ou_process(traj, stride_seconds=stride_s)
+                results["dynamics"] = {
+                    "n_windows": int(traj.shape[0]),
+                    "n_segments": cps["n_segments"],
+                    "ou_timescales_seconds":
+                        ou["timescales_seconds"].tolist(),
+                }
+                _save(_plot_dynamics_trajectory(traj, cps, plt),
+                      "dynamics_trajectory.png")
+                _save(_plot_ou_timescales(ou["timescales_seconds"], plt),
+                      "dynamics_ou_timescales.png")
+
+                # Optional HMM.
+                try:
+                    hmm = dyn.hmm_states(traj,
+                                         stride_seconds=stride_s)
+                    results["dynamics"]["hmm_k"] = hmm["k"]
+                    results["dynamics"]["hmm_dwell_seconds"] = \
+                        hmm["dwell_seconds"].tolist()
+                    _save(_plot_hmm_states(traj, hmm, plt),
+                          "dynamics_hmm_states.png")
+                except Exception as e:
+                    print(f"[analysis]   HMM skipped: {e}")
+            else:
+                skipped.append(f"dynamics (longest video is {len(v)} < "
+                               f"clip_length {config.clip_length})")
+        except Exception as e:
+            print(f"[analysis]   dynamics skipped: {e}")
 
     # ---- Write scalar summary ----
     if skipped:
@@ -639,5 +830,130 @@ def _plot_condition_hist(conds, plt):
     ax.set_ylabel("anchor count")
     ax.set_title("Local anisotropy across anchors")
     ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+# ---- §14 encoder geometry --------------------------------------------------
+
+def _plot_encoder_sensitivity(read_map, plt):
+    """Heatmap of the encoder read map — d_z × J."""
+    fig, ax = plt.subplots(figsize=(max(5, 0.3 * read_map.shape[1]),
+                                    max(4, 0.14 * read_map.shape[0])))
+    im = ax.imshow(read_map, aspect="auto", cmap="viridis")
+    ax.set_xlabel("joint index")
+    ax.set_ylabel("latent dimension")
+    ax.set_title("Encoder sensitivity — which joints each latent reads")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_precision_spectrum(prec, plt):
+    v = prec["precision"]
+    fig, ax = plt.subplots(figsize=(max(6, 0.28 * len(v)), 3.4))
+    ax.bar(np.arange(len(v)), v,
+           color=["seagreen" if x > 2.0 else "lightgray" for x in v])
+    ax.axhline(2.0, ls=":", color="firebrick", label="live threshold")
+    ax.set_yscale("log")
+    ax.set_xlabel("latent dim (sorted by precision)")
+    ax.set_ylabel(r"mean $1/\sigma^2_d$")
+    ax.set_title(f"Posterior precision spectrum — {prec['n_live']} live dims")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y", which="both")
+    fig.tight_layout()
+    return fig
+
+
+def _plot_read_write_mismatch(mismatch, plt):
+    fig, ax = plt.subplots(figsize=(max(5, 0.3 * mismatch.shape[1]),
+                                    max(4, 0.14 * mismatch.shape[0])))
+    im = ax.imshow(mismatch, aspect="auto", cmap="magma")
+    ax.set_xlabel("joint index")
+    ax.set_ylabel("latent dimension")
+    ax.set_title("Read/write mismatch — bright cells "
+                 "= correlation-carried joints")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+# ---- §7 / §22 dynamics -----------------------------------------------------
+
+def _plot_dynamics_trajectory(traj, cps, plt):
+    """First-two PCA of the outer trajectory, with change points marked."""
+    T = traj.shape[0]
+    tc = traj - traj.mean(axis=0, keepdims=True)
+    U, S, Vt = np.linalg.svd(tc, full_matrices=False)
+    proj = tc @ Vt[:min(2, tc.shape[1])].T                 # (T, ≤2)
+    fig, ax = plt.subplots(figsize=(7, 3.6))
+    ax.plot(np.arange(T), proj[:, 0], "-", color="steelblue",
+            label="PC1")
+    if proj.shape[1] > 1:
+        ax.plot(np.arange(T), proj[:, 1], "-", color="tomato",
+                label="PC2")
+    for b in cps["breaks"][:-1]:
+        ax.axvline(b, ls=":", color="black", alpha=0.6)
+    ax.set_xlabel("window index")
+    ax.set_ylabel("PC coordinate")
+    ax.set_title(f"Outer trajectory — {cps['n_segments']} segments "
+                 "(dashed = change points)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_ou_timescales(ts_s, plt):
+    fig, ax = plt.subplots(figsize=(5, 3.4))
+    ax.bar(np.arange(1, len(ts_s) + 1), np.sort(ts_s), color="steelblue")
+    ax.set_yscale("log")
+    ax.set_xlabel("mode rank")
+    ax.set_ylabel("timescale (seconds)")
+    ax.set_title("Ornstein-Uhlenbeck return timescales")
+    ax.grid(True, alpha=0.3, axis="y", which="both")
+    fig.tight_layout()
+    return fig
+
+
+def _plot_hmm_states(traj, hmm, plt):
+    """Trajectory PC1 coloured by predicted HMM state."""
+    tc = traj - traj.mean(axis=0, keepdims=True)
+    Vt = np.linalg.svd(tc, full_matrices=False)[2]
+    pc1 = tc @ Vt[0]
+    fig, ax = plt.subplots(figsize=(7, 3.4))
+    ax.scatter(np.arange(len(pc1)), pc1, c=hmm["states"],
+               cmap="tab10", s=8)
+    ax.set_xlabel("window index")
+    ax.set_ylabel("PC1")
+    ax.set_title(f"HMM segmentation — K = {hmm['k']} states")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+# ---- §18 persistent homology ----------------------------------------------
+
+def _plot_persistence(diagrams, plt):
+    fig, ax = plt.subplots(figsize=(4.5, 4.5))
+    colors = ["steelblue", "tomato", "seagreen"]
+    for d, dgm in enumerate(diagrams):
+        if len(dgm) == 0:
+            continue
+        finite = dgm[np.isfinite(dgm[:, 1])]
+        if len(finite):
+            ax.scatter(finite[:, 0], finite[:, 1],
+                       color=colors[d % len(colors)],
+                       label=f"H{d}", s=18, alpha=0.7)
+    lim_max = max((float(dgm[np.isfinite(dgm[:, 1]), 1].max())
+                   if len(dgm) and np.any(np.isfinite(dgm[:, 1]))
+                   else 0.0)
+                  for dgm in diagrams) or 1.0
+    ax.plot([0, lim_max], [0, lim_max], "k--", linewidth=0.6, alpha=0.5)
+    ax.set_xlabel("birth")
+    ax.set_ylabel("death")
+    ax.set_title("Persistence diagrams")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return fig

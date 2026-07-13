@@ -58,18 +58,23 @@ def build_clips(videos: list[np.ndarray], T: int, stride: int
 
 
 class ClipDataset:
-    """A torch Dataset that yields (clip, mask) pairs.
+    """A torch Dataset that yields (clip, mask) — or (clip, mask, cohort).
 
     The mask is redrawn every access, so a training epoch sees fresh
-    masks even on the same clip.
+    masks even on the same clip. When ``cohort`` ids are supplied the
+    dataset additionally yields the per-clip conditioning id, so the
+    training loop can feed ``c`` to a CVAE / GM-CVAE ([CARE-PD §6]).
     """
 
-    def __init__(self, clips: np.ndarray, mask_policy, seed: int = 0):
+    def __init__(self, clips: np.ndarray, mask_policy, seed: int = 0,
+                 cohort: np.ndarray | None = None):
         """
         Args:
             clips: shape (N, T, J, 3).
             mask_policy: any object with a `sample(T, J, rng)` method.
             seed: seeds the per-clip mask draws.
+            cohort: optional (N,) integer conditioning ids. When given,
+                ``__getitem__`` returns a third element.
         """
         # Import torch lazily so the module loads without torch installed.
         import torch
@@ -80,6 +85,14 @@ class ClipDataset:
         self.rng = np.random.default_rng(seed)
         self.T = clips.shape[1]
         self.J = clips.shape[2]
+        if cohort is not None:
+            cohort = np.asarray(cohort, dtype=np.int64)
+            if len(cohort) != len(clips):
+                raise ValueError(
+                    f"cohort length ({len(cohort)}) must match the clip "
+                    f"count ({len(clips)})."
+                )
+        self.cohort = cohort
 
     def __len__(self) -> int:
         return len(self.clips)
@@ -90,15 +103,23 @@ class ClipDataset:
         # §2.3–2.5]) can compute their scores. Score-free policies
         # ignore it.
         M = self.policy.sample(self.T, self.J, self.rng, X=X)
-        return (self.torch.from_numpy(X),
-                self.torch.from_numpy(M))
+        out = (self.torch.from_numpy(X), self.torch.from_numpy(M))
+        if self.cohort is not None:
+            out = out + (self.torch.tensor(int(self.cohort[i]),
+                                           dtype=self.torch.long),)
+        return out
 
 
 def make_loader(clips: np.ndarray, mask_policy, batch_size: int,
-                shuffle: bool = True, seed: int = 0):
-    """Build a torch DataLoader over the clips."""
+                shuffle: bool = True, seed: int = 0,
+                cohort: np.ndarray | None = None):
+    """Build a torch DataLoader over the clips.
+
+    When ``cohort`` is given each batch is a ``(X, M, c)`` triple with the
+    conditioning ids; otherwise a ``(X, M)`` pair, exactly as before.
+    """
     from torch.utils.data import DataLoader
-    ds = ClipDataset(clips, mask_policy, seed=seed)
+    ds = ClipDataset(clips, mask_policy, seed=seed, cohort=cohort)
     # We keep num_workers at 0 by default. Neonate sets are small and the
     # per-item work is light; workers rarely help and add mask-seeding
     # bookkeeping we do not want.

@@ -148,6 +148,74 @@ of the latent to the prior. Three knobs to fight this:
   `beta_max` and `warmup_epochs` are ignored in this mode; look at
   `beta_trajectory.png` for the curve that actually ran.
 
+## CARE-PD GM-CVAE extension
+
+The stack now carries the CARE-PD Parkinsonian-gait plan on top of the
+neonate recipes: cohort conditioning, a Gaussian-mixture prior, the
+CARE-PD data adapter, and the evaluation battery. All of it is additive —
+with `n_cond=0` and `n_components=0` the config is the original plain VAE
+and the parameter counts are unchanged.
+
+### The four models ([CARE-PD §7])
+
+Two orthogonal switches on `TrainingConfig` select the model class:
+
+| `n_cond` | `n_components` | Model | What it adds |
+|:---:|:---:|:---|:---|
+| 0 | 0 | VAE | reconstruction floor, N(0, I) prior |
+| >0 | 0 | CVAE | cohort embedding e(c) into encoder + decoder, conditioning dropout — strips the nuisance cohort axis |
+| 0 | ≥2 | GM-VAE | K-component mixture prior, EM-trained |
+| >0 | ≥2 | GM-CVAE | the target model: mixture prior **and** cohort conditioning |
+
+```python
+cfg = TrainingConfig(
+    architecture="conv", clip_length=60, n_joints=22, latent_dim=32,
+    n_cond=3, cond_dim=8, cond_dropout=0.15,        # CVAE / GM-CVAE
+    n_components=5, gm_beta_z=1e-2, gm_beta_y=1.0,   # GM-VAE / GM-CVAE
+    gm_em_steps=1, gm_entropy_weight=1.0, gm_entropy_epochs=5,
+    beta_max=1e-2,   # for a GM run beta is the auxiliary N(0,I) regulariser
+)
+out = train(cfg, videos, cohort_per_video=cohort_ids)
+model, mixture = out["model"], out["mixture"]
+```
+
+### How the GM prior is trained ([GM-VAE §3.3])
+
+Following Fan et al., the mixture is trained by an EM-inspired
+block-coordinate scheme rather than gradient descent on the component
+parameters. Each epoch does a normal gradient pass over the
+encoder/decoder with the mixture **frozen**, then an EM M-step over the
+epoch's cached posterior means updates `(pi, mu, sigma^2)` in closed form
+(`GaussianMixturePrior.em_update`). The soft assignment of a latent point
+is the exact posterior `p(c | z)` under the current mixture — there is no
+amortised `q(y|x)` head. Per-component occupancy is logged every epoch
+(`history["gm_occupancy"]`) so component collapse ([CARE-PD §10]) is
+visible from epoch 0; `gm_entropy_weight` adds a decaying entropy bonus to
+counter it.
+
+### Data adapter ([CARE-PD §8], `care_pd.py`)
+
+Maps the HuggingFace `vida-adl/CARE-PD` `h36m/` release (per-cohort
+`.pkl`, 22-joint) into the clip iterator. Preprocessing — resample to a
+common 30 fps, root-centre, walking-direction align — is pure NumPy and
+tested in `test_care_pd_no_torch.py`; windowing is left to `build_clips`.
+`build_bundle` produces `videos`, `cohort_ids`, `subjects`, and `labels`
+aligned by walk; `leave_one_subject_out` / `leave_one_cohort_out` give the
+LOSO / LODO split regimes. The raw-pickle field names live in
+`PklSchema` — override it there if the release keys differ from the
+defaults rather than editing the loader.
+
+### Metrics ([CARE-PD §11], `metrics.py`)
+
+Frozen-latent evaluators, model-agnostic: `site_probe` (§11.1, two-layer
+MLP predicting cohort), `cluster_label_agreement` + `kmeans_labels` /
+`hdbscan_labels` (§11.2, ARI/NMI vs UPDRS / freezer / medication),
+`linear_probe` (§11.3, UPDRS R² and freezer/medication balanced
+accuracy), and `occupancy` (§10). scikit-learn is imported lazily.
+
+`gm_smoke_test.py` trains all four models on synthetic multi-cohort data
+and runs the whole battery — read it as a worked example.
+
 ## Two small warnings
 
 `ClipDataset` redraws masks per access, so a training epoch sees fresh

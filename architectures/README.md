@@ -195,15 +195,22 @@ counter it.
 
 ### Data adapter ([CARE-PD §8], `care_pd.py`)
 
-Maps the HuggingFace `vida-adl/CARE-PD` `h36m/` release (per-cohort
-`.pkl`, 22-joint) into the clip iterator. Preprocessing — resample to a
-common 30 fps, root-centre, walking-direction align — is pure NumPy and
+Maps the HuggingFace `vida-adl/CARE-PD` `h36m/` release into the clip
+iterator. The on-disk layout is one subdirectory per cohort holding
+`.npz` archives (`h36m/BMCLab/h36m_3d_world_*.npz`); each unpickles to the
+nested `{subject_id: {walk_id: record}}` dict of the dataset card, so the
+subject id — needed for LOSO — is read straight off the outer key.
+`load_cohorts` selects the world-coordinate 3D variant and skips the
+camera-projected `world2cam2img` sibling. Preprocessing — resample to a
+common 30 fps (a no-op on the already-30fps release), root-centre,
+walking-direction align (floor is X-Z, so up is Y) — is pure NumPy and
 tested in `test_care_pd_no_torch.py`; windowing is left to `build_clips`.
 `build_bundle` produces `videos`, `cohort_ids`, `subjects`, and `labels`
 aligned by walk; `leave_one_subject_out` / `leave_one_cohort_out` give the
-LOSO / LODO split regimes. The raw-pickle field names live in
-`PklSchema` — override it there if the release keys differ from the
-defaults rather than editing the loader.
+LOSO / LODO split regimes. Record field names (`pose`, `fps`,
+`UPDRS_GAIT`, `medication`, `other`, …) live in `RecordSchema`; every
+non-pose scalar is also passed through raw into `labels`, so FoG/freezer
+status stored in `other` is never dropped.
 
 ### Metrics ([CARE-PD §11], `metrics.py`)
 

@@ -2,12 +2,18 @@
 
 from .conv_vae import ConvVAE
 from .transformer_vae import TransformerVAE
+from .gaussian_mixture import GaussianMixturePrior
 
-__all__ = ["ConvVAE", "TransformerVAE", "build_model"]
+__all__ = ["ConvVAE", "TransformerVAE", "GaussianMixturePrior",
+           "build_model", "build_mixture"]
 
 
 def build_model(config):
-    """Build the model the config asks for."""
+    """Build the model the config asks for.
+
+    Conditioning (``n_cond > 0``) turns the model into a CVAE / GM-CVAE.
+    The mixture prior itself is a separate object — see ``build_mixture``.
+    """
     inpainting = config.recipe == 3
     if config.architecture == "conv":
         return ConvVAE(
@@ -18,6 +24,9 @@ def build_model(config):
             kernels=config.conv_kernel_sizes,
             strides=config.conv_strides,
             inpainting=inpainting,
+            n_cond=config.n_cond,
+            cond_dim=config.cond_dim,
+            cond_dropout=config.cond_dropout,
         )
     if config.architecture == "transformer":
         return TransformerVAE(
@@ -30,5 +39,26 @@ def build_model(config):
             ffn_ratio=config.ffn_ratio,
             dropout=config.dropout,
             inpainting=inpainting,
+            n_cond=config.n_cond,
+            cond_dim=config.cond_dim,
+            cond_dropout=config.cond_dropout,
         )
     raise ValueError(f"unknown architecture: {config.architecture!r}")
+
+
+def build_mixture(config):
+    """Build the Gaussian-mixture prior for a GM run, or None.
+
+    Returns ``None`` when ``config.n_components == 0`` (standard N(0, I)
+    prior). Otherwise a ``GaussianMixturePrior`` with K components over the
+    latent dimension, seeded from ``config.seed`` for reproducibility.
+    """
+    if config.n_components == 0:
+        return None
+    return GaussianMixturePrior(
+        n_components=config.n_components,
+        d_z=config.latent_dim,
+        var_floor=config.gm_var_floor,
+        init_spread=config.gm_init_spread,
+        seed=config.seed,
+    )

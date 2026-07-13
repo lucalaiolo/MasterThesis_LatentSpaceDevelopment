@@ -70,6 +70,51 @@ class TrainingConfig:
             weights the masked-pass reconstruction ([MVAE §4.2]);
             Recipe 3 weights the hidden-only inpainting head ([MVAE §5.2]).
             Ignored for Recipe 1.
+        n_cond: number of conditioning categories for the CVAE arm
+            ([CARE-PD §6]). 0 (default) disables conditioning and gives a
+            plain VAE. Set to the cohort count to condition on cohort. The
+            data iterator must then yield a per-clip integer id in
+            ``[0, n_cond)``.
+        cond_dim: width of the learned conditioning embedding e(c)
+            ([CARE-PD §6], d_c in [4, 16]). Ignored when ``n_cond == 0``.
+        cond_dropout: conditioning-dropout rate ([CARE-PD §6, §10]). With
+            this probability the decoder's e(c) is replaced by zeros during
+            training so the decoder cannot degenerate into one sub-decoder
+            per cohort and must keep using z. Encoder always sees clean
+            e(c) so it can *stop* routing cohort into z. Ignored when
+            ``n_cond == 0``.
+        n_components: K, the number of Gaussian-mixture prior components
+            ([CARE-PD §7.3]). 0 (default) keeps the standard N(0, I) prior.
+            When > 0 the run trains a GM-VAE (or GM-CVAE if ``n_cond > 0``)
+            with the EM-inspired block-coordinate scheme of [GM-VAE §3.3].
+        gm_beta_z: weight on the mixture KL E_q(y)[KL(q(z|x) || p(z|y))]
+            (the plan's beta_z, [CARE-PD §7.3]). Ignored when
+            ``n_components == 0``.
+        gm_beta_y: weight on the categorical KL KL(q(y|x) || p(y))
+            (the plan's beta_y). Ignored when ``n_components == 0``.
+        gm_em_steps: number of EM iterations run over the cached epoch
+            latents to refresh the mixture parameters after each gradient
+            epoch ([GM-VAE Alg. 1], the N_EM inner loop). Ignored when
+            ``n_components == 0``.
+        gm_var_floor: lower clamp on the per-component variances during the
+            EM M-step, guarding against a component collapsing onto a
+            single point. Ignored when ``n_components == 0``.
+        gm_init_spread: standard deviation used to scatter the initial
+            component means, so components start distinguishable rather
+            than all at the origin. Ignored when ``n_components == 0``.
+        gm_entropy_weight: initial weight of an entropy bonus on the soft
+            assignments q(y|x), decayed linearly to zero over
+            ``gm_entropy_epochs`` ([CARE-PD §10], component-collapse
+            mitigation). Rewards near-uniform assignments early so no
+            component dies before the latent has organised. Ignored when
+            ``n_components == 0``.
+        gm_entropy_epochs: number of epochs over which the entropy bonus
+            decays to zero. Ignored when ``n_components == 0``.
+        beta_max / warmup_epochs (GM runs): for a GM run the beta schedule
+            drives the auxiliary KL(q(z|x) || N(0, I)) regulariser that
+            [GM-VAE §3.3, Alg. 1] adds on top of the mixture terms to keep
+            the manifold well-conditioned. Keep it small (e.g. 1e-2) or
+            zero it out; the mixture KL does the main regularising.
         mask_policy: one of "none", "uniform", "top_k_speed",
             "softmax_speed", "per_frame_speed", "limb". See
             `mask_policies.py` for the definitions ([MVAE §2]).
@@ -123,6 +168,22 @@ class TrainingConfig:
     recipe: Literal[1, 2, 3] = 1
     lambda_aux: float = 1.0
 
+    # Conditioning (CVAE / GM-CVAE arm, [CARE-PD §6]).
+    n_cond: int = 0
+    cond_dim: int = 8
+    cond_dropout: float = 0.15
+
+    # Gaussian-mixture prior (GM-VAE / GM-CVAE arm, [CARE-PD §7.3],
+    # trained with the EM scheme of [GM-VAE §3.3]).
+    n_components: int = 0
+    gm_beta_z: float = 1.0
+    gm_beta_y: float = 1.0
+    gm_em_steps: int = 1
+    gm_var_floor: float = 1e-4
+    gm_init_spread: float = 1.0
+    gm_entropy_weight: float = 0.0
+    gm_entropy_epochs: int = 5
+
     # Masking.
     mask_policy: Literal["none", "uniform", "top_k_speed",
                          "softmax_speed", "per_frame_speed",
@@ -163,4 +224,28 @@ class TrainingConfig:
                 f"Recipe {self.recipe} needs a mask policy; set 'uniform' or 'limb'. "
                 f"Recipe 2's auxiliary pass and Recipe 3's inpainting head "
                 f"both require joints to be hidden."
+            )
+        if self.n_cond < 0:
+            raise ValueError(f"n_cond ({self.n_cond}) must be >= 0.")
+        if self.n_cond > 0 and self.cond_dim <= 0:
+            raise ValueError(
+                f"cond_dim ({self.cond_dim}) must be positive when "
+                f"conditioning is enabled (n_cond={self.n_cond})."
+            )
+        if not 0.0 <= self.cond_dropout < 1.0:
+            raise ValueError(
+                f"cond_dropout ({self.cond_dropout}) must be in [0, 1)."
+            )
+        if self.n_components < 0:
+            raise ValueError(
+                f"n_components ({self.n_components}) must be >= 0."
+            )
+        if self.n_components == 1:
+            raise ValueError(
+                "n_components == 1 is a plain VAE with a shifted prior; set "
+                "0 for the N(0, I) prior or >= 2 for a real mixture."
+            )
+        if self.n_components > 0 and self.gm_em_steps < 1:
+            raise ValueError(
+                f"gm_em_steps ({self.gm_em_steps}) must be >= 1 for a GM run."
             )

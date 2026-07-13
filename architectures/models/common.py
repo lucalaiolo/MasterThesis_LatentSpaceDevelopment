@@ -98,3 +98,55 @@ class BottleneckHeads(nn.Module):
 
     def forward(self, h):
         return self.mu(h), self.logvar(h)
+
+
+class ConditioningEmbedding(nn.Module):
+    """Learned embedding e(c) of a discrete conditioning variable ([CARE-PD §6]).
+
+    Maps an integer id in ``[0, n_cond)`` to a ``cond_dim`` vector that is
+    concatenated into both the encoder's pooled representation and the
+    decoder's latent input. The embedding is shared across the two
+    injection points so ``c`` means the same thing on both sides.
+
+    Conditioning dropout ([CARE-PD §6, §10]) is applied *only on the
+    decoder path* and *only in training*: with probability ``dropout`` the
+    whole embedding is zeroed for a sample, forcing the decoder to keep
+    reconstructing from ``z`` alone rather than degenerating into one
+    sub-decoder per cohort. The encoder always sees the clean embedding so
+    it can learn to *stop* routing cohort information into ``z``.
+    """
+
+    def __init__(self, n_cond: int, cond_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.n_cond = n_cond
+        self.cond_dim = cond_dim
+        self.dropout = dropout
+        self.embed = nn.Embedding(n_cond, cond_dim)
+        nn.init.normal_(self.embed.weight, std=0.02)
+
+    def _resolve(self, c, batch_size: int, device):
+        """Return a valid long tensor of ids, defaulting to zeros.
+
+        ``c`` may be None (analysis / traversal code that decodes without a
+        cohort) — then the zero id is used, matching the dropped-embedding
+        signal the decoder already learned to tolerate.
+        """
+        if c is None:
+            return torch.zeros(batch_size, dtype=torch.long, device=device)
+        if not torch.is_tensor(c):
+            c = torch.as_tensor(c, device=device)
+        return c.to(device=device, dtype=torch.long).reshape(batch_size)
+
+    def encoder_vector(self, c, batch_size: int, device):
+        """Clean embedding for the encoder path (no dropout)."""
+        ids = self._resolve(c, batch_size, device)
+        return self.embed(ids)
+
+    def decoder_vector(self, c, batch_size: int, device, training: bool):
+        """Embedding for the decoder path, with conditioning dropout."""
+        ids = self._resolve(c, batch_size, device)
+        e = self.embed(ids)
+        if training and self.dropout > 0.0:
+            keep = (torch.rand(batch_size, device=device) >= self.dropout)
+            e = e * keep.unsqueeze(1).to(e.dtype)
+        return e

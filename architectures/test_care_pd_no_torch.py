@@ -6,6 +6,9 @@ direction alignment, fps resampling, windowing — plus the bundle and
 split helpers. Run with ``python -m architectures.test_care_pd_no_torch``.
 """
 
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 from architectures.care_pd import (
@@ -13,6 +16,7 @@ from architectures.care_pd import (
     preprocess_walk, cohort_index, tier_cohorts,
     Walk, build_bundle, subset,
     leave_one_subject_out, leave_one_cohort_out,
+    load_cohort, load_cohorts,
     TIER1_COHORTS, TIER2_COHORTS,
 )
 
@@ -146,6 +150,61 @@ def test_splits():
     print("ok  splits (LOSO / LODO / subset)")
 
 
+def _fake_care_pd_blob(seed=7):
+    """Build the nested {subject: {walk: record}} dict of the real release."""
+    rng = np.random.default_rng(seed)
+    blob = {}
+    for subj in ("SUBJ_A", "SUBJ_B"):
+        walks = {}
+        for w in range(2):
+            F = 80
+            pose = rng.standard_normal((F, 22, 3)).astype(np.float32)
+            pose[:, 0, 0] += np.linspace(0, 2, F)  # travel in +x
+            walks[f"walk_{w}"] = {
+                "pose": pose,
+                "trans": rng.standard_normal((F, 3)).astype(np.float32),
+                "beta": np.zeros(10, dtype=np.float32),
+                "fps": 30,
+                "UPDRS_GAIT": (w % 4),
+                "medication": "ON" if w == 0 else "OFF",
+                "other": None,
+            }
+        blob[subj] = walks
+    return blob
+
+
+def test_load_npz_nested_structure():
+    # Save the nested dict as CARE-PD-style .npz and read it back.
+    blob = _fake_care_pd_blob()
+    with tempfile.TemporaryDirectory() as d:
+        cohort_dir = Path(d) / "BMCLab"
+        cohort_dir.mkdir()
+        npz = cohort_dir / "h36m_3d_world_floorXZZplus_30f_or_longer.npz"
+        # Also drop the camera-projected sibling the loader must skip.
+        cam = cohort_dir / "h36m_3d_world2cam2img_sideright_30f_or_longer.npz"
+        np.savez(npz, data=np.array(blob, dtype=object))
+        np.savez(cam, data=np.array({"X": np.zeros((1, 22, 3))}, dtype=object))
+
+        walks = load_cohort(npz, "BMCLab")
+        assert len(walks) == 4, f"2 subjects x 2 walks, got {len(walks)}"
+        # Subject id comes from the OUTER key.
+        assert {w.subject for w in walks} == {"SUBJ_A", "SUBJ_B"}
+        # Labels parsed with standardised aliases + raw passthrough.
+        w0 = next(w for w in walks if w.labels.get("medication") == "ON")
+        assert w0.labels["med"] == "ON"
+        assert "updrs_gait" in w0.labels and "UPDRS_GAIT" in w0.labels
+        # Preprocessing applied: root centred.
+        assert np.allclose(walks[0].pose[:, 0], 0.0, atol=1e-5)
+
+        # load_cohorts picks the world variant, not world2cam2img.
+        walks2 = load_cohorts(d, ["BMCLab"])
+        assert len(walks2) == 4
+        b = build_bundle(walks2, cohorts=("BMCLab",))
+        folds = list(leave_one_subject_out(b, cohort="BMCLab"))
+        assert {name for name, _, _ in folds} == {"SUBJ_A", "SUBJ_B"}
+    print("ok  load_cohort (nested .npz, outer-key subject, variant select)")
+
+
 def main():
     test_root_center()
     test_align_direction_sends_travel_to_plus_x()
@@ -156,6 +215,7 @@ def main():
     test_cohort_index_and_tiers()
     test_build_bundle()
     test_splits()
+    test_load_npz_nested_structure()
     print("\n=== all CARE-PD preprocessing tests passed ===")
 
 

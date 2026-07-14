@@ -232,6 +232,31 @@ def _save_ckpt(path, model, mixture, config, epoch):
     torch.save(blob, path)
 
 
+def _kl_warmup_factor(config, epoch: int) -> float:
+    """A [0, 1] ramp for the mixture KL, matching the beta schedule shape.
+
+    Reproduces the "learn first, apply KL later" recipe for the GM terms:
+    0 during a ``delayed_warmup`` delay, then a linear ramp to 1 over
+    ``warmup_epochs`` (or a plain 0->1 ramp in ``warmup`` mode). Returns 1
+    when warm-up is disabled or in ``computed`` mode. Unlike ``beta`` this
+    is a pure fraction, so ``gm_beta_z`` / ``gm_beta_y`` reach their full
+    configured strength rather than being scaled by ``beta_max``.
+    """
+    if not config.gm_kl_warmup:
+        return 1.0
+    if config.beta_mode == "delayed_warmup":
+        if epoch < config.delay_epochs:
+            return 0.0
+        if config.warmup_epochs <= 0:
+            return 1.0
+        return min(1.0, (epoch - config.delay_epochs) / config.warmup_epochs)
+    if config.beta_mode == "warmup":
+        if config.warmup_epochs <= 0:
+            return 1.0
+        return min(1.0, epoch / config.warmup_epochs)
+    return 1.0
+
+
 def _entropy_weight(config, epoch: int) -> float:
     """Decaying weight of the assignment-entropy bonus ([CARE-PD §10]).
 
@@ -454,7 +479,11 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
         kl_z = mixture.kl_z_given_y(mu, logvar, resp).mean()
         kl_y = mixture.kl_y(resp).mean()
         entropy = mixture.assignment_entropy(resp).mean()
-        loss = loss + config.gm_beta_z * kl_z + config.gm_beta_y * kl_y
+        # Ramp the mixture KL by the same warm-up shape as beta, so the
+        # "learn first" delay covers the mixture terms too ([GM-VAE §6]).
+        kl_ramp = _kl_warmup_factor(config, epoch)
+        loss = loss + kl_ramp * (config.gm_beta_z * kl_z
+                                 + config.gm_beta_y * kl_y)
         if entropy_weight > 0:
             loss = loss - entropy_weight * entropy
 

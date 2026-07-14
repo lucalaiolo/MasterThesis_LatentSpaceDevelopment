@@ -110,6 +110,15 @@ class TrainingConfig:
             ``n_components == 0``.
         gm_entropy_epochs: number of epochs over which the entropy bonus
             decays to zero. Ignored when ``n_components == 0``.
+        gm_kl_warmup: when True (default), the mixture KL terms (gm_beta_z,
+            gm_beta_y) are ramped by the *same* [0, 1] warm-up shape as the
+            beta schedule — held at 0 during a ``delayed_warmup`` delay,
+            then ramped over ``warmup_epochs``. This lets the "learn to use
+            the latent first, apply KL pressure later" recipe cover the
+            mixture terms too, not just the N(0, I) regulariser, and echoes
+            the brief pre-training phase of [GM-VAE §6]. Set False to hold
+            the mixture KL at full strength from epoch 0. Ignored when
+            ``n_components == 0``.
         beta_max / warmup_epochs (GM runs): for a GM run the beta schedule
             drives the auxiliary KL(q(z|x) || N(0, I)) regulariser that
             [GM-VAE §3.3, Alg. 1] adds on top of the mixture terms to keep
@@ -183,6 +192,7 @@ class TrainingConfig:
     gm_init_spread: float = 1.0
     gm_entropy_weight: float = 0.0
     gm_entropy_epochs: int = 5
+    gm_kl_warmup: bool = True
 
     # Masking.
     mask_policy: Literal["none", "uniform", "top_k_speed",

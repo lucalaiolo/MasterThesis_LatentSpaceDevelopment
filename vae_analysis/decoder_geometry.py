@@ -37,8 +37,8 @@ def decoder_jacobian(model, z: np.ndarray):
     from torch.func import jacrev
 
     z_t = torch.as_tensor(z, dtype=torch.float32)
-    J = jacrev(model.decode_torch)(z_t)  # (T, J, 3, d_z)
-    return np.asarray(J.detach())
+    J = jacrev(model.decode_torch)(z_t)  # (T, J, 3, d_z), on model.device
+    return np.asarray(J.detach().cpu())
 
 
 def sensitivity_maps(model, anchors: np.ndarray) -> dict:

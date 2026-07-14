@@ -36,7 +36,7 @@ def encoder_jacobian(model, X: np.ndarray, M: np.ndarray):
     X_t = torch.as_tensor(X, dtype=torch.float32)
     M_t = torch.as_tensor(M, dtype=torch.float32)
     J = jacrev(lambda x: model.encode_mean_torch(x, M_t))(X_t)  # (d_z,T,J,3)
-    return np.asarray(J.detach())
+    return np.asarray(J.detach().cpu())
 
 
 def encoder_sensitivity_map(model, clips: np.ndarray, masks: np.ndarray) -> np.ndarray:

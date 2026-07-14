@@ -73,6 +73,8 @@ def persistent_homology(points: np.ndarray, max_dim: int = 1,
         Dict with the persistence diagrams and the bootstrap band width
         (a bottleneck-distance spread) per dimension.
     """
+    import warnings
+
     try:
         from ripser import ripser
         from persim import bottleneck
@@ -83,15 +85,24 @@ def persistent_homology(points: np.ndarray, max_dim: int = 1,
     full = ripser(points, maxdim=max_dim)["dgms"]
 
     widths = {}
-    for dim in range(max_dim + 1):
-        dists = []
-        for _ in range(n_bootstrap):
-            keep = rng.choice(len(points), int(len(points) * subsample),
-                              replace=False)
-            sub = ripser(points[keep], maxdim=max_dim)["dgms"][dim]
-            try:
-                dists.append(bottleneck(full[dim], sub))
-            except Exception:
-                pass
-        widths[dim] = float(np.percentile(dists, 95)) if dists else np.nan
+    # persim warns on every bottleneck call whenever a diagram has
+    # infinite death times — H0 always does (the top-level connected
+    # component never dies), so the warning is expected and noisy.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"dgm[12] has points with non-finite death times",
+            category=UserWarning,
+        )
+        for dim in range(max_dim + 1):
+            dists = []
+            for _ in range(n_bootstrap):
+                keep = rng.choice(len(points), int(len(points) * subsample),
+                                  replace=False)
+                sub = ripser(points[keep], maxdim=max_dim)["dgms"][dim]
+                try:
+                    dists.append(bottleneck(full[dim], sub))
+                except Exception:
+                    pass
+            widths[dim] = float(np.percentile(dists, 95)) if dists else np.nan
     return {"diagrams": full, "band_width": widths}

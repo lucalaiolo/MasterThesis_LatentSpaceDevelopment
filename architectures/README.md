@@ -195,22 +195,25 @@ counter it.
 
 ### Data adapter ([CARE-PD §8], `care_pd.py`)
 
-Maps the HuggingFace `vida-adl/CARE-PD` `h36m/` release into the clip
-iterator. The on-disk layout is one subdirectory per cohort holding
-`.npz` archives (`h36m/BMCLab/h36m_3d_world_*.npz`); each unpickles to the
-nested `{subject_id: {walk_id: record}}` dict of the dataset card, so the
-subject id — needed for LOSO — is read straight off the outer key.
-`load_cohorts` selects the world-coordinate 3D variant and skips the
-camera-projected `world2cam2img` sibling. Preprocessing — resample to a
-common 30 fps (a no-op on the already-30fps release), root-centre,
-walking-direction align (floor is X-Z, so up is Y) — is pure NumPy and
-tested in `test_care_pd_no_torch.py`; windowing is left to `build_clips`.
-`build_bundle` produces `videos`, `cohort_ids`, `subjects`, and `labels`
-aligned by walk; `leave_one_subject_out` / `leave_one_cohort_out` give the
-LOSO / LODO split regimes. Record field names (`pose`, `fps`,
-`UPDRS_GAIT`, `medication`, `other`, …) live in `RecordSchema`; every
-non-pose scalar is also passed through raw into `labels`, so FoG/freezer
-status stored in `other` is never dropped.
+Maps the CARE-PD `h36m/` release into the clip iterator. The release is
+what `bash scripts/preprocess_smpl2h36m.sh` emits: one subdirectory per
+cohort with `h36m_3d_world_*.npz` plus four camera-projected variants;
+each `.npz` is a **flat** dict `{ "subject__walkid": (F, 17, 3) }`.
+`load_cohorts` picks the world file (skipping `world2cam*` and
+`world2cam2img*`) and splits the `subject__walkid` key so LOSO works.
+Preprocessing runs per-frame root-centring (the plan §8 step);
+`resample_fps` and `align_direction` are kept but early-return on the
+already-canonical release. Windowing is delegated to `build_clips`.
+
+Note **the h36m release carries no labels** — `smpl2h36m.py` exports only
+pose arrays. Pass `source_dir=` (or `source_pkl=`) to `load_cohorts` to
+attach UPDRS / medication / freezer / `other` from the sibling raw SMPL
+`.pkl` (chumpy-free — only the label fields are read). `Walk` gains a
+`walk_id` field to match against the source pickle. Training does not
+need labels; only the §11 analysis does.
+
+Use **`n_joints=17`** in `TrainingConfig` for the h36m release (the H36M
+regressor is the 17-joint standard).
 
 ### Metrics ([CARE-PD §11], `metrics.py`)
 

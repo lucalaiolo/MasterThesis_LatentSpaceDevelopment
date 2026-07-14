@@ -16,7 +16,8 @@ from architectures.care_pd import (
     preprocess_walk, cohort_index, tier_cohorts,
     Walk, build_bundle, subset,
     leave_one_subject_out, leave_one_cohort_out,
-    load_cohort, load_cohorts,
+    load_cohort, load_cohorts, load_labels_pkl,
+    H36M_N_JOINTS,
     TIER1_COHORTS, TIER2_COHORTS,
 )
 
@@ -205,6 +206,104 @@ def test_load_npz_nested_structure():
     print("ok  load_cohort (nested .npz, outer-key subject, variant select)")
 
 
+def _fake_h36m_release_dir(tmp: Path):
+    """Write a fake ``h36m/<Cohort>/h36m_3d_world_*.npz`` mirroring the real
+    output of ``smpl2h36m.py``: a flat ``{subject__walkid: (F,17,3)}`` npz.
+    Also drops the two decoy world2cam / world2cam2img siblings so we can
+    check that only the world variant is picked up.
+    """
+    rng = np.random.default_rng(11)
+    cohort_dir = tmp / "h36m" / "BMCLab"
+    cohort_dir.mkdir(parents=True)
+    walks = {}
+    for subj in ("SUBJ_A", "SUBJ_B"):
+        for w in range(2):
+            F = 80
+            pose = rng.standard_normal((F, 17, 3)).astype(np.float32)
+            pose[:, 0, 0] += np.linspace(0, 2, F)      # +X travel
+            walks[f"{subj}__walk_{w}"] = pose
+    np.savez(cohort_dir / "h36m_3d_world_floorXZZplus_30f_or_longer.npz",
+             **walks)
+    # Decoys that must NOT be picked up by the world glob.
+    np.savez(cohort_dir / "h36m_3d_world2cam_sideright_...npz",
+             SUBJ_A__walk_0=np.zeros((10, 17, 3), np.float32))
+    np.savez(cohort_dir / "h36m_3d_world2cam2img_backright_...npz",
+             SUBJ_A__walk_0=np.zeros((10, 17, 2), np.float32))
+    return cohort_dir.parent
+
+
+def _fake_source_pkl(path: Path):
+    """Write a nested ``{subject: {walk: {pose, UPDRS_GAIT, medication, ...}}}``
+    pickle mirroring the raw SMPL cohort files (labels only — no chumpy)."""
+    import pickle
+    rng = np.random.default_rng(12)
+    blob = {}
+    for si, subj in enumerate(("SUBJ_A", "SUBJ_B")):
+        walks = {}
+        for w in range(2):
+            walks[f"walk_{w}"] = {
+                "pose":  rng.standard_normal((80, 72)).astype(np.float32),
+                "trans": rng.standard_normal((80, 3)).astype(np.float32),
+                "beta":  np.zeros(10, np.float32),
+                "fps": 30,
+                "UPDRS_GAIT": (si + w) % 4,
+                "medication": "ON" if w == 0 else "OFF",
+                "other": None,
+            }
+        blob[subj] = walks
+    with open(path, "wb") as f:
+        pickle.dump(blob, f)
+
+
+def test_load_h36m_release_shape():
+    with tempfile.TemporaryDirectory() as d:
+        h36m_root = _fake_h36m_release_dir(Path(d))
+        walks = load_cohorts(h36m_root, ["BMCLab"])
+
+        # 2 subjects x 2 walks; joint count matches the real regressor.
+        assert len(walks) == 4
+        assert all(w.pose.shape[1:] == (H36M_N_JOINTS, 3) for w in walks), (
+            "expected 17-joint H36M output"
+        )
+        assert H36M_N_JOINTS == 17, "H36M_N_JOINTS must be 17 for smpl2h36m.py"
+
+        # Subject id came off the "subject__walkid" split.
+        subs  = {w.subject  for w in walks}
+        wids  = {w.walk_id  for w in walks}
+        assert subs == {"SUBJ_A", "SUBJ_B"}
+        assert wids == {"walk_0", "walk_1"}
+
+        # Preprocess default runs; root-centring means pelvis at origin.
+        assert np.allclose(walks[0].pose[:, 0], 0.0, atol=1e-5)
+
+        # No labels yet — the .npz never had them.
+        assert all(w.labels == {} for w in walks)
+    print("ok  load_cohorts (flat h36m npz, 17 joints, subject split)")
+
+
+def test_source_pkl_label_attach():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        h36m_root = _fake_h36m_release_dir(d)
+        source_dir = d / "src"; source_dir.mkdir()
+        _fake_source_pkl(source_dir / "BMCLab.pkl")
+
+        # 1) explicit source_pkl kwarg on load_cohort.
+        walks = load_cohort(
+            h36m_root / "BMCLab" / "h36m_3d_world_floorXZZplus_30f_or_longer.npz",
+            "BMCLab", source_pkl=source_dir / "BMCLab.pkl",
+        )
+        assert all("updrs_gait" in w.labels and "medication" in w.labels
+                   for w in walks), "labels should be attached from source .pkl"
+        # 2) auto-discovery via source_dir on load_cohorts.
+        walks2 = load_cohorts(h36m_root, ["BMCLab"], source_dir=source_dir)
+        assert all(w.labels for w in walks2)
+        # 3) load_labels_pkl is double-keyed for robustness.
+        lookup = load_labels_pkl(source_dir / "BMCLab.pkl")
+        assert "SUBJ_A__walk_0" in lookup and "walk_0" in lookup
+    print("ok  labels attached from source .pkl (double-keyed lookup)")
+
+
 def main():
     test_root_center()
     test_align_direction_sends_travel_to_plus_x()
@@ -216,6 +315,8 @@ def main():
     test_build_bundle()
     test_splits()
     test_load_npz_nested_structure()
+    test_load_h36m_release_shape()
+    test_source_pkl_label_attach()
     print("\n=== all CARE-PD preprocessing tests passed ===")
 
 

@@ -3,33 +3,42 @@
 CARE-PD (https://github.com/TaatiTeam/CARE-PD, HuggingFace
 ``vida-adl/CARE-PD``) aggregates nine Parkinsonian-gait cohorts from eight
 clinical sites, harmonised through SMPL fitting and re-exported in several
-skeleton formats. This module targets the ``h36m/`` release, whose on-disk
-layout is one subdirectory per cohort holding ``.npz`` archives, e.g.
+skeleton formats. This module targets the ``h36m/`` release **as produced
+by ``bash scripts/preprocess_smpl2h36m.sh``**, whose on-disk layout is one
+subdirectory per cohort holding ``.npz`` archives:
 
     h36m/BMCLab/h36m_3d_world_floorXZZplus_30f_or_longer.npz
+    h36m/BMCLab/h36m_3d_world2cam_sideright_...npz          (camera 3D)
+    h36m/BMCLab/h36m_3d_world2cam_backright_...npz          (camera 3D)
+    h36m/BMCLab/h36m_3d_world2cam2img_sideright_...npz      (image 2D)
+    h36m/BMCLab/h36m_3d_world2cam2img_backright_...npz      (image 2D)
 
-Several coordinate variants ship side by side; the world-coordinate 3D
-file (``h36m_3d_world_*.npz``) is the one we want — global joint positions
-in the H36M 22-joint skeleton, floor on the X-Z plane so the vertical
-(up) axis is Y. The sibling ``h36m_3d_world2cam2img_*.npz`` is the
-camera-projected variant for 2D visualisation and is skipped.
+Only the *world* 3D file is used here — the rest are camera-projected
+variants that would inject a nuisance axis of view angle (``world2cam``)
+or drop depth entirely (``world2cam2img``). The suffix decodes as: the
+regressor produces the H36M **17-joint** skeleton (not 22 — that was
+speculation before I read the script; SMPL vertices go through
+``J_regressor_h36m_correct.npy`` which is the standard 17-joint one), and
+the ``floorXZZplus`` transform sets Y=0 at the floor, moves the root's
+frame-0 XZ to origin, and rotates about vertical so each walk faces +Z.
 
-Each archive unpickles (``np.load(..., allow_pickle=True)``) to the
-nested dict documented on the dataset card::
+The archive is a **flat** dict — one top-level key per walk, value is the
+raw pose array::
 
-    { subject_id: { walk_id: {
-        "pose": (F, 22, 3) float,   # world joint positions (h36m release)
-        "trans": array,             # global translation (unused for h36m)
-        "beta": array,              # SMPL shape, zeroed for privacy
-        "fps": int,                 # standardised frame rate
-        "UPDRS_GAIT": int | None,   # 0-3 gait sub-score
-        "medication": str | None,   # ON / OFF
-        "other": str | None,        # extra labels (e.g. FoG / freezer)
-    } } }
+    { "subject_id__walk_id": (F, 17, 3) float32, ... }
 
-Note the **two** levels of nesting: the *outer* key is the subject id
-(so leave-one-subject-out splits read it straight off), the *inner* key
-is the walk id.
+Subject id and walk id are joined with a double-underscore in the key;
+:func:`_iter_walks` splits them back. **Labels do not travel with the
+h36m release** (only pose arrays are exported by ``smpl2h36m.py``); UPDRS,
+medication, freezer, and cohort-specific ``other`` fields live in the
+source SMPL ``.pkl``. :func:`load_labels_pkl` reads them from there and
+:func:`load_cohort` merges them in when the optional ``source_pkl`` is
+given. Training does not need labels — only analysis does — so a run
+without ``source_pkl`` is fully functional.
+
+The nested ``{subject: {walk: record}}`` schema handled by the earlier
+version is still recognised and unchanged, so a hand-built pickle or an
+older CARE-PD dump loads through the same code path.
 
 The module has two independently useful halves:
 
@@ -74,10 +83,12 @@ ALL_COHORTS: tuple[str, ...] = TIER1_COHORTS + TIER2_COHORTS + TIER3_COHORTS
 # Cohorts carrying an ordinal UPDRS_GAIT label ([CARE-PD §4.2]).
 UPDRS_COHORTS: tuple[str, ...] = ("BMCLab", "PD-GaM", "3DGait", "T-SDU-PD")
 
-# H36M 22-joint conventions. The pelvis/root is joint 0; the SMPL/H36M
-# export used by CARE-PD is y-up, so the horizontal plane is x-z.
+# H36M skeleton conventions. ``smpl2h36m.py`` maps SMPL vertices through
+# ``J_regressor_h36m_correct.npy`` to the standard 17-joint H36M skeleton,
+# with the pelvis at joint 0. Its ``floorXZZplus`` transform is Y-up (floor
+# on the X-Z plane), so the horizontal axes are 0 and 2.
 H36M_ROOT = 0
-H36M_N_JOINTS = 22
+H36M_N_JOINTS = 17
 DEFAULT_UP_AXIS = 1
 
 
@@ -247,19 +258,24 @@ class Walk:
     """One preprocessed walk with the metadata evaluation needs.
 
     Attributes:
-        pose: (F, 22, 3) preprocessed H36M sequence at the common fps.
+        pose: (F, 17, 3) preprocessed H36M sequence at the common fps.
         cohort: cohort name (one of :data:`ALL_COHORTS`).
         subject: subject id, for leave-one-subject-out splits.
+        walk_id: within-subject walk id, for label matching against the
+            source SMPL ``.pkl``.
         fps: the common frame rate after preprocessing.
         labels: clinical annotations, evaluation-only ([CARE-PD §8]).
-            Standardised keys where available: ``updrs_gait`` (int 0–3),
-            ``freezer`` (bool / 0–1), ``med`` ("ON"/"OFF"), plus any raw
-            fields passed straight through.
+            Empty on a bare h36m load — labels only appear once a
+            ``source_pkl`` is supplied to :func:`load_cohort`. Standardised
+            keys where available: ``updrs_gait`` (int 0–3), ``freezer``
+            (bool / 0–1), ``med`` ("ON"/"OFF"), plus any raw fields (e.g.
+            ``other``) passed straight through.
     """
     pose: np.ndarray
     cohort: str
     subject: str
-    fps: float
+    walk_id: str = ""
+    fps: float = 30.0
     labels: dict = field(default_factory=dict)
 
 
@@ -348,10 +364,17 @@ def _is_record(obj, schema: RecordSchema) -> bool:
 def _iter_walks(blob, schema: RecordSchema):
     """Yield ``(subject_id, walk_id, record)`` from an unpickled archive.
 
-    Canonical CARE-PD layout is the nested ``{subject: {walk: record}}``;
-    the subject id therefore comes off the *outer* key. Falls back to a
-    flat ``{walk: record}`` dict and to a list of records so older dumps
-    still load (subject id then defaults to the walk id).
+    Three layouts are recognised:
+
+    1. **h36m release** — a flat ``{ "subject__walkid": (F, 17, 3) }``
+       dict, exactly what ``smpl2h36m.py`` emits. The double-underscore
+       separator is defined by that script's
+       ``walk_name = str(subject_id) + '__' + str(walk_id)`` line; splitting
+       it here recovers the subject id, which LOSO needs.
+    2. **Nested source pickle** — ``{subject: {walk: record}}`` (used by
+       some of the raw SMPL cohort ``.pkl`` files). Subject comes off the
+       outer key, walk id off the inner.
+    3. **List of records** — walk id defaults to the list index.
     """
     if isinstance(blob, dict):
         for outer, inner in blob.items():
@@ -361,15 +384,23 @@ def _iter_walks(blob, schema: RecordSchema):
                 for walk_id, rec in inner.items():
                     yield str(outer), str(walk_id), _maybe_item(rec)
             else:
-                # Flat: outer is both subject and walk.
-                yield str(outer), str(outer), inner
+                # Flat: either bare "subject__walkid" (h36m npz) or a raw
+                # record whose outer key already holds both ids joined by
+                # "__". Fall back to using the whole key as both when the
+                # separator is missing.
+                outer_s = str(outer)
+                if "__" in outer_s:
+                    subject_id, walk_id = outer_s.split("__", 1)
+                else:
+                    subject_id = walk_id = outer_s
+                yield subject_id, walk_id, inner
     elif isinstance(blob, (list, tuple)):
         for i, rec in enumerate(blob):
             yield str(i), str(i), _maybe_item(rec)
     else:
         raise TypeError(
             f"unexpected archive top-level type {type(blob)!r}; expected a "
-            "nested/flat dict of walks or a list of walk records."
+            "flat / nested dict of walks or a list of walk records."
         )
 
 
@@ -448,26 +479,84 @@ def _resolve_cohort_path(root_dir: Path, cohort: str,
     )
 
 
+def _extract_labels(rec, schema: RecordSchema) -> dict:
+    """Pull the label dict out of one raw record, applying label aliases."""
+    if not isinstance(rec, dict):
+        return {}
+    labels: dict = {}
+    for k, v in rec.items():
+        if k in schema.non_label_keys or k in schema.fps_keys:
+            continue
+        labels[k] = v
+    updrs = _first(rec, schema.updrs_keys)
+    if updrs is not None:
+        labels["updrs_gait"] = updrs
+    med = _first(rec, schema.med_keys)
+    if med is not None:
+        labels["med"] = med
+    freezer = _first(rec, schema.freezer_keys)
+    if freezer is not None:
+        labels["freezer"] = freezer
+    return labels
+
+
+def load_labels_pkl(path: str | Path,
+                    schema: RecordSchema = DEFAULT_SCHEMA
+                    ) -> dict[str, dict]:
+    """Read per-walk labels out of a source SMPL ``.pkl`` (chumpy-free).
+
+    Returned dict is double-keyed so it matches whatever walk id the h36m
+    npz uses: entries appear under both ``"subject__walkid"`` (the
+    concatenated key ``smpl2h36m.py`` emits) and just ``"walkid"`` (in case
+    a cohort's raw pickle used walk-only keys). Only Python objects — no
+    chumpy — are read out; the raw ``.pkl`` fields ``pose``/``beta``/
+    ``trans`` are ignored.
+
+    Args:
+        path: path to a cohort's raw SMPL ``.pkl``.
+        schema: field-name mapping.
+    Returns:
+        Dict mapping walk key -> labels dict.
+    """
+    blob = _load_archive(Path(path))
+    out: dict[str, dict] = {}
+    for subject_id, walk_id, rec in _iter_walks(blob, schema):
+        lbl = _extract_labels(rec, schema)
+        if not lbl:
+            continue
+        out[f"{subject_id}__{walk_id}"] = lbl
+        out.setdefault(walk_id, lbl)
+    return out
+
+
 def load_cohort(path: str | Path, cohort: str,
                 schema: RecordSchema = DEFAULT_SCHEMA,
                 dst_fps: float = 30.0,
                 up_axis: int = DEFAULT_UP_AXIS,
                 root: int = H36M_ROOT,
-                preprocess: bool = True) -> list[Walk]:
+                preprocess: bool = True,
+                source_pkl: str | Path | None = None) -> list[Walk]:
     """Load and (optionally) preprocess one cohort archive into walks.
 
     Args:
-        path: path to the cohort's ``.npz`` (or ``.pkl``) archive.
+        path: path to the cohort's h36m ``.npz`` (or a nested ``.pkl``).
         cohort: cohort name recorded on every walk.
         schema: field-name mapping (see :class:`RecordSchema`).
-        dst_fps: common frame rate to resample to.
+        dst_fps: common frame rate to resample to (30 by default; the h36m
+            release is already at 30, so :func:`resample_fps` is a no-op).
         up_axis, root: skeleton conventions for preprocessing.
-        preprocess: run the resample / root-centre / align pipeline. Set
-            False to inspect raw sequences.
+        preprocess: run the resample / root-centre / align pipeline. On
+            the already-canonical h36m data only per-frame root-centring
+            has visible effect; resample and align both early-return.
+        source_pkl: optional path to the raw SMPL ``.pkl`` for this cohort
+            to attach labels (UPDRS, medication, freezer, …) by walk id.
+            Not needed for training; only for the §11 analysis.
     Returns:
-        List of :class:`Walk`, with ``subject`` taken from the outer key.
+        List of :class:`Walk`, with ``subject`` and ``walk_id`` recovered
+        from the archive keys.
     """
     blob = _load_archive(Path(path))
+    label_lookup = load_labels_pkl(source_pkl, schema) if source_pkl else {}
 
     walks: list[Walk] = []
     for subject_id, walk_id, rec in _iter_walks(blob, schema):
@@ -475,22 +564,14 @@ def load_cohort(path: str | Path, cohort: str,
         meta = rec if isinstance(rec, dict) else {}
         src_fps = float(_first(meta, schema.fps_keys, schema.default_fps))
 
-        # Standardised label aliases, plus a raw passthrough of every
-        # non-pose scalar so nothing is lost (FoG often lives in "other").
-        labels: dict = {}
-        for k, v in meta.items():
-            if k in schema.non_label_keys or k in schema.fps_keys:
-                continue
-            labels[k] = v
-        updrs = _first(meta, schema.updrs_keys)
-        if updrs is not None:
-            labels["updrs_gait"] = updrs
-        med = _first(meta, schema.med_keys)
-        if med is not None:
-            labels["med"] = med
-        freezer = _first(meta, schema.freezer_keys)
-        if freezer is not None:
-            labels["freezer"] = freezer
+        # Labels present in the archive itself (nested-pickle case), then
+        # anything the source ``.pkl`` adds under either key form. The
+        # h36m ``.npz`` supplies neither, so both are commonly empty.
+        labels = _extract_labels(rec, schema)
+        if label_lookup:
+            extra = (label_lookup.get(f"{subject_id}__{walk_id}")
+                     or label_lookup.get(walk_id) or {})
+            labels = {**labels, **extra}
 
         if preprocess:
             pose = preprocess_walk(pose, src_fps, dst_fps, up_axis, root)
@@ -498,7 +579,8 @@ def load_cohort(path: str | Path, cohort: str,
         else:
             pose = pose.astype(np.float32)
             fps = src_fps
-        walks.append(Walk(pose=pose, cohort=cohort, subject=str(subject_id),
+        walks.append(Walk(pose=pose, cohort=cohort,
+                          subject=str(subject_id), walk_id=str(walk_id),
                           fps=fps, labels=labels))
     return walks
 
@@ -509,7 +591,9 @@ load_cohort_pkl = load_cohort
 
 def load_cohorts(root_dir: str | Path, cohorts: tuple[str, ...] | list[str],
                  schema: RecordSchema = DEFAULT_SCHEMA,
-                 variant_glob: str = WORLD_NPZ_GLOB, **kwargs) -> list[Walk]:
+                 variant_glob: str = WORLD_NPZ_GLOB,
+                 source_dir: str | Path | None = None,
+                 **kwargs) -> list[Walk]:
     """Load several cohorts from an ``h36m/`` release tree, concatenating.
 
     Args:
@@ -518,16 +602,29 @@ def load_cohorts(root_dir: str | Path, cohorts: tuple[str, ...] | list[str],
         schema: field-name mapping.
         variant_glob: filename pattern selecting the coordinate variant
             inside each cohort subdirectory. Defaults to the
-            world-coordinate 3D file, :data:`WORLD_NPZ_GLOB`.
-        **kwargs: forwarded to :func:`load_cohort`.
+            world-coordinate 3D file, :data:`WORLD_NPZ_GLOB`, which excludes
+            the ``world2cam*`` and ``world2cam2img*`` view-projected files.
+        source_dir: optional directory holding the raw SMPL ``.pkl`` for
+            each cohort (typically the sibling of ``h36m/``, e.g.
+            ``assets/datasets/``). When given, ``<source_dir>/<cohort>.pkl``
+            is used to attach labels; a missing per-cohort ``.pkl`` is
+            silently skipped so partial label coverage still works.
+        **kwargs: forwarded to :func:`load_cohort` (``source_pkl`` will be
+            filled in from ``source_dir`` when not passed explicitly).
     Returns:
         Flat list of :class:`Walk` across all requested cohorts.
     """
     root_dir = Path(root_dir)
+    source_dir = Path(source_dir) if source_dir is not None else None
     walks: list[Walk] = []
     for name in cohorts:
         path = _resolve_cohort_path(root_dir, name, variant_glob)
-        walks.extend(load_cohort(path, name, schema=schema, **kwargs))
+        per_kwargs = dict(kwargs)
+        if source_dir is not None and "source_pkl" not in per_kwargs:
+            candidate = source_dir / f"{name}.pkl"
+            if candidate.exists():
+                per_kwargs["source_pkl"] = candidate
+        walks.extend(load_cohort(path, name, schema=schema, **per_kwargs))
     return walks
 
 

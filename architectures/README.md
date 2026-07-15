@@ -94,6 +94,21 @@ because it has the fewest failure modes and the fastest iteration
 ([ARCH §5]). Move to Recipe 3 once you have Recipe 1 trained end to end
 and its MPJPE numbers on record.
 
+To pick the recipe and masking policy by data instead of by argument, use
+`train.model_selection`: it runs `train_sweep` over every (recipe,
+mask_policy) combination — conditioned on cohort when you pass
+`cohort_per_video`, i.e. a CVAE sweep — scores each on the held-out split
+with the cohort-aware `evaluate` (reconstruction MPJPE by default), and
+returns the winning `best_config` to carry the final model progression
+([CARE-PD §4.9]).
+
+```python
+from architectures.train import model_selection
+sel = model_selection(base_cfg, bundle.videos,
+                      cohort_per_video=bundle.cohort_ids)   # CVAE sweep
+best_cfg = sel["best_config"]      # recipe + mask_policy chosen by reconstruction
+```
+
 ## Visualising a run
 
 `train(...)` writes `history.json` and, if matplotlib is installed, a

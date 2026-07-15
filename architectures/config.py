@@ -101,6 +101,15 @@ class TrainingConfig:
             ``n_components == 0``.
         gm_beta_y: weight on the categorical KL KL(q(y|x) || p(y))
             (the plan's beta_y). Ignored when ``n_components == 0``.
+        gm_aux_beta: weight of the auxiliary KL(q(z|x) || N(0, I)) term for
+            GM runs. 0 (default) removes it — in a GM-VAE the mixture *is*
+            the prior, so the N(0,I) term is redundant. A small positive
+            value re-adds it as the safety tether of [GM-VAE §3.3] (useful
+            mainly with ``gm_train="em"``). Note this replaces the beta
+            schedule for GM runs: ``beta_max`` and ``beta_mode`` no longer
+            weight any prior term when ``n_components > 0``, though
+            ``delay_epochs`` / ``warmup_epochs`` still shape the mixture-KL
+            ramp via ``gm_kl_warmup``.
         gm_em_steps: number of EM iterations run over the cached epoch
             latents to refresh the mixture parameters after each gradient
             epoch ([GM-VAE Alg. 1], the N_EM inner loop). Ignored when
@@ -128,11 +137,11 @@ class TrainingConfig:
             the brief pre-training phase of [GM-VAE §6]. Set False to hold
             the mixture KL at full strength from epoch 0. Ignored when
             ``n_components == 0``.
-        beta_max / warmup_epochs (GM runs): for a GM run the beta schedule
-            drives the auxiliary KL(q(z|x) || N(0, I)) regulariser that
-            [GM-VAE §3.3, Alg. 1] adds on top of the mixture terms to keep
-            the manifold well-conditioned. Keep it small (e.g. 1e-2) or
-            zero it out; the mixture KL does the main regularising.
+        beta schedule (GM runs): for a GM run the beta schedule no longer
+            weights any prior term — the N(0,I) regulariser is controlled
+            by ``gm_aux_beta`` (default 0, removed) instead. ``delay_epochs``
+            and ``warmup_epochs`` still matter: they shape the mixture-KL
+            warm-up ramp when ``gm_kl_warmup`` is on.
         mask_policy: one of "none", "uniform", "top_k_speed",
             "softmax_speed", "per_frame_speed", "limb". See
             `mask_policies.py` for the definitions ([MVAE §2]).
@@ -197,6 +206,7 @@ class TrainingConfig:
     gm_train: Literal["gradient", "em"] = "gradient"
     gm_beta_z: float = 1.0
     gm_beta_y: float = 1.0
+    gm_aux_beta: float = 0.0
     gm_em_steps: int = 1
     gm_var_floor: float = 1e-4
     gm_init_spread: float = 1.0

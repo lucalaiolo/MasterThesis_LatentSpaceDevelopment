@@ -121,14 +121,32 @@ def train(config: TrainingConfig,
     print(f"[model] {kind} ({config.architecture}), {n_params:,} parameters")
 
     mixture = build_mixture(config)
+    opt_params = list(model.parameters())
     if mixture is not None:
         mixture = mixture.to(device)
-        print(f"[mixture] {config.n_components} components, "
-              f"EM {config.gm_em_steps} step(s)/epoch")
+        if mixture.trainable:
+            # Regular / VaDE regime: the mixture parameters are optimised
+            # jointly with the networks by the same optimiser.
+            opt_params += list(mixture.parameters())
+            print(f"[mixture] {config.n_components} components, "
+                  f"gradient-trained (regular GM-VAE)")
+        else:
+            print(f"[mixture] {config.n_components} components, "
+                  f"EM {config.gm_em_steps} step(s)/epoch")
 
-    opt = torch.optim.AdamW(model.parameters(),
+    opt = torch.optim.AdamW(opt_params,
                             lr=config.learning_rate,
                             weight_decay=config.weight_decay)
+
+    # In the gradient regime, seed the mixture on the pre-trained
+    # autoencoder's latents once, right before the KL warm-up begins — a
+    # VaDE run clusters far better from a data-driven GMM init than from
+    # noise. Chosen as the last delay epoch (or epoch 0 without a delay).
+    gm_init_epoch = -1
+    if mixture is not None and mixture.trainable:
+        gm_init_epoch = (max(0, config.delay_epochs - 1)
+                         if config.beta_mode == "delayed_warmup" else 0)
+    gm_seeded = False
 
     # ---- Output directory ---------------------------------------------
     out = Path(config.out_dir)
@@ -153,11 +171,22 @@ def train(config: TrainingConfig,
         train_stats, cached = _run_epoch(model, train_loader, config, epoch,
                                          kl_state, opt, device, train=True,
                                          mixture=mixture)
-        # M-step for the mixture: EM over this epoch's posterior means,
-        # with the networks frozen ([GM-VAE §3.3, Alg. 1]).
+        # Mixture bookkeeping after the gradient epoch.
         if mixture is not None and cached is not None:
             mu_all, logvar_all = cached
-            rho = mixture.em_update(mu_all, logvar_all, n_steps=config.gm_em_steps)
+            if mixture.trainable:
+                # Gradient regime: parameters already moved via the
+                # optimiser. One-time data-driven seeding at gm_init_epoch,
+                # then just record occupancy from the current mixture.
+                if not gm_seeded and epoch >= gm_init_epoch:
+                    mixture.init_from_latents(mu_all)
+                    gm_seeded = True
+                with torch.no_grad():
+                    rho = mixture.responsibilities(mu_all).mean(dim=0)
+            else:
+                # EM regime: closed-form M-step with the networks frozen.
+                rho = mixture.em_update(mu_all, logvar_all,
+                                        n_steps=config.gm_em_steps)
             history["gm_occupancy"].append([round(float(r), 5) for r in rho])
 
         model.eval()

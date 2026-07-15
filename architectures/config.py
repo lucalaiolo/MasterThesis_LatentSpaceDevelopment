@@ -85,8 +85,17 @@ class TrainingConfig:
             ``n_cond == 0``.
         n_components: K, the number of Gaussian-mixture prior components
             ([CARE-PD §7.3]). 0 (default) keeps the standard N(0, I) prior.
-            When > 0 the run trains a GM-VAE (or GM-CVAE if ``n_cond > 0``)
-            with the EM-inspired block-coordinate scheme of [GM-VAE §3.3].
+            When > 0 the run trains a GM-VAE (or GM-CVAE if ``n_cond > 0``).
+        gm_train: how the mixture parameters are fit ([CARE-PD §7.3]).
+            "gradient" (default) — the regular / VaDE regime: the
+            component means, log-variances, and weights are trainable
+            parameters optimised jointly with the ELBO by the same
+            optimiser as the networks. Robust and the recommended default.
+            "em" — the EM-inspired block-coordinate scheme of
+            [GM-VAE §3.3]: the parameters are refreshed by closed-form EM
+            M-steps over the epoch's cached latents while the networks are
+            frozen. More faithful to the physics paper but less stable;
+            prone to component collapse. Ignored when ``n_components == 0``.
         gm_beta_z: weight on the mixture KL E_q(y)[KL(q(z|x) || p(z|y))]
             (the plan's beta_z, [CARE-PD §7.3]). Ignored when
             ``n_components == 0``.
@@ -185,6 +194,7 @@ class TrainingConfig:
     # Gaussian-mixture prior (GM-VAE / GM-CVAE arm, [CARE-PD §7.3],
     # trained with the EM scheme of [GM-VAE §3.3]).
     n_components: int = 0
+    gm_train: Literal["gradient", "em"] = "gradient"
     gm_beta_z: float = 1.0
     gm_beta_y: float = 1.0
     gm_em_steps: int = 1

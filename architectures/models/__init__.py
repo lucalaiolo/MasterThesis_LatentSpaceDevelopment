@@ -61,4 +61,5 @@ def build_mixture(config):
         var_floor=config.gm_var_floor,
         init_spread=config.gm_init_spread,
         seed=config.seed,
+        trainable=(config.gm_train == "gradient"),
     )

@@ -597,3 +597,104 @@ def train_sweep(base_config: TrainingConfig,
             )
 
     return results
+
+
+def model_selection(base_config: TrainingConfig,
+                    videos: list[np.ndarray],
+                    cohort_per_video: np.ndarray | list[int] | None = None,
+                    recipes: tuple[int, ...] = ALL_RECIPES,
+                    mask_policies: tuple[str, ...] = ALL_MASK_POLICIES,
+                    limbs: dict[str, list[int]] | None = None,
+                    stride: int | None = None,
+                    metric: str = "mpjpe_all",
+                    eval_seed: int = 0) -> dict:
+    """Sweep (recipe × mask policy) and pick the best by held-out reconstruction.
+
+    Model selection ([CARE-PD §4.9]): the masking recipe and policy are
+    means, not ends — one default pair carries the model progression, and it
+    is chosen by reconstruction on the held-out split rather than guessed.
+    Trains one run per valid (recipe, mask_policy) combination via
+    :func:`train_sweep` — conditioned on cohort when ``cohort_per_video`` is
+    given, i.e. a **CVAE** sweep — then scores every run on the *same*
+    time-based validation split with the cohort-aware
+    :func:`architectures.evaluate.evaluate`, and returns the winner.
+
+    ``metric="mpjpe_all"`` (default) selects on the unmasked-input
+    reconstruction error, which is recipe/policy-comparable; pass
+    ``"mpjpe_inpainted"`` to select on inpainting (hidden-joint) error
+    instead. Lower is better either way.
+
+    Args:
+        base_config: template config; ``recipe`` / ``mask_policy`` /
+            ``out_dir`` are overridden per run. ``architecture`` (the
+            backbone) is held fixed — sweep it by calling this once per
+            backbone if you want that axis too.
+        videos: forwarded to :func:`train_sweep`.
+        cohort_per_video: per-video conditioning ids; pass
+            ``bundle.cohort_ids`` to select the CVAE, or None for a plain VAE.
+        recipes, mask_policies: the grid. Defaults to all three recipes and
+            all six policies (``limb`` is skipped unless ``limbs`` is given,
+            and recipes 2/3 skip ``"none"``).
+        limbs: joint-index lists per limb name, needed only for the ``limb``
+            policy.
+        stride: clip stride; defaults to ``clip_length // 2`` (as in ``train``).
+        metric: which held-out MPJPE to rank on.
+        eval_seed: seeds the evaluation mask draws.
+    Returns:
+        Dict with ``best`` (the winning ``(recipe, policy)``), ``best_config``
+        (a :class:`TrainingConfig` with those two fields set — feed it to the
+        final progression), ``best_run`` (that run's :func:`train` output,
+        incl. the checkpoint path), ``table`` (every combination's MPJPE
+        dict), and ``runs`` (the raw :func:`train_sweep` output).
+    """
+    torch = _torch()
+    from .evaluate import evaluate
+
+    if stride is None:
+        stride = base_config.clip_length // 2
+
+    runs = train_sweep(base_config, videos, limbs=limbs, stride=stride,
+                       recipes=recipes, mask_policies=mask_policies,
+                       cohort_per_video=cohort_per_video)
+
+    # Rebuild the exact time-based val split train() used internally, so the
+    # selection metric is measured on data no run trained on.
+    clips, video_id, _ = build_clips(videos, base_config.clip_length, stride)
+    _, val_mask = train_val_split(clips, video_id)
+    val_clips = clips[val_mask]
+    val_cohort = None
+    if cohort_per_video is not None:
+        cpv = np.asarray(cohort_per_video, dtype=np.int64)
+        val_cohort = cpv[video_id][val_mask]
+
+    device = torch.device(base_config.device if torch.cuda.is_available()
+                          or base_config.device == "cpu" else "cpu")
+
+    table: dict[tuple[int, str], dict] = {}
+    for (recipe, policy), run in runs.items():
+        cfg = dataclasses.replace(base_config, recipe=recipe, mask_policy=policy)
+        pol = build_policy(cfg, limbs=limbs)
+        table[(recipe, policy)] = evaluate(
+            run["model"], val_clips, pol, batch_size=base_config.batch_size,
+            device=str(device), seed=eval_seed, recipe=recipe,
+            cohort=val_cohort)
+
+    if not table:
+        raise ValueError(
+            "no (recipe, mask_policy) combinations were trained; check "
+            "`recipes` / `mask_policies` and the `limbs` map."
+        )
+
+    ranked = sorted(table, key=lambda k: table[k][metric])
+    best = ranked[0]
+    best_config = dataclasses.replace(base_config, recipe=best[0],
+                                      mask_policy=best[1])
+    print(f"\n[model-selection] ranking by {metric} (lower is better):")
+    for k in ranked:
+        star = "  <- best" if k == best else ""
+        print(f"    recipe={k[0]} policy={k[1]:<14} "
+              f"{metric}={table[k][metric]:.4f} mm"
+              f"  (inpaint={table[k]['mpjpe_inpainted']:.4f}){star}")
+
+    return {"best": best, "best_config": best_config,
+            "best_run": runs[best], "table": table, "runs": runs}

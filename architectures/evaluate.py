@@ -25,24 +25,25 @@ def _torch():
         raise ImportError("Evaluation needs PyTorch.") from e
 
 
-def _decode_full(model, X, M):
-    """Return the full-clip reconstruction from `model(X, M)`.
+def _decode_full(model, X, M, c=None):
+    """Return the full-clip reconstruction from `model(X, M, c)`.
 
     Handles both the two-tuple return (Recipes 1, 2) and the three-tuple
-    return (Recipe 3, where the first element is the full head).
+    return (Recipe 3, where the first element is the full head). ``c`` is
+    the per-clip conditioning id for a CVAE, or None for a plain VAE.
     """
-    out = model(X, M)
+    out = model(X, M, c)
     return out[0]
 
 
-def _decode_inpaint(model, X, M):
+def _decode_inpaint(model, X, M, c=None):
     """Return the inpainting reconstruction for a masked input.
 
     For Recipe 3 the model returns (X_hat_full, X_hat_inp, mu, logvar);
     we use the mask-conditioned head. For Recipes 1 and 2 there is only
-    one head, so we use it.
+    one head, so we use it. ``c`` conditions a CVAE, or None for a plain VAE.
     """
-    out = model(X, M)
+    out = model(X, M, c)
     if len(out) == 4:                       # Recipe 3: (full, inp, mu, logvar)
         return out[1]
     return out[0]
@@ -50,7 +51,7 @@ def _decode_inpaint(model, X, M):
 
 def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
              device: str = "cpu", seed: int = 0,
-             recipe: int = 1) -> dict:
+             recipe: int = 1, cohort: np.ndarray | None = None) -> dict:
     """Compute MPJPE variants on a held-out set of clips.
 
     Args:
@@ -62,6 +63,12 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
         seed: seeds the mask draws.
         recipe: 1, 2, or 3, matching the model that produced X_hat. Only
             affects which head answers the inpainting query.
+        cohort: optional (N,) per-clip conditioning ids for a CVAE / GM-CVAE
+            ([CARE-PD §6]). When given, every clip is reconstructed under
+            its **true** cohort — the model's real operating regime — rather
+            than the null (zero) embedding, which is what makes this a fair
+            reconstruction metric for a conditioned model. Left None (the
+            unconditional path) for a plain VAE.
     Returns:
         Dict with mean per-joint position error over all joints, over
         visible joints, and over hidden joints. `mpjpe_all` comes from
@@ -74,6 +81,7 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
 
     rng = np.random.default_rng(seed)
     T, J = clips.shape[1], clips.shape[2]
+    cohort = None if cohort is None else np.asarray(cohort, dtype=np.int64)
 
     tot_all, tot_vis, tot_inp = 0.0, 0.0, 0.0
     n_all, n_vis, n_inp = 0, 0, 0
@@ -83,10 +91,12 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
             X_np = clips[i:i + batch_size].astype(np.float32)
             X = torch.from_numpy(X_np).to(device)
             B = X.shape[0]
+            c = (torch.as_tensor(cohort[i:i + batch_size], dtype=torch.long,
+                                 device=device) if cohort is not None else None)
 
             # ---- Reconstruction pass: unmasked input, full head -----
             M_ones = torch.ones((B, T, J), device=device)
-            X_hat_full = _decode_full(model, X, M_ones)
+            X_hat_full = _decode_full(model, X, M_ones, c)
             err_full = torch.linalg.norm(X_hat_full - X, dim=-1)   # (B, T, J)
             tot_all += float(err_full.sum())
             n_all += err_full.numel()
@@ -96,7 +106,7 @@ def evaluate(model, clips: np.ndarray, mask_policy, batch_size: int = 64,
             M = np.stack([mask_policy.sample(T, J, rng, X=X_np[b])
                           for b in range(B)])
             Mt = torch.from_numpy(M).to(device)
-            X_hat_inp = _decode_inpaint(model, X, Mt)
+            X_hat_inp = _decode_inpaint(model, X, Mt, c)
             err_inp = torch.linalg.norm(X_hat_inp - X, dim=-1)     # (B, T, J)
 
             vis = Mt > 0.5

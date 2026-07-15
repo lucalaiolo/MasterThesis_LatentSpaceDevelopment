@@ -1,16 +1,28 @@
-"""End-to-end smoke test for the CARE-PD GM-CVAE stack ([CARE-PD §7, §11]).
+"""End-to-end smoke test for the CARE-PD model stack ([CARE-PD §7, §11]).
 
 Needs PyTorch and scikit-learn. Builds a small synthetic multi-cohort
-motion set with a planted phenotype signal, trains each of the four models
-in the plan — VAE, CVAE(cohort), GM-VAE, GM-CVAE — for a few epochs, then
-encodes a frozen latent and runs the evaluation battery (site probe,
-cluster–label agreement, linear probe, occupancy).
+motion set with a planted phenotype signal, trains the **two core models**
+of the pipeline — VAE and CVAE(cohort) — for a few epochs, then encodes a
+frozen latent and runs the evaluation battery (site probe, cluster–label
+agreement, linear probe).
 
 The point is to prove every code path flows and every metric returns a
 number, not to demonstrate the scientific result (that needs the real
 data and a real training budget). Run with
 
     python -m architectures.gm_smoke_test
+
+.. note:: **GM-VAE / GM-CVAE dropped from the default run** ([post-hoc
+    plan §0]). The mixture-prior models are deprecated (component collapse)
+    and no longer part of the four-model progression; phenotype structure
+    is recovered post hoc on the VAE / CVAE latents instead (see
+    ``vae_analysis.posthoc``). Their training paths are kept behind the
+    ``allow_deprecated_gmvae`` opt-in and can still be exercised with
+
+        python -m architectures.gm_smoke_test --include-deprecated-gmvae
+
+    purely to keep the retained source from bit-rotting; occupancy /
+    native-cluster reporting lives with them there.
 """
 
 import warnings
@@ -98,14 +110,17 @@ def run_model(kind, videos, cohort_ids, subjects, phenotype, n_cohorts,
         cfg = TrainingConfig(**common, n_cond=n_cohorts, cond_dropout=0.15)
         cpv = cohort_ids
     elif kind == "GM-VAE":
+        # Deprecated path ([post-hoc plan §0]); opt-in flag required.
         cfg = TrainingConfig(**common, n_components=4, gm_beta_z=0.3,
                              gm_beta_y=0.1, gm_entropy_weight=1.0,
-                             gm_entropy_epochs=3)
+                             gm_entropy_epochs=3, allow_deprecated_gmvae=True)
         cpv = None
     elif kind == "GM-CVAE":
+        # Deprecated path ([post-hoc plan §0]); opt-in flag required.
         cfg = TrainingConfig(**common, n_cond=n_cohorts, cond_dropout=0.15,
                              n_components=4, gm_beta_z=0.3, gm_beta_y=0.1,
-                             gm_entropy_weight=1.0, gm_entropy_epochs=3)
+                             gm_entropy_weight=1.0, gm_entropy_epochs=3,
+                             allow_deprecated_gmvae=True)
         cpv = cohort_ids
     else:
         raise ValueError(kind)
@@ -132,12 +147,23 @@ def run_model(kind, videos, cohort_ids, subjects, phenotype, n_cohorts,
     return result
 
 
-def main():
+def main(include_deprecated_gmvae: bool = False):
     data = synthetic_cohorts()
-    for kind in ["VAE", "CVAE", "GM-VAE", "GM-CVAE"]:
+    # The two core models of the active pipeline ([post-hoc plan §0]).
+    kinds = ["VAE", "CVAE"]
+    if include_deprecated_gmvae:
+        # Retained, deprecated mixture-prior models — run only to keep the
+        # source exercised, never as part of the default progression.
+        kinds += ["GM-VAE", "GM-CVAE"]
+    for kind in kinds:
         run_model(kind, *data)
-    print("\n=== every CARE-PD model path + metric ran ===")
+    print("\n=== every active CARE-PD model path + metric ran ===")
+    if not include_deprecated_gmvae:
+        print("(GM-VAE / GM-CVAE skipped — deprecated, see "
+              "vae_analysis.posthoc; pass --include-deprecated-gmvae to run "
+              "them anyway)")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(include_deprecated_gmvae="--include-deprecated-gmvae" in sys.argv)

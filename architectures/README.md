@@ -148,24 +148,34 @@ of the latent to the prior. Three knobs to fight this:
   `beta_max` and `warmup_epochs` are ignored in this mode; look at
   `beta_trajectory.png` for the curve that actually ran.
 
-## CARE-PD GM-CVAE extension
+## CARE-PD extension
 
-The stack now carries the CARE-PD Parkinsonian-gait plan on top of the
-neonate recipes: cohort conditioning, a Gaussian-mixture prior, the
-CARE-PD data adapter, and the evaluation battery. All of it is additive —
-with `n_cond=0` and `n_components=0` the config is the original plain VAE
-and the parameter counts are unchanged.
+The stack carries the CARE-PD Parkinsonian-gait plan on top of the neonate
+recipes: cohort conditioning, the CARE-PD data adapter, and the evaluation
+battery. All of it is additive — with `n_cond=0` the config is the original
+plain VAE and the parameter counts are unchanged.
 
-### The four models ([CARE-PD §7])
+> **GM-VAE / GM-CVAE deprecated** ([post-hoc plan §0]). The mixture-prior
+> models were removed from the active pipeline: they suffer component
+> collapse when the latent is not cleanly multimodal. The source is kept for
+> the record (`models/gaussian_mixture.py`) but guarded — building a mixture
+> (`n_components > 0`) now raises `DeprecationWarning` unless
+> `TrainingConfig(allow_deprecated_gmvae=True)` is set, and the four-model
+> smoke test runs only VAE + CVAE by default. **Phenotype structure is now
+> recovered post hoc** on the plain VAE / CVAE latents — see
+> `vae_analysis/posthoc/` and its `run_posthoc` entry point. Any GM
+> checkpoints go to `checkpoints/deprecated_gmvae/`.
 
-Two orthogonal switches on `TrainingConfig` select the model class:
+### The two core models ([CARE-PD §7], [post-hoc plan §0])
 
-| `n_cond` | `n_components` | Model | What it adds |
-|:---:|:---:|:---|:---|
-| 0 | 0 | VAE | reconstruction floor, N(0, I) prior |
-| >0 | 0 | CVAE | cohort embedding e(c) into encoder + decoder, conditioning dropout — strips the nuisance cohort axis |
-| 0 | ≥2 | GM-VAE | K-component mixture prior, EM-trained |
-| >0 | ≥2 | GM-CVAE | the target model: mixture prior **and** cohort conditioning |
+The `n_cond` switch on `TrainingConfig` selects the model class:
+
+| `n_cond` | `n_components` | Model | Status | What it adds |
+|:---:|:---:|:---|:---|:---|
+| 0 | 0 | VAE | **active** | reconstruction floor, N(0, I) prior |
+| >0 | 0 | CVAE | **active (target)** | cohort embedding e(c) into encoder + decoder, conditioning dropout — strips the nuisance cohort axis |
+| 0 | ≥2 | GM-VAE | deprecated | K-component mixture prior (guarded, `allow_deprecated_gmvae`) |
+| >0 | ≥2 | GM-CVAE | deprecated | mixture prior **and** cohort conditioning (guarded) |
 
 ```python
 cfg = TrainingConfig(
@@ -182,15 +192,13 @@ out = train(cfg, videos, cohort_per_video=cohort_ids)
 model, mixture = out["model"], out["mixture"]
 ```
 
-### How the GM prior is trained ([CARE-PD §7.3])
+### How the GM prior is trained ([GM-VAE §3.3]) — *deprecated*
 
-By default the mixture parameters `(π, μ_c, σ²_c)` are **gradient-trained
-jointly with the ELBO** (the regular / VaDE regime), and the GMM is seeded
-once from the pre-trained autoencoder's latents just before the KL warm-up
-begins. There is **no N(0,I) prior term** — the mixture is the prior, so
-`gm_aux_beta` defaults to 0. Set `gm_train="em"` for the EM-inspired
-block-coordinate scheme of [GM-VAE §3.3] instead: each epoch does a
-gradient pass with the mixture **frozen**, then an EM M-step over the
+_Retained for the record only; not on the active path ([post-hoc plan §0])._
+Following Fan et al., the mixture is trained by an EM-inspired
+block-coordinate scheme rather than gradient descent on the component
+parameters. Each epoch does a normal gradient pass over the
+encoder/decoder with the mixture **frozen**, then an EM M-step over the
 epoch's cached posterior means updates `(pi, mu, sigma^2)` in closed form
 (`GaussianMixturePrior.em_update`); it can re-add the N(0,I) safety tether
 via `gm_aux_beta`. The EM regime is more faithful to the paper but prone to
@@ -232,8 +240,10 @@ MLP predicting cohort), `cluster_label_agreement` + `kmeans_labels` /
 `linear_probe` (§11.3, UPDRS R² and freezer/medication balanced
 accuracy), and `occupancy` (§10). scikit-learn is imported lazily.
 
-`gm_smoke_test.py` trains all four models on synthetic multi-cohort data
-and runs the whole battery — read it as a worked example.
+`gm_smoke_test.py` trains the two core models (VAE + CVAE) on synthetic
+multi-cohort data and runs the battery — read it as a worked example. The
+deprecated GM-VAE / GM-CVAE paths run only with
+`--include-deprecated-gmvae`, to keep the retained source exercised.
 
 ## Two small warnings
 

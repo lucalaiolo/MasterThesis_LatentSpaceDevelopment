@@ -137,11 +137,20 @@ class TrainingConfig:
             the brief pre-training phase of [GM-VAE §6]. Set False to hold
             the mixture KL at full strength from epoch 0. Ignored when
             ``n_components == 0``.
-        beta schedule (GM runs): for a GM run the beta schedule no longer
-            weights any prior term — the N(0,I) regulariser is controlled
-            by ``gm_aux_beta`` (default 0, removed) instead. ``delay_epochs``
-            and ``warmup_epochs`` still matter: they shape the mixture-KL
-            warm-up ramp when ``gm_kl_warmup`` is on.
+        allow_deprecated_gmvae: **DEPRECATED PATH GUARD** ([post-hoc plan
+            §0]). The mixture-prior models (GM-VAE / GM-CVAE) were removed
+            from the active pipeline: they suffer component collapse when
+            the latent is not cleanly multimodal, and the phenotype claim
+            is now made post hoc on the plain VAE / CVAE latents instead.
+            The source is kept for the record but ``train`` refuses to build
+            a mixture (``n_components > 0``) unless this flag is explicitly
+            set to True. Leave it False in every default run. Ignored when
+            ``n_components == 0``.
+        beta_max / warmup_epochs (GM runs): for a GM run the beta schedule
+            drives the auxiliary KL(q(z|x) || N(0, I)) regulariser that
+            [GM-VAE §3.3, Alg. 1] adds on top of the mixture terms to keep
+            the manifold well-conditioned. Keep it small (e.g. 1e-2) or
+            zero it out; the mixture KL does the main regularising.
         mask_policy: one of "none", "uniform", "top_k_speed",
             "softmax_speed", "per_frame_speed", "limb". See
             `mask_policies.py` for the definitions ([MVAE §2]).
@@ -213,6 +222,9 @@ class TrainingConfig:
     gm_entropy_weight: float = 0.0
     gm_entropy_epochs: int = 5
     gm_kl_warmup: bool = True
+    # Deprecated-path guard ([post-hoc plan §0]): the mixture-prior models
+    # are off the active path; training one requires opting in explicitly.
+    allow_deprecated_gmvae: bool = False
 
     # Masking.
     mask_policy: Literal["none", "uniform", "top_k_speed",
@@ -274,6 +286,16 @@ class TrainingConfig:
             raise ValueError(
                 "n_components == 1 is a plain VAE with a shifted prior; set "
                 "0 for the N(0, I) prior or >= 2 for a real mixture."
+            )
+        if self.n_components > 0 and not self.allow_deprecated_gmvae:
+            raise DeprecationWarning(
+                "GM-VAE / GM-CVAE (n_components > 0) is a DEPRECATED path "
+                "([post-hoc plan §0]): the mixture prior collapses when the "
+                "latent is not cleanly multimodal, and phenotype structure "
+                "is now recovered post hoc on the plain VAE / CVAE latents "
+                "(see vae_analysis.posthoc). The source is kept for the "
+                "record only. To run it anyway — against the plan — set "
+                "TrainingConfig(allow_deprecated_gmvae=True) explicitly."
             )
         if self.n_components > 0 and self.gm_em_steps < 1:
             raise ValueError(

@@ -47,25 +47,36 @@ _LOG_2PI = math.log(2.0 * math.pi)
 class GaussianMixturePrior(nn.Module):
     """A K-component diagonal-Gaussian prior over the latent space.
 
-    All state is carried in buffers:
+    Two training regimes, selected by ``trainable``:
+
+    - ``trainable=True`` (default) — the **regular / VaDE** regime the
+      plan's §7.3 describes: the mixture parameters are ``nn.Parameter``s
+      optimised by gradient descent jointly with the ELBO. Robust, no EM
+      alternation, and what to reach for when the EM scheme is unstable.
+    - ``trainable=False`` — the **EM** regime of [GM-VAE Alg. 1]: the
+      parameters are buffers set in closed form by :meth:`em_update`;
+      gradients never touch them.
+
+    State (parameters or buffers depending on the regime):
 
         means:   (K, d_z)   component means mu_c
         logvars: (K, d_z)   component log-variances log sigma_c^2
-        pi:      (K,)        mixture weights, sum to 1
-
-    Buffers rather than parameters because the M-step of [GM-VAE Alg. 1]
-    sets them in closed form; gradients never touch them.
+        weights (K,)        mixture weights pi, on the simplex. In the
+                            trainable regime these are a softmax of a free
+                            ``weight_logits`` parameter; in the EM regime a
+                            ``pi`` buffer. Read both through :meth:`weights`.
     """
 
     def __init__(self, n_components: int, d_z: int,
                  var_floor: float = 1e-4, init_spread: float = 1.0,
-                 seed: int | None = 0):
+                 seed: int | None = 0, trainable: bool = True):
         super().__init__()
         if n_components < 2:
             raise ValueError("GaussianMixturePrior needs at least 2 components.")
         self.K = n_components
         self.d_z = d_z
         self.var_floor = float(var_floor)
+        self.trainable = trainable
 
         gen = None
         if seed is not None:
@@ -73,10 +84,36 @@ class GaussianMixturePrior(nn.Module):
         # Scatter the means so components start distinguishable; unit
         # component variances; uniform weights ([CARE-PD §10] — start pi
         # at 1/K to guard against early component collapse).
-        means = init_spread * torch.randn(n_components, d_z, generator=gen)
-        self.register_buffer("means", means)
-        self.register_buffer("logvars", torch.zeros(n_components, d_z))
-        self.register_buffer("pi", torch.full((n_components,), 1.0 / n_components))
+        means_init = init_spread * torch.randn(n_components, d_z, generator=gen)
+        logvars_init = torch.zeros(n_components, d_z)
+        if trainable:
+            # Gradient-trained parameters; weights via unconstrained logits
+            # so a softmax keeps them on the simplex under any gradient.
+            self.means = nn.Parameter(means_init)
+            self.logvars = nn.Parameter(logvars_init)
+            self.weight_logits = nn.Parameter(torch.zeros(n_components))
+        else:
+            # EM-updated buffers.
+            self.register_buffer("means", means_init)
+            self.register_buffer("logvars", logvars_init)
+            self.register_buffer("pi", torch.full((n_components,),
+                                                  1.0 / n_components))
+
+    def weights(self):
+        """Mixture weights pi on the simplex, whichever regime is active."""
+        if self.trainable:
+            return torch.softmax(self.weight_logits, dim=0)
+        return self.pi
+
+    def component_logvars(self):
+        """Component log-variances, floored so sigma_c^2 >= var_floor.
+
+        Guards the gradient regime, where an unconstrained ``logvars``
+        parameter could otherwise collapse a component's variance to zero
+        and blow up the density. A no-op for the EM regime, whose M-step
+        already clamps to the floor.
+        """
+        return self.logvars.clamp_min(math.log(self.var_floor))
 
     # ---- Responsibilities -------------------------------------------------
     def component_log_prob(self, z):
@@ -90,7 +127,7 @@ class GaussianMixturePrior(nn.Module):
         # (B, 1, d_z) against (1, K, d_z).
         z = z.unsqueeze(1)
         means = self.means.unsqueeze(0)
-        logvars = self.logvars.unsqueeze(0)
+        logvars = self.component_logvars().unsqueeze(0)
         var = logvars.exp()
         # log N = -1/2 sum_j [ log(2pi) + logvar_j + (z_j - mu_j)^2 / var_j ].
         quad = (z - means).pow(2) / var
@@ -105,7 +142,7 @@ class GaussianMixturePrior(nn.Module):
         Returns:
             (B, K) soft assignments, rows sum to 1.
         """
-        log_pi = torch.log(self.pi.clamp_min(1e-12)).unsqueeze(0)  # (1, K)
+        log_pi = torch.log(self.weights().clamp_min(1e-12)).unsqueeze(0)  # (1, K)
         logits = log_pi + self.component_log_prob(z)               # (B, K)
         return torch.softmax(logits, dim=-1)
 
@@ -131,7 +168,7 @@ class GaussianMixturePrior(nn.Module):
         """
         var = logvar.exp().unsqueeze(1)                   # (B, 1, d_z)
         mu = mu.unsqueeze(1)                              # (B, 1, d_z)
-        c_logvar = self.logvars.unsqueeze(0)              # (1, K, d_z)
+        c_logvar = self.component_logvars().unsqueeze(0)  # (1, K, d_z)
         c_var = c_logvar.exp()
         c_means = self.means.unsqueeze(0)                 # (1, K, d_z)
 
@@ -151,7 +188,7 @@ class GaussianMixturePrior(nn.Module):
         Returns:
             (B,) per-sample categorical KL (>= 0).
         """
-        log_pi = torch.log(self.pi.clamp_min(1e-12)).unsqueeze(0)
+        log_pi = torch.log(self.weights().clamp_min(1e-12)).unsqueeze(0)
         log_resp = torch.log(resp.clamp_min(1e-12))
         return (resp * (log_resp - log_pi)).sum(dim=-1)
 
@@ -185,6 +222,11 @@ class GaussianMixturePrior(nn.Module):
         Returns:
             (K,) occupancy rho_c = mean_n gamma_{n,c} after the last step.
         """
+        if self.trainable:
+            raise RuntimeError(
+                "em_update is for the EM regime (trainable=False); in the "
+                "gradient regime the mixture is optimised by the optimiser."
+            )
         var = logvar.exp()                                # (N, d_z)
         rho = self.pi.clone()
         for _ in range(max(1, n_steps)):
@@ -218,9 +260,15 @@ class GaussianMixturePrior(nn.Module):
         """Seed the component means by k-means++-style spread over ``mu``.
 
         A short warm start ([GM-VAE §6], "brief pre-training phase")
-        places the initial means on actual data rather than random noise,
-        which the paper notes helps EM convergence. Falls back silently to
-        the random init if there are fewer points than components.
+        places the initial means on actual data rather than random noise —
+        which helps both regimes: EM convergence, and (crucially) the
+        gradient regime, where a VaDE run that starts its GMM from the
+        pre-trained autoencoder's latents clusters far better than one
+        started from noise. Falls back silently to the current init if
+        there are fewer points than components.
+
+        Works for both regimes: assigns through ``.data`` for the
+        gradient-trained parameters and directly for the EM buffers.
 
         Args:
             mu: (N, d_z) posterior means from a warm-up pass.
@@ -234,6 +282,12 @@ class GaussianMixturePrior(nn.Module):
             chosen = mu[idx]                              # (m, d_z)
             d2 = torch.cdist(mu, chosen).pow(2).min(dim=1).values
             idx.append(int(torch.argmax(d2).item()))
-        self.means = mu[idx].clone()
-        self.logvars = torch.zeros_like(self.logvars)
-        self.pi = torch.full_like(self.pi, 1.0 / self.K)
+        new_means = mu[idx].clone()
+        if self.trainable:
+            self.means.data.copy_(new_means)
+            self.logvars.data.zero_()
+            self.weight_logits.data.zero_()
+        else:
+            self.means = new_means
+            self.logvars = torch.zeros_like(self.logvars)
+            self.pi = torch.full_like(self.pi, 1.0 / self.K)

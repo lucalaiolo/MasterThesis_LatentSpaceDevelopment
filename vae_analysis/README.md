@@ -61,6 +61,42 @@ data; read it as a full worked example.
 | `screening`          | II §21, §23 | density typicality, attention entropy |
 | `honesty`            | I §12 | block bootstrap, permutation test |
 
+## Post-hoc CARE-PD analysis (`posthoc/`)
+
+The `posthoc` subpackage implements the CARE-PD post-hoc structure plan.
+The mixture-prior models (GM-VAE / GM-CVAE) are **off the pipeline**
+(component collapse); the phenotype claim is made post hoc on the two core
+latents — the plain **VAE** (baseline) and the **CVAE** (target) — and
+scored against the clinical labels. One entry point runs the whole battery
+and writes to `outputs/posthoc/`:
+
+```python
+from architectures.care_pd import load_cohorts, build_bundle, TIER1_COHORTS
+from vae_analysis.posthoc import run_posthoc
+
+walks  = load_cohorts("data/h36m", TIER1_COHORTS, source_dir="data/smpl")
+bundle = build_bundle(walks)
+out = run_posthoc(vae_checkpoint="runs/vae/best.pt",
+                  cvae_checkpoint="runs/cvae/best.pt",
+                  bundle=bundle)          # -> outputs/posthoc/{*.png, *.csv, results.json, summary.md}
+```
+
+| Module | Plan § | What it does |
+|:---|:---|:---|
+| `data`       | §1, §4.1 | cohort-aware encoding to μ, clip/label alignment, outer-loop trajectories |
+| `palette`    | §6 | fixed cohort / state / model colours, sequential/diverging maps, `save_fig` ≥150 dpi |
+| `clustering` | §1, §2, §2.1 | BIC vs K, k-means / GMM / HDBSCAN, reseed/subsample/bootstrap/cross-method stability, consensus matrix |
+| `agreement`  | §2.2, §2.3, §3 | ARI/NMI vs UPDRS/freezer/med/cohort, PCA+UMAP panels, subject composition, within-severity substructure |
+| `temporal`   | §4 | Gaussian HMM regimes (BIC, dwell, transitions, label usage) + PELT change points validated on E-LC FoG |
+| `probes`     | §5 | subject-split ridge/logistic phenotype probes + the site probe, VAE vs CVAE bar chart |
+| `report`     | §7 | `summary.md` with a plain-language verdict per section |
+| `driver`     | — | `run_posthoc` orchestration → `outputs/posthoc/` |
+
+`posthoc/smoke_test.py` runs the whole thing on synthetic multi-cohort data
+with fake encoders (no torch needed) — read it as a worked example.
+Optional deps `umap-learn`, `hmmlearn`, `ruptures` unlock the UMAP panels,
+the HMM, and PELT; each is guarded and skips cleanly when absent.
+
 ## Two cautions carried over from the notes
 
 The screening score (§21) means "unlike the training set", not

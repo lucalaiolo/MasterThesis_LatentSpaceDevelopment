@@ -52,9 +52,20 @@ def build_mixture(config):
     Returns ``None`` when ``config.n_components == 0`` (standard N(0, I)
     prior). Otherwise a ``GaussianMixturePrior`` with K components over the
     latent dimension, seeded from ``config.seed`` for reproducibility.
+
+    **Deprecated path** ([post-hoc plan §0]): a mixture is only built when
+    ``config.allow_deprecated_gmvae`` is set. The GM-VAE / GM-CVAE were
+    removed from the active pipeline (component collapse); the phenotype
+    claim now runs post hoc on the plain VAE / CVAE latents. Kept callable
+    for the record, guarded so no default run reaches it by accident.
     """
     if config.n_components == 0:
         return None
+    if not getattr(config, "allow_deprecated_gmvae", False):
+        raise DeprecationWarning(
+            "build_mixture: GM-VAE / GM-CVAE is a deprecated path "
+            "([post-hoc plan §0]). Set allow_deprecated_gmvae=True to opt in."
+        )
     return GaussianMixturePrior(
         n_components=config.n_components,
         d_z=config.latent_dim,

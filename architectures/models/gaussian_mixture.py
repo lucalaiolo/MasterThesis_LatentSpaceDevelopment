@@ -1,5 +1,19 @@
 """Gaussian-mixture prior for the GM-VAE / GM-CVAE ([CARE-PD §7.3]).
 
+.. deprecated:: post-hoc plan §0
+    The GM-VAE / GM-CVAE are **off the active pipeline**. In this setting
+    the mixture prior suffers component collapse: when the latent is not
+    cleanly multimodal the prior has nothing to latch onto and dumps its
+    mass onto one or two components. The thesis claim is representational
+    and does not need clustering baked into the prior — nuisance removal is
+    measured by the site probe (VAE vs CVAE) and phenotype recovery by
+    clustering the plain VAE / CVAE latent **post hoc** (see
+    ``vae_analysis.posthoc``). This module is retained for the record only;
+    it is not imported by any default run, and ``build_mixture`` /
+    ``train`` refuse to instantiate it unless
+    ``TrainingConfig(allow_deprecated_gmvae=True)`` is set explicitly. Do
+    not use it downstream.
+
 The mixture replaces the standard N(0, I) prior with
 
     p(y) = Cat(pi),   p(z | y) = N(mu_y, diag(sigma_y^2)),

@@ -495,22 +495,33 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     else:
         raise ValueError(f"unknown recipe: {config.recipe!r}")
 
-    beta = _resolve_beta(config, epoch, kl_state, rec_full, update=update)
-    loss = rec_full + beta * kl
+    loss = rec_full
     if config.recipe in (2, 3):
         loss = loss + config.lambda_aux * rec_aux
 
-    # ---- Mixture-prior terms ([CARE-PD §7.3], [GM-VAE §3.3]) ----------
     kl_z = zero
     kl_y = zero
     entropy = zero
-    if mixture is not None:
+
+    if mixture is None:
+        # Plain VAE / CVAE: the N(0,I) KL *is* the prior; beta is its
+        # scheduled weight.
+        beta = _resolve_beta(config, epoch, kl_state, rec_full, update=update)
+        loss = loss + beta * kl
+    else:
+        # GM-VAE / GM-CVAE ([CARE-PD §7.3], [GM-VAE §3.3]): the mixture is
+        # the prior. The N(0,I) KL is only an optional safety tether,
+        # weighted by `gm_aux_beta` (default 0 → removed), not the beta
+        # schedule.
+        beta = config.gm_aux_beta
+        if beta != 0.0:
+            loss = loss + beta * kl
         resp = mixture.responsibilities(mu)
         kl_z = mixture.kl_z_given_y(mu, logvar, resp).mean()
         kl_y = mixture.kl_y(resp).mean()
         entropy = mixture.assignment_entropy(resp).mean()
-        # Ramp the mixture KL by the same warm-up shape as beta, so the
-        # "learn first" delay covers the mixture terms too ([GM-VAE §6]).
+        # Ramp the mixture KL by the warm-up shape so the "learn first"
+        # delay covers the mixture terms too ([GM-VAE §6]).
         kl_ramp = _kl_warmup_factor(config, epoch)
         loss = loss + kl_ramp * (config.gm_beta_z * kl_z
                                  + config.gm_beta_y * kl_y)

@@ -101,6 +101,15 @@ class TrainingConfig:
             ``n_components == 0``.
         gm_beta_y: weight on the categorical KL KL(q(y|x) || p(y))
             (the plan's beta_y). Ignored when ``n_components == 0``.
+        gm_aux_beta: weight of the auxiliary KL(q(z|x) || N(0, I)) term for
+            GM runs. 0 (default) removes it — in a GM-VAE the mixture *is*
+            the prior, so the N(0,I) term is redundant. A small positive
+            value re-adds it as the safety tether of [GM-VAE §3.3] (useful
+            mainly with ``gm_train="em"``). Note this replaces the beta
+            schedule for GM runs: ``beta_max`` and ``beta_mode`` no longer
+            weight any prior term when ``n_components > 0``, though
+            ``delay_epochs`` / ``warmup_epochs`` still shape the mixture-KL
+            ramp via ``gm_kl_warmup``.
         gm_em_steps: number of EM iterations run over the cached epoch
             latents to refresh the mixture parameters after each gradient
             epoch ([GM-VAE Alg. 1], the N_EM inner loop). Ignored when
@@ -206,6 +215,7 @@ class TrainingConfig:
     gm_train: Literal["gradient", "em"] = "gradient"
     gm_beta_z: float = 1.0
     gm_beta_y: float = 1.0
+    gm_aux_beta: float = 0.0
     gm_em_steps: int = 1
     gm_var_floor: float = 1e-4
     gm_init_spread: float = 1.0

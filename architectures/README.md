@@ -179,11 +179,14 @@ The `n_cond` switch on `TrainingConfig` selects the model class:
 
 ```python
 cfg = TrainingConfig(
-    architecture="conv", clip_length=60, n_joints=22, latent_dim=32,
+    architecture="conv", clip_length=60, n_joints=17, latent_dim=32,
     n_cond=3, cond_dim=8, cond_dropout=0.15,        # CVAE / GM-CVAE
-    n_components=5, gm_beta_z=1e-2, gm_beta_y=1.0,   # GM-VAE / GM-CVAE
-    gm_em_steps=1, gm_entropy_weight=1.0, gm_entropy_epochs=5,
-    beta_max=1e-2,   # for a GM run beta is the auxiliary N(0,I) regulariser
+    n_components=5, gm_beta_z=1e-2, gm_beta_y=0.5,   # GM-VAE / GM-CVAE
+    gm_train="gradient",             # regular VaDE regime (default); "em" also available
+    gm_entropy_weight=1.0, gm_entropy_epochs=5,
+    # No N(0,I) term for GM runs — the mixture is the prior. gm_aux_beta
+    # defaults to 0; the beta schedule (beta_max) does not weight anything
+    # here, though delay_epochs/warmup_epochs still shape the mixture ramp.
 )
 out = train(cfg, videos, cohort_per_video=cohort_ids)
 model, mixture = out["model"], out["mixture"]
@@ -197,7 +200,10 @@ block-coordinate scheme rather than gradient descent on the component
 parameters. Each epoch does a normal gradient pass over the
 encoder/decoder with the mixture **frozen**, then an EM M-step over the
 epoch's cached posterior means updates `(pi, mu, sigma^2)` in closed form
-(`GaussianMixturePrior.em_update`). The soft assignment of a latent point
+(`GaussianMixturePrior.em_update`); it can re-add the N(0,I) safety tether
+via `gm_aux_beta`. The EM regime is more faithful to the paper but prone to
+component collapse, which is why gradient is the default. The soft
+assignment of a latent point
 is the exact posterior `p(c | z)` under the current mixture — there is no
 amortised `q(y|x)` head. Per-component occupancy is logged every epoch
 (`history["gm_occupancy"]`) so component collapse ([CARE-PD §10]) is

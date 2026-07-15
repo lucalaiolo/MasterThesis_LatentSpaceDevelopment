@@ -196,6 +196,18 @@ def plot_beta_trajectory(history: dict):
 # ============================================================================
 
 
+def _unpack_loader_batch(batch):
+    """Split a loader batch into ``(X, M, c)``.
+
+    The training loader yields ``(X, M)`` for plain / GM-VAE runs and
+    ``(X, M, c)`` when conditioning ids are present (CVAE / GM-CVAE). Any
+    diagnostic that iterates the loader has to tolerate both shapes.
+    """
+    if len(batch) == 3:
+        return batch[0], batch[1], batch[2]
+    return batch[0], batch[1], None
+
+
 def collect_latent_stats(model, loader, device: str = "cpu",
                          max_batches: int | None = None) -> dict:
     """Gather posterior means, log-variances, and per-dim KL over a loader.
@@ -213,12 +225,15 @@ def collect_latent_stats(model, loader, device: str = "cpu",
     model.eval()
     mus, logvars = [], []
     with torch.no_grad():
-        for i, (X, M) in enumerate(loader):
+        for i, batch in enumerate(loader):
             if max_batches is not None and i >= max_batches:
                 break
+            X, M, c = _unpack_loader_batch(batch)
             X = X.to(device)
             M = M.to(device)
-            mu, logvar = model.encode(X, M)
+            if c is not None:
+                c = c.to(device)
+            mu, logvar = model.encode(X, M, c)
             mus.append(mu.cpu().numpy())
             logvars.append(logvar.cpu().numpy())
     if not mus:
@@ -358,10 +373,10 @@ def plot_latent_traversal(model, ref_clip: np.ndarray, ref_mask: np.ndarray,
     return fig
 
 
-def _decode_full(model, z, M):
+def _decode_full(model, z, M, c=None):
     """Call the full-clip decoder head, whatever the recipe."""
     if hasattr(model, "decode_full"):
-        return model.decode_full(z)
+        return model.decode_full(z, c)
     # Legacy path.
     return model.decode(z, M)
 
@@ -372,29 +387,34 @@ def _decode_full(model, z, M):
 
 
 def compute_predictions(model, X: np.ndarray, M: np.ndarray,
-                        device: str = "cpu", head: str = "auto") -> np.ndarray:
+                        device: str = "cpu", head: str = "auto",
+                        c=None) -> np.ndarray:
     """Run the model and return the reconstruction as a numpy array.
 
     `head`: "full" always uses the full-clip head; "inp" uses the
     inpainting head if the model has one; "auto" picks the inpainting
     head when the model is Recipe-3 and the mask has any hidden entries,
     else the full head.
+
+    `c`: optional per-clip conditioning ids for a CVAE / GM-CVAE. Ignored
+    by unconditional models.
     """
     torch = _import_torch()
     model.eval()
     with torch.no_grad():
         Xt = torch.from_numpy(X.astype(np.float32)).to(device)
         Mt = torch.from_numpy(M.astype(np.float32)).to(device)
-        mu, logvar = model.encode(Xt, Mt)
+        ct = None if c is None else torch.as_tensor(np.asarray(c)).to(device)
+        mu, logvar = model.encode(Xt, Mt, ct)
         # Use the posterior mean at eval, not a sample ([MVAE §3.7]).
         has_inp = getattr(model, "inpainting", False)
         want_inp = (head == "inp") or (
             head == "auto" and has_inp and (M < 0.5).any()
         )
         if want_inp and has_inp:
-            X_hat = model.decode_inp(mu, Mt)
+            X_hat = model.decode_inp(mu, Mt, ct)
         else:
-            X_hat = _decode_full(model, mu, Mt)
+            X_hat = _decode_full(model, mu, Mt, ct)
         return X_hat.cpu().numpy()
 
 
@@ -693,10 +713,13 @@ def plot_training_summary(history: dict, out_dir: str | Path,
             _save(plot_latent_pca(stats), "latent_pca.png")
 
         # One reconstruction / mask preview from the first batch.
-        for X, M in loader:
+        for batch in loader:
+            X, M, c = _unpack_loader_batch(batch)
             X_np = X.numpy() if hasattr(X, "numpy") else np.asarray(X)
             M_np = M.numpy() if hasattr(M, "numpy") else np.asarray(M)
-            X_hat = compute_predictions(model, X_np, M_np, device=device)
+            c_np = None if c is None else (
+                c.numpy() if hasattr(c, "numpy") else np.asarray(c))
+            X_hat = compute_predictions(model, X_np, M_np, device=device, c=c_np)
             _save(plot_pose_comparison(X_np[0], X_hat[0], edges=skeleton_edges),
                   "reconstruction_frames.png")
             _save(plot_joint_trajectory(X_np[0], X_hat[0], joint_idx=0),

@@ -176,9 +176,10 @@ def train(config: TrainingConfig,
             extra = (f" klz={train_stats['kl_z']:.3f} kly={train_stats['kl_y']:.3f}"
                      f" occ=[{', '.join(f'{o:.2f}' for o in occ)}]")
         print(f"[epoch {epoch:3d}] "
-              f"beta={train_stats['beta']:.4f} "
-              f"train_loss={train_stats['loss']:.4f} "
-              f"val_loss={val_stats['loss']:.4f}{extra}  ({dt:.1f} s)")
+              f"beta={train_stats['beta']:.2e} "
+              f"loss={train_stats['loss']:.4f}/{val_stats['loss']:.4f} "
+              f"rec={train_stats['rec_full']:.4f}/{val_stats['rec_full']:.4f}"
+              f"{extra}  ({dt:.1f} s)")
 
         if val_stats["loss"] < best_val:
             best_val = val_stats["loss"]

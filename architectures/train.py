@@ -156,6 +156,8 @@ def train(config: TrainingConfig,
     if mixture is not None:
         history["gm_occupancy"] = []
     best_val = float("inf")
+    best_ckpt = None
+    best_epoch = -1
     last_ckpt = None
 
     # State for the Asperti-Trentin "computed" KL-weight mode. Holds the
@@ -198,6 +200,17 @@ def train(config: TrainingConfig,
         history["train"].append(train_stats)
         history["val"].append(val_stats)
 
+        # Pick best.pt on a KL-schedule-independent score so annealing does
+        # not lock the checkpoint onto the untrained epoch-0 model.
+        val_score = _val_selection_score(config, val_stats)
+        saved_best = val_score < best_val
+        if saved_best:
+            best_val = val_score
+            best_epoch = epoch
+            best_ckpt = out / "best.pt"
+            _save_ckpt(best_ckpt, model, mixture, config, epoch)
+            last_ckpt = best_ckpt
+
         dt = time.time() - t0
         extra = ""
         if mixture is not None:
@@ -208,12 +221,8 @@ def train(config: TrainingConfig,
               f"beta={train_stats['beta']:.2e} "
               f"loss={train_stats['loss']:.4f}/{val_stats['loss']:.4f} "
               f"rec={train_stats['rec_full']:.4f}/{val_stats['rec_full']:.4f}"
-              f"{extra}  ({dt:.1f} s)")
-
-        if val_stats["loss"] < best_val:
-            best_val = val_stats["loss"]
-            last_ckpt = out / "best.pt"
-            _save_ckpt(last_ckpt, model, mixture, config, epoch)
+              f"{extra}  ({dt:.1f} s)"
+              f"{'  *best' if saved_best else ''}")
 
         if config.save_every and epoch and epoch % config.save_every == 0:
             ck = out / f"epoch_{epoch:04d}.pt"
@@ -222,6 +231,11 @@ def train(config: TrainingConfig,
 
     with open(out / "history.json", "w") as f:
         json.dump(history, f, indent=2)
+
+    if best_ckpt is not None:
+        metric = getattr(config, "checkpoint_metric", "rec_full")
+        print(f"[ckpt] best.pt = epoch {best_epoch} "
+              f"(val {metric}={best_val:.4f}) -> {best_ckpt}")
 
     # Best-effort summary plots. Skipped silently if matplotlib is missing.
     try:
@@ -235,7 +249,34 @@ def train(config: TrainingConfig,
         print(f"[plots] skipped: {e}")
 
     return {"model": model, "mixture": mixture,
-            "history": history, "checkpoint": last_ckpt}
+            "history": history, "checkpoint": best_ckpt or last_ckpt,
+            "best_epoch": best_epoch}
+
+
+def _val_selection_score(config, val_stats) -> float:
+    """Validation score for picking ``best.pt`` ([config.checkpoint_metric]).
+
+    Selecting on the *scheduled* total loss is biased by KL annealing: at
+    epoch 0 beta ~ 0, so the total loss is smallest there and ``best.pt``
+    locks onto the untrained, latent-collapsed model. The default
+    ``"rec_full"`` selects on reconstruction, which is beta-independent and
+    monotone enough to never pick the untrained epoch; ``"elbo"`` uses the
+    objective at the ceiling beta so KL is weighted identically at every
+    epoch; ``"loss"`` is the legacy (biased) behaviour.
+    """
+    metric = getattr(config, "checkpoint_metric", "rec_full")
+    if metric == "loss":
+        return float(val_stats["loss"])
+    if metric == "elbo":
+        beta_ceiling = 0.0 if config.beta_mode == "computed" else config.beta_max
+        score = float(val_stats["rec_full"]) + beta_ceiling * float(val_stats["kl"])
+        if config.recipe in (2, 3):
+            score += config.lambda_aux * float(val_stats["rec_aux"])
+        if config.n_components > 0:
+            score += (config.gm_beta_z * float(val_stats["kl_z"])
+                      + config.gm_beta_y * float(val_stats["kl_y"]))
+        return score
+    return float(val_stats["rec_full"])          # "rec_full" (default)
 
 
 def _model_kind(config) -> str:

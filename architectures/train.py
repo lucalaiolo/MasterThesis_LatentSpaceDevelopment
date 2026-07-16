@@ -81,6 +81,13 @@ def train(config: TrainingConfig,
             "config.n_cond > 0 but no cohort_per_video was passed; the "
             "CVAE / GM-CVAE needs a conditioning id per video."
         )
+    if config.site_adv_lambda_max > 0 and cohort_per_video is None:
+        raise ValueError(
+            "config.site_adv_lambda_max > 0 but no cohort_per_video was "
+            "passed; the site adversary needs a cohort label per video "
+            "(the labels are used only as the adversary's target, not fed "
+            "into the encoder/decoder)."
+        )
 
     # ---- Reproducibility ----------------------------------------------
     torch.manual_seed(config.seed)
@@ -134,6 +141,22 @@ def train(config: TrainingConfig,
             print(f"[mixture] {config.n_components} components, "
                   f"EM {config.gm_em_steps} step(s)/epoch")
 
+    # Site adversary ([Phase 2c]): trained jointly, gradient reversed into
+    # the encoder. Its parameters join the same optimiser and the same
+    # single backward pass — it minimises the cohort cross-entropy while the
+    # reversal makes the encoder maximise it (drive cohort out of z).
+    adversary = None
+    if config.site_adv_lambda_max > 0:
+        from .models.common import SiteAdversary
+        n_site = int(np.asarray(cohort_per_video).max()) + 1
+        adversary = SiteAdversary(config.latent_dim, n_site,
+                                  hidden=config.site_adv_hidden).to(device)
+        opt_params += list(adversary.parameters())
+        cond_note = "conditioned" if config.n_cond > 0 else "unconditional"
+        print(f"[adversary] site adversary over {n_site} cohorts on a "
+              f"{cond_note} encoder, lambda_max={config.site_adv_lambda_max}, "
+              f"warmup={config.site_adv_warmup_epochs} epoch(s)")
+
     opt = torch.optim.AdamW(opt_params,
                             lr=config.learning_rate,
                             weight_decay=config.weight_decay)
@@ -156,6 +179,8 @@ def train(config: TrainingConfig,
     if mixture is not None:
         history["gm_occupancy"] = []
     best_val = float("inf")
+    best_ckpt = None
+    best_epoch = -1
     last_ckpt = None
 
     # State for the Asperti-Trentin "computed" KL-weight mode. Holds the
@@ -170,7 +195,7 @@ def train(config: TrainingConfig,
         model.train()
         train_stats, cached = _run_epoch(model, train_loader, config, epoch,
                                          kl_state, opt, device, train=True,
-                                         mixture=mixture)
+                                         mixture=mixture, adversary=adversary)
         # Mixture bookkeeping after the gradient epoch.
         if mixture is not None and cached is not None:
             mu_all, logvar_all = cached
@@ -193,10 +218,21 @@ def train(config: TrainingConfig,
         with torch.no_grad():
             val_stats, _ = _run_epoch(model, val_loader, config, epoch,
                                       kl_state, None, device, train=False,
-                                      mixture=mixture)
+                                      mixture=mixture, adversary=adversary)
 
         history["train"].append(train_stats)
         history["val"].append(val_stats)
+
+        # Pick best.pt on a KL-schedule-independent score so annealing does
+        # not lock the checkpoint onto the untrained epoch-0 model.
+        val_score = _val_selection_score(config, val_stats)
+        saved_best = val_score < best_val
+        if saved_best:
+            best_val = val_score
+            best_epoch = epoch
+            best_ckpt = out / "best.pt"
+            _save_ckpt(best_ckpt, model, mixture, config, epoch, adversary)
+            last_ckpt = best_ckpt
 
         dt = time.time() - t0
         extra = ""
@@ -204,24 +240,31 @@ def train(config: TrainingConfig,
             occ = history["gm_occupancy"][-1]
             extra = (f" klz={train_stats['kl_z']:.3f} kly={train_stats['kl_y']:.3f}"
                      f" occ=[{', '.join(f'{o:.2f}' for o in occ)}]")
+        if adversary is not None:
+            # Adversary accuracy should fall toward chance as invariance
+            # takes hold; if it pins at chance instantly, lambda is too high.
+            extra += (f" advAcc={train_stats['adv_acc']:.2f}"
+                      f" (chance {1.0 / adversary.net[-1].out_features:.2f})"
+                      f" lam={_site_adv_lambda(config, epoch):.2f}")
         print(f"[epoch {epoch:3d}] "
               f"beta={train_stats['beta']:.2e} "
               f"loss={train_stats['loss']:.4f}/{val_stats['loss']:.4f} "
               f"rec={train_stats['rec_full']:.4f}/{val_stats['rec_full']:.4f}"
-              f"{extra}  ({dt:.1f} s)")
-
-        if val_stats["loss"] < best_val:
-            best_val = val_stats["loss"]
-            last_ckpt = out / "best.pt"
-            _save_ckpt(last_ckpt, model, mixture, config, epoch)
+              f"{extra}  ({dt:.1f} s)"
+              f"{'  *best' if saved_best else ''}")
 
         if config.save_every and epoch and epoch % config.save_every == 0:
             ck = out / f"epoch_{epoch:04d}.pt"
-            _save_ckpt(ck, model, mixture, config, epoch)
+            _save_ckpt(ck, model, mixture, config, epoch, adversary)
             last_ckpt = ck
 
     with open(out / "history.json", "w") as f:
         json.dump(history, f, indent=2)
+
+    if best_ckpt is not None:
+        metric = getattr(config, "checkpoint_metric", "rec_full")
+        print(f"[ckpt] best.pt = epoch {best_epoch} "
+              f"(val {metric}={best_val:.4f}) -> {best_ckpt}")
 
     # Best-effort summary plots. Skipped silently if matplotlib is missing.
     try:
@@ -234,8 +277,35 @@ def train(config: TrainingConfig,
     except ImportError as e:
         print(f"[plots] skipped: {e}")
 
-    return {"model": model, "mixture": mixture,
-            "history": history, "checkpoint": last_ckpt}
+    return {"model": model, "mixture": mixture, "site_adversary": adversary,
+            "history": history, "checkpoint": best_ckpt or last_ckpt,
+            "best_epoch": best_epoch}
+
+
+def _val_selection_score(config, val_stats) -> float:
+    """Validation score for picking ``best.pt`` ([config.checkpoint_metric]).
+
+    Selecting on the *scheduled* total loss is biased by KL annealing: at
+    epoch 0 beta ~ 0, so the total loss is smallest there and ``best.pt``
+    locks onto the untrained, latent-collapsed model. The default
+    ``"rec_full"`` selects on reconstruction, which is beta-independent and
+    monotone enough to never pick the untrained epoch; ``"elbo"`` uses the
+    objective at the ceiling beta so KL is weighted identically at every
+    epoch; ``"loss"`` is the legacy (biased) behaviour.
+    """
+    metric = getattr(config, "checkpoint_metric", "rec_full")
+    if metric == "loss":
+        return float(val_stats["loss"])
+    if metric == "elbo":
+        beta_ceiling = 0.0 if config.beta_mode == "computed" else config.beta_max
+        score = float(val_stats["rec_full"]) + beta_ceiling * float(val_stats["kl"])
+        if config.recipe in (2, 3):
+            score += config.lambda_aux * float(val_stats["rec_aux"])
+        if config.n_components > 0:
+            score += (config.gm_beta_z * float(val_stats["kl_z"])
+                      + config.gm_beta_y * float(val_stats["kl_y"]))
+        return score
+    return float(val_stats["rec_full"])          # "rec_full" (default)
 
 
 def _model_kind(config) -> str:
@@ -251,14 +321,21 @@ def _model_kind(config) -> str:
     return "VAE"
 
 
-def _save_ckpt(path, model, mixture, config, epoch):
-    """Checkpoint the model, and the mixture parameters when present."""
+def _save_ckpt(path, model, mixture, config, epoch, adversary=None):
+    """Checkpoint the model, plus mixture / adversary parameters when present.
+
+    The site adversary is a training-time module (not needed to encode), but
+    it is saved so a run is fully reproducible. ``load_checkpoint`` rebuilds
+    only the VAE, so its presence in the blob is harmless downstream.
+    """
     torch = _torch()
     blob = {"model": model.state_dict(),
             "config": config.__dict__,
             "epoch": epoch}
     if mixture is not None:
         blob["mixture"] = mixture.state_dict()
+    if adversary is not None:
+        blob["site_adversary"] = adversary.state_dict()
     torch.save(blob, path)
 
 
@@ -287,6 +364,23 @@ def _kl_warmup_factor(config, epoch: int) -> float:
     return 1.0
 
 
+def _site_adv_lambda(config, epoch: int) -> float:
+    """Gradient-reversal strength for this epoch ([Phase 2c]).
+
+    Linear ramp from 0 to ``site_adv_lambda_max`` over
+    ``site_adv_warmup_epochs``, then held. Starting at full strength
+    destabilises training, so the adversary is allowed to learn cohort
+    first and the encoder only gradually pressured to unlearn it.
+    """
+    lam_max = getattr(config, "site_adv_lambda_max", 0.0)
+    if lam_max <= 0:
+        return 0.0
+    warm = getattr(config, "site_adv_warmup_epochs", 0)
+    if warm <= 0:
+        return lam_max
+    return lam_max * min(1.0, epoch / warm)
+
+
 def _entropy_weight(config, epoch: int) -> float:
     """Decaying weight of the assignment-entropy bonus ([CARE-PD §10]).
 
@@ -301,7 +395,7 @@ def _entropy_weight(config, epoch: int) -> float:
 
 
 def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
-               train: bool, mixture=None):
+               train: bool, mixture=None, adversary=None):
     """Run one epoch and return (mean losses, cached latents or None).
 
     `rec_full` is the full-clip reconstruction (primary MSE for Recipes
@@ -318,9 +412,10 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
     """
     totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0,
               "kl": 0.0, "kl_z": 0.0, "kl_y": 0.0, "entropy": 0.0,
-              "beta": 0.0}
+              "beta": 0.0, "adv_loss": 0.0, "adv_acc": 0.0}
     n_batches = 0
     ent_w = _entropy_weight(config, epoch)
+    site_lambda = _site_adv_lambda(config, epoch)
     cache_mu, cache_logvar = [], []
     caching = train and mixture is not None
 
@@ -329,7 +424,8 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
 
         loss, parts = _step_loss(model, X, M, config, epoch, kl_state,
                                  update=train, mixture=mixture, c=c,
-                                 entropy_weight=ent_w)
+                                 entropy_weight=ent_w, adversary=adversary,
+                                 site_lambda=site_lambda)
 
         if train:
             opt.zero_grad()
@@ -342,7 +438,7 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
 
         totals["loss"] += float(loss)
         for key in ("rec_full", "rec_aux", "kl", "kl_z", "kl_y",
-                    "entropy", "beta"):
+                    "entropy", "beta", "adv_loss", "adv_acc"):
             totals[key] += float(parts[key])
         n_batches += 1
 
@@ -430,7 +526,8 @@ def _resolve_beta(config, epoch: int, kl_state: dict, rec_full,
 
 def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
                update: bool = True, mixture=None, c=None,
-               entropy_weight: float = 0.0):
+               entropy_weight: float = 0.0, adversary=None,
+               site_lambda: float = 0.0):
     """Compute the loss for one batch under the configured recipe.
 
     Recipe 1 ([MVAE §3.6]):
@@ -460,10 +557,14 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     the responsibilities; the mixture parameters are updated separately by
     EM in the M-step, so this step is pure network optimisation.
 
-    ``c`` is the per-clip conditioning id for the CVAE / GM-CVAE arm, or
-    None for the unconditional models. All routes go through `_kl_term`
-    (vanilla or free-bits KL) and `_resolve_beta` (linear warmup or
-    Asperti-Trentin computed).
+    ``c`` is the per-clip cohort id. For a CVAE / GM-CVAE it is the
+    conditioning input; for the plain / adversarial VAE the networks ignore
+    it. When an ``adversary`` is supplied ([Phase 2c]) it also serves as the
+    adversary's target: the site cross-entropy on ``mu`` (through the
+    gradient-reversal layer, strength ``site_lambda``) is added to the loss,
+    so a single backward both trains the adversary and pushes cohort out of
+    the encoder. All routes go through `_kl_term` (vanilla or free-bits KL)
+    and `_resolve_beta` (linear warmup or Asperti-Trentin computed).
     """
     torch = _torch()
     zero = torch.zeros((), device=X.device)
@@ -528,10 +629,25 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
         if entropy_weight > 0:
             loss = loss - entropy_weight * entropy
 
+    # ---- Site adversary ([Phase 2c]) ----------------------------------
+    # Cross-entropy of cohort predicted from mu, with the gradient reversed
+    # into the encoder (via the GRL inside `adversary`). The adversary's own
+    # parameters minimise this term; the encoder maximises it, i.e. removes
+    # cohort from mu. Added with unit weight — the strength knob is the
+    # reversal `site_lambda`, ramped by the caller.
+    adv_loss = zero
+    adv_acc = zero
+    if adversary is not None and c is not None:
+        adv_logits = adversary(mu, site_lambda)
+        adv_loss = torch.nn.functional.cross_entropy(adv_logits, c)
+        adv_acc = (adv_logits.argmax(dim=-1) == c).float().mean()
+        loss = loss + adv_loss
+
     beta_tensor = torch.as_tensor(beta, device=X.device, dtype=rec_full.dtype)
     return loss, {"rec_full": rec_full, "rec_aux": rec_aux,
                   "kl": kl, "kl_z": kl_z, "kl_y": kl_y,
                   "entropy": entropy, "beta": beta_tensor,
+                  "adv_loss": adv_loss, "adv_acc": adv_acc,
                   "mu": mu, "logvar": logvar}
 
 

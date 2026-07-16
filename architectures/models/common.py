@@ -150,3 +150,57 @@ class ConditioningEmbedding(nn.Module):
             keep = (torch.rand(batch_size, device=device) >= self.dropout)
             e = e * keep.unsqueeze(1).to(e.dtype)
         return e
+
+
+# ---- Gradient-reversal site adversary (cohort-invariance, Phase 2c) --------
+#
+# Conditioning alone does not force z ⊥ c: feeding the encoder c lets it
+# copy cohort into z as easily as subtract it, and with no penalty the site
+# probe can even *rise*. The invariance mechanism here is instead an
+# explicit adversary — a classifier that tries to predict cohort from the
+# latent, with its gradient reversed into the encoder so the encoder is
+# trained to make cohort *un*predictable. This is the domain-adversarial
+# (DANN) construction, and the adversary is the same kind of model as the
+# evaluation site probe, so it attacks exactly what the probe measures.
+
+
+class _GradReverse(torch.autograd.Function):
+    """Identity forward; scaled sign-flip backward (the reversal layer)."""
+
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = float(lambd)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Reverse and scale the gradient flowing back into the encoder.
+        return -ctx.lambd * grad_output, None
+
+
+def grad_reverse(x, lambd: float = 1.0):
+    """Gradient-reversal: forward is identity, backward multiplies by -lambd."""
+    return _GradReverse.apply(x, lambd)
+
+
+class SiteAdversary(nn.Module):
+    """Predicts cohort from the latent; its gradient is reversed into z.
+
+    A two-hidden-layer MLP (matching the evaluation site probe's capacity).
+    Its own parameters minimise the cohort cross-entropy normally; the
+    gradient-reversal in :meth:`forward` makes the *encoder* maximise it,
+    i.e. drive cohort out of the latent. Operates on the posterior mean
+    ``mu`` — the deliverable representation the analysis reads — not the
+    sampled ``z``.
+    """
+
+    def __init__(self, d_z: int, n_site: int, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_z, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, n_site),
+        )
+
+    def forward(self, z, lambd: float):
+        return self.net(grad_reverse(z, lambd))

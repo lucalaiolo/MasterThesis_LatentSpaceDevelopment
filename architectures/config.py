@@ -65,6 +65,17 @@ class TrainingConfig:
             dims below the floor stop receiving gradient through the KL
             term. Typical range [0.05, 0.5]. Zero (default) keeps the
             vanilla KL. Compatible with either `beta_mode`.
+        checkpoint_metric: which validation quantity picks the ``best.pt``
+            checkpoint. Default ``"rec_full"`` selects on validation
+            reconstruction error, independent of the KL weight. This matters
+            under KL annealing: the *total* loss ``rec + beta*KL`` is
+            smallest at epoch 0 (beta ~ 0, latent unused), so selecting on it
+            locks ``best.pt`` onto an untrained, latent-collapsed model.
+            ``"rec_full"`` avoids that and doubles as early stopping on
+            reconstruction. ``"elbo"`` selects on the objective at the
+            *ceiling* beta (``beta_max``), so KL is weighted the same every
+            epoch. ``"loss"`` is the legacy scheduled-beta total loss (kept
+            for reproducibility; biased toward epoch 0 under warmup).
         recipe: one of 1, 2, or 3, matching [MVAE §3-5].
         lambda_aux: weight on the auxiliary reconstruction term. Recipe 2
             weights the masked-pass reconstruction ([MVAE §4.2]);
@@ -83,6 +94,25 @@ class TrainingConfig:
             per cohort and must keep using z. Encoder always sees clean
             e(c) so it can *stop* routing cohort into z. Ignored when
             ``n_cond == 0``.
+        site_adv_lambda_max: strength ceiling of the gradient-reversal site
+            adversary ([Phase 2c]). 0 (default) disables it. When > 0, a
+            :class:`SiteAdversary` is trained to predict cohort from the
+            posterior mean and its gradient is reversed into the encoder, so
+            the encoder is driven to make cohort *un*predictable from the
+            latent — the explicit invariance term that conditioning alone
+            never provided. Needs ``cohort_per_video`` (the cohort labels)
+            at train time, but does **not** feed cohort into the networks:
+            set ``n_cond=0`` for the pure adversarial VAE ("goodbye to the
+            CVAE" — the encoder is z=f(x) with no cohort leak channel), or
+            keep ``n_cond>0`` to combine conditioning with the adversary.
+        site_adv_warmup_epochs: epochs over which the reversal strength
+            ramps linearly from 0 to ``site_adv_lambda_max``. Starting at
+            full strength destabilises training; ramping lets the adversary
+            learn cohort first, then the encoder unlearn it. Ignored when
+            ``site_adv_lambda_max == 0``.
+        site_adv_hidden: hidden width of the adversary MLP (two hidden
+            layers, matching the evaluation site probe). Ignored when
+            ``site_adv_lambda_max == 0``.
         n_components: K, the number of Gaussian-mixture prior components
             ([CARE-PD §7.3]). 0 (default) keeps the standard N(0, I) prior.
             When > 0 the run trains a GM-VAE (or GM-CVAE if ``n_cond > 0``).
@@ -199,6 +229,7 @@ class TrainingConfig:
     beta_min: float = 0.0
     delay_epochs: int = 20
     free_bits: float = 0.0
+    checkpoint_metric: Literal["rec_full", "elbo", "loss"] = "rec_full"
 
     # Recipe.
     recipe: Literal[1, 2, 3] = 1
@@ -208,6 +239,11 @@ class TrainingConfig:
     n_cond: int = 0
     cond_dim: int = 8
     cond_dropout: float = 0.15
+
+    # Site adversary (gradient-reversal cohort-invariance, [Phase 2c]).
+    site_adv_lambda_max: float = 0.0
+    site_adv_warmup_epochs: int = 30
+    site_adv_hidden: int = 128
 
     # Gaussian-mixture prior (GM-VAE / GM-CVAE arm, [CARE-PD §7.3],
     # trained with the EM scheme of [GM-VAE §3.3]).
@@ -277,6 +313,16 @@ class TrainingConfig:
         if not 0.0 <= self.cond_dropout < 1.0:
             raise ValueError(
                 f"cond_dropout ({self.cond_dropout}) must be in [0, 1)."
+            )
+        if self.site_adv_lambda_max < 0:
+            raise ValueError(
+                f"site_adv_lambda_max ({self.site_adv_lambda_max}) must be "
+                f">= 0 (0 disables the site adversary)."
+            )
+        if self.site_adv_lambda_max > 0 and self.site_adv_hidden <= 0:
+            raise ValueError(
+                f"site_adv_hidden ({self.site_adv_hidden}) must be positive "
+                f"when the site adversary is enabled."
             )
         if self.n_components < 0:
             raise ValueError(

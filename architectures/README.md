@@ -181,16 +181,44 @@ plain VAE and the parameter counts are unchanged.
 > `vae_analysis/posthoc/` and its `run_posthoc` entry point. Any GM
 > checkpoints go to `checkpoints/deprecated_gmvae/`.
 
-### The two core models ([CARE-PD §7], [post-hoc plan §0])
+### The models
 
-The `n_cond` switch on `TrainingConfig` selects the model class:
+| `n_cond` | `site_adv_lambda_max` | `n_components` | Model | Status | What it adds |
+|:---:|:---:|:---:|:---|:---|:---|
+| 0 | 0 | 0 | VAE | **active (baseline)** | reconstruction floor, N(0, I) prior |
+| 0 | >0 | 0 | AVAE | **active (target)** | gradient-reversal site adversary — the explicit `z ⊥ cohort` term |
+| >0 | 0 | 0 | CVAE | superseded | cohort embedding e(c) into encoder + decoder — conditioning alone does **not** enforce invariance (it raised the site probe in practice) |
+| 0/>0 | 0 | ≥2 | GM-(C)VAE | deprecated | K-component mixture prior (guarded, `allow_deprecated_gmvae`) |
 
-| `n_cond` | `n_components` | Model | Status | What it adds |
-|:---:|:---:|:---|:---|:---|
-| 0 | 0 | VAE | **active** | reconstruction floor, N(0, I) prior |
-| >0 | 0 | CVAE | **active (target)** | cohort embedding e(c) into encoder + decoder, conditioning dropout — strips the nuisance cohort axis |
-| 0 | ≥2 | GM-VAE | deprecated | K-component mixture prior (guarded, `allow_deprecated_gmvae`) |
-| >0 | ≥2 | GM-CVAE | deprecated | mixture prior **and** cohort conditioning (guarded) |
+### Adversarial VAE (Phase 2c) — the invariance mechanism
+
+Conditioning a CVAE on cohort does not force the latent to be cohort-free:
+feeding the encoder `c` lets it copy cohort into `z` as easily as subtract
+it, and with a linear leak channel + near-zero KL the site probe can even
+*rise*. The fix is an explicit adversary. Set `site_adv_lambda_max > 0`
+(with `n_cond=0` for the pure adversarial VAE — "goodbye to the CVAE"):
+
+```python
+cfg = TrainingConfig(
+    architecture="conv", clip_length=60, n_joints=17, latent_dim=16,
+    n_cond=0,                       # unconditional encoder z = f(x); no leak channel
+    site_adv_lambda_max=1.0,        # gradient-reversal strength ceiling
+    site_adv_warmup_epochs=30,      # ramp lambda from 0 (starting at full strength destabilises)
+    beta_max=1e-2,                  # a real KL, not 1e-4
+)
+out = train(cfg, videos, cohort_per_video=cohort_ids)   # cohort = adversary LABEL, not a network input
+```
+
+A `SiteAdversary` MLP predicts cohort from the posterior mean `mu`; a
+gradient-reversal layer (`grad_reverse`) flips its gradient into the
+encoder, so the encoder is trained to make cohort *un*predictable. It joins
+the same optimiser and a single backward pass. Watch the printed
+`advAcc` — it should sit near chance (a healthy minimax equilibrium); if it
+pins *below* chance immediately, `lambda` is too high. `cohort_per_video`
+is required (the labels are the adversary's target), but cohort is **never
+fed into the networks**, so at inference the encoder needs no `c` and the
+latent is cohort-invariant by construction. In the post-hoc analysis this
+model is named **AVAE** and is the target (`primary`).
 
 ```python
 cfg = TrainingConfig(

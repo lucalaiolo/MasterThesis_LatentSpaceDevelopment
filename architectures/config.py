@@ -66,16 +66,7 @@ class TrainingConfig:
             term. Typical range [0.05, 0.5]. Zero (default) keeps the
             vanilla KL. Compatible with either `beta_mode`.
         checkpoint_metric: which validation quantity picks the ``best.pt``
-            checkpoint. Default ``"rec_full"`` selects on validation
-            reconstruction error, independent of the KL weight. This matters
-            under KL annealing: the *total* loss ``rec + beta*KL`` is
-            smallest at epoch 0 (beta ~ 0, latent unused), so selecting on it
-            locks ``best.pt`` onto an untrained, latent-collapsed model.
-            ``"rec_full"`` avoids that and doubles as early stopping on
-            reconstruction. ``"elbo"`` selects on the objective at the
-            *ceiling* beta (``beta_max``), so KL is weighted the same every
-            epoch. ``"loss"`` is the legacy scheduled-beta total loss (kept
-            for reproducibility; biased toward epoch 0 under warmup).
+            checkpoint. Default ``"loss"``
         recipe: one of 1, 2, or 3, matching [MVAE §3-5].
         lambda_aux: weight on the auxiliary reconstruction term. Recipe 2
             weights the masked-pass reconstruction ([MVAE §4.2]);
@@ -229,7 +220,7 @@ class TrainingConfig:
     beta_min: float = 0.0
     delay_epochs: int = 20
     free_bits: float = 0.0
-    checkpoint_metric: Literal["rec_full", "elbo", "loss"] = "rec_full"
+    checkpoint_metric: Literal["rec_full", "elbo", "loss"] = "loss"
 
     # Recipe.
     recipe: Literal[1, 2, 3] = 1

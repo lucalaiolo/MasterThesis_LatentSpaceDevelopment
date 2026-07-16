@@ -71,6 +71,7 @@ def _save_cluster_labels(data: PosthocData, model: str,
 
 def run_posthoc(data: PosthocData | None = None,
                 vae_checkpoint=None, cvae_checkpoint=None,
+                target_checkpoint=None,
                 bundle=None, out_dir: str | Path = "outputs/posthoc",
                 clip_length: int = 60, stride: int = 30,
                 n_seeds: int = 20, device: str = "cpu", seed: int = 0,
@@ -95,14 +96,17 @@ def run_posthoc(data: PosthocData | None = None,
 
     # ---- 0. Encode (unless a PosthocData was handed in) ----
     if data is None:
-        if bundle is None or cvae_checkpoint is None:
+        # `target_checkpoint` is the model-agnostic name for the target
+        # (AVAE / CVAE); `cvae_checkpoint` is kept as a back-compat alias.
+        target_ckpt = target_checkpoint or cvae_checkpoint
+        if bundle is None or target_ckpt is None:
             raise ValueError("Pass either `data`, or `bundle` + at least "
-                             "`cvae_checkpoint` (VAE optional).")
+                             "`target_checkpoint` (VAE baseline optional).")
         encoders: dict = {}
         if vae_checkpoint is not None:
             enc, name = load_encoder(vae_checkpoint, device=device)
             encoders[name] = enc
-        enc, name = load_encoder(cvae_checkpoint, device=device)
+        enc, name = load_encoder(target_ckpt, device=device)
         encoders[name] = enc
         log(f"encoding clips + trajectories for {list(encoders)} ...")
         data = build_posthoc_data(encoders, bundle, clip_length=clip_length,

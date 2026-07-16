@@ -9,10 +9,11 @@ from __future__ import annotations
 
 __all__ = ["run_analysis", "encode", "metrics", "probes", "umap_panels",
            "independence", "clustering", "codebook", "temporal", "palette",
-           "report", "driver"]
+           "report", "driver", "baselines"]
 
 _LAZY = {"encode", "metrics", "probes", "umap_panels", "independence",
-         "clustering", "codebook", "temporal", "palette", "report", "driver"}
+         "clustering", "codebook", "temporal", "palette", "report", "driver",
+         "baselines"}
 
 
 def __getattr__(name):

@@ -281,18 +281,27 @@ def load_encoder(checkpoint_path: str | Path, device: str = "cpu"
                  ) -> tuple[TorchCohortEncoder, str]:
     """Load a checkpoint and wrap it as a named :class:`CohortEncoder`.
 
-    Returns ``(encoder, name)`` where ``name`` is ``"VAE"`` or ``"CVAE"``
-    read off the config's conditioning switch — the two core models the
-    post-hoc analysis runs on ([post-hoc plan §0]).
+    Returns ``(encoder, name)``. The name is read off the config:
+    ``"AVAE"`` when the gradient-reversal site adversary was used ([Phase
+    2c] — the invariance mechanism that replaced conditioning), else
+    ``"CVAE"`` if the encoder is cohort-conditioned, else ``"VAE"``. Naming
+    the adversarial model ``AVAE`` keeps it distinct from the plain ``VAE``
+    baseline (both have ``n_cond == 0``) so a VAE-vs-AVAE run does not
+    collide on one name.
     """
     from architectures.analyze import load_checkpoint
     model, config = load_checkpoint(checkpoint_path, device=device)
-    name = "CVAE" if getattr(config, "n_cond", 0) > 0 else "VAE"
+    if getattr(config, "site_adv_lambda_max", 0.0) > 0:
+        name = "AVAE"
+    elif getattr(config, "n_cond", 0) > 0:
+        name = "CVAE"
+    else:
+        name = "VAE"
     if getattr(config, "n_components", 0) > 0:
         raise DeprecationWarning(
             f"{checkpoint_path} is a GM-VAE / GM-CVAE checkpoint, which is "
             "off the active path ([post-hoc plan §0]); the post-hoc analysis "
-            "runs on the plain VAE and CVAE only."
+            "runs on the plain VAE, CVAE, and adversarial VAE only."
         )
     return TorchCohortEncoder(model, config, device=device), name
 
@@ -422,7 +431,9 @@ def build_posthoc_data(encoders: dict[str, CohortEncoder],
 
     names = list(encoders.keys())
     if primary is None:
-        primary = "CVAE" if "CVAE" in names else names[-1]
+        # The target model is the one with an explicit invariance mechanism:
+        # the adversarial VAE, else the CVAE, else the last encoder given.
+        primary = next((c for c in ("AVAE", "CVAE") if c in names), names[-1])
 
     videos = bundle.videos
     if not videos:

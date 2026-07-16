@@ -47,10 +47,11 @@ SEQUENTIAL_CMAP = "viridis"
 # Diverging map for signed quantities centred at zero.
 DIVERGING_CMAP = "coolwarm"
 
-# One colour per model, reused in every VAE-vs-CVAE comparison.
+# One colour per model, reused in every model comparison.
 MODEL_COLORS: dict[str, str] = {
-    "VAE": "#4C72B0",    # muted blue
-    "CVAE": "#DD8452",   # muted orange
+    "VAE": "#4C72B0",    # muted blue  — plain baseline
+    "CVAE": "#DD8452",   # muted orange — cohort-conditioned
+    "AVAE": "#55A868",   # muted green  — adversarial (gradient-reversal)
 }
 
 # Freezer / medication get fixed, well-separated hues.

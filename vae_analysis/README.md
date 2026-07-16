@@ -65,10 +65,14 @@ data; read it as a full worked example.
 
 The `posthoc` subpackage implements the CARE-PD post-hoc structure plan.
 The mixture-prior models (GM-VAE / GM-CVAE) are **off the pipeline**
-(component collapse); the phenotype claim is made post hoc on the two core
-latents — the plain **VAE** (baseline) and the **CVAE** (target) — and
-scored against the clinical labels. One entry point runs the whole battery
-and writes to `outputs/posthoc/`:
+(component collapse); the phenotype claim is made post hoc on the frozen
+latents and scored against the clinical labels. The comparison is the plain
+**VAE** (baseline) against the target invariance model — the **AVAE**
+(gradient-reversal site adversary; `load_encoder` names it from
+`site_adv_lambda_max>0`) or a **CVAE** if you trained one. `run_posthoc`
+auto-picks the target as `primary` (AVAE > CVAE) and colours each model
+consistently. One entry point runs the whole battery and writes to
+`outputs/posthoc/`:
 
 ```python
 from architectures.care_pd import load_cohorts, build_bundle, TIER1_COHORTS

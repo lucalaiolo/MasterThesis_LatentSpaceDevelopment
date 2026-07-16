@@ -104,8 +104,8 @@ def write_summary(results, data, out_dir, bic, agreement, stabilities,
     phen_mean = np.mean(phen_aris) if phen_aris else float("nan")
     L.append("_On the " + primary + " latent, mean phenotype ARI ≈ "
              f"{_fmt(phen_mean)} against cohort ARI ≈ {_fmt(cohort_ari)}: "
-             "conditioning is doing its job when phenotype agreement exceeds "
-             "cohort agreement._\n")
+             "the invariance mechanism is doing its job when phenotype "
+             "agreement exceeds cohort agreement._\n")
 
     # ---- 4. Subject composition ----
     L.append("## 4. Subject composition — phenotypes or individuals?\n")
@@ -204,12 +204,13 @@ def write_summary(results, data, out_dir, bic, agreement, stabilities,
     L.append("")
     # Contrast: site probe drop, phenotype hold.
     per = probe.per_model
-    if "VAE" in per and "CVAE" in per:
-        site_v, site_c = per["VAE"].get("site_acc"), per["CVAE"].get("site_acc")
+    target = primary if primary in per else None
+    if "VAE" in per and target and target != "VAE":
+        site_v, site_t = per["VAE"].get("site_acc"), per[target].get("site_acc")
         L.append(f"_The site probe drops from {_fmt(site_v,2)} (VAE) to "
-                 f"{_fmt(site_c,2)} (CVAE) while the phenotype probes hold: "
-                 "conditioning removes the cohort axis without costing "
-                 "phenotype signal._\n")
+                 f"{_fmt(site_t,2)} ({target}) while the phenotype probes "
+                 "hold: the invariance mechanism removes the cohort axis "
+                 "without costing phenotype signal._\n")
     else:
         L.append("_Probe scores summarise how much phenotype and cohort "
                  "signal the frozen latent carries._\n")

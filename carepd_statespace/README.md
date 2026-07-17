@@ -6,10 +6,27 @@ Reproduces the ARHMM movement-state pipeline of **Passmore et al. (2024,
 for gait. Follows the build guideline.
 
 > The reference code (`garedaba/state-space`) is cloned to `references/`
-> (gitignored) and its `process_data` / `run_svd` logic reused. The paper's
-> `ssm` library is unmaintained and `dynamax` pulls in JAX, so the **ARHMM
-> is a self-contained NumPy implementation** (`statespace.py`) — record this
-> as the backend used.
+> (gitignored) and its `process_data` / `run_svd` logic reused.
+
+## ARHMM backend (choose one)
+
+The ARHMM is **pluggable** (`backends.py`, `build_arhmm`). Pass `backend=` to
+`run_pipeline`; the one used is recorded in `results.json` / `RESULTS.md`.
+
+| `backend` | Library | Notes |
+|:---|:---|:---|
+| `"ssm"` | Linderman-lab `ssm` | **the paper's implementation** — `ssm.HMM(K, D, init_method="kmeans", observations="ar", observation_kwargs={"lags": L}, method="stochastic_em", transitions="standard")`, exactly as `ARHMM.ipynb`. Fussy install: `pip install "numpy<1.24" cython` then `pip install git+https://github.com/lindermanlab/ssm`. |
+| `"dynamax"` | `dynamax` (JAX) | maintained fallback; `LinearAutoregressiveHMM`. `pip install jax dynamax`. Variable-length walks are right-padded, so prefer `ssm` for a strict reproduction. |
+| `"numpy"` | built-in | **default**, always available; self-contained EM ARHMM. |
+| `"auto"` | — | prefers `ssm` → `dynamax` → `numpy`. |
+
+```python
+run_pipeline(data, backend="ssm")     # follow the paper exactly
+```
+
+`available_backends()` reports which import in the current environment.
+Parameter averaging over refits (§4.4) is done for the NumPy backend; for
+`ssm`/`dynamax` the best-log-likelihood restart is used (still aligned).
 
 ## Install
 

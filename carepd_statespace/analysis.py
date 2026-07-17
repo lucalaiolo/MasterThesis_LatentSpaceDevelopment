@@ -173,9 +173,10 @@ def state_joint_velocity(data, states_list: list, K: int) -> np.ndarray:
     den = np.zeros(K)
     for x, st in zip(data.features, states_list):
         joints = x[:, :J * 3].reshape(len(x), J, 3)
-        vel = np.zeros_like(joints)
-        vel[1:] = np.diff(joints, axis=0)
-        mag = np.linalg.norm(vel, axis=-1)                  # (T, J)
+        # First-difference velocity (T-1), aligned with the diffed state path.
+        mag = np.linalg.norm(np.diff(joints, axis=0), axis=-1)   # (T-1, J)
+        mag = mag[:len(st)]                                       # guard length
+        st = st[:len(mag)]
         for k in range(K):
             m = st == k
             if m.any():

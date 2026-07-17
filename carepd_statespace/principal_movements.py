@@ -99,19 +99,23 @@ def fit_basis(data, var_target: float = 0.90, seed: int = 0) -> PMBasis:
 
 
 def project(data, basis: PMBasis, n_components: int | None = None) -> list:
-    """Project every walk onto the basis and return velocity series ([§3.3]).
+    """Project every walk onto the basis and return the velocity series ([§3.3]).
 
-    Returns a list of ``(T, n_components)`` weight-velocity arrays — the
-    ARHMM input.
+    Follows the paper's ARHMM-input recipe exactly (``ARHMM.ipynb``):
+    standardise each walk's PC weights (per-walk mean/std), take the first
+    difference, then globally normalise by the pooled std of the differences.
+    Returns a list of ``(T-1, n_components)`` arrays — the ARHMM input.
     """
     n = n_components or basis.n_components
     V = basis.eigenvectors[:n]                      # (n, d)
-    out = []
+    diffs = []
     for x in data.features:
         xs = (x - basis.scaler_center) / basis.scaler_scale
         w = xs @ V.T                                # (T, n) weights
-        out.append(np.gradient(w, axis=0))          # velocity of weights
-    return out
+        w = (w - w.mean(0)) / (w.std(0) + 1e-8)     # standardise per walk
+        diffs.append(np.diff(w, axis=0))            # first difference
+    gstd = np.std(np.concatenate(diffs, axis=0)) + 1e-8
+    return [d / gstd for d in diffs]                # global normalise
 
 
 def static_weights(data, basis: PMBasis, n_components: int | None = None

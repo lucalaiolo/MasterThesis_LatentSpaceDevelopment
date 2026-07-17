@@ -185,9 +185,15 @@ def _pack(pi, logP, W, Q, mu0, K, L, d):
 class ARHMM:
     """Autoregressive HMM fit by EM ([guideline §4])."""
 
+    backend = "numpy"
+
     def __init__(self, K: int, L: int, seed: int = 0):
         self.K, self.L, self.seed = K, L, seed
         self.params: ARHMMParams | None = None
+
+    def emission_means(self) -> np.ndarray:
+        """Per-state mean-pose (AR intercept); (K, d). For state alignment."""
+        return self.params.W[:, -1, :]
 
     def fit(self, seqs, n_iter: int = 50, tol: float = 1e-3, verbose=False):
         p = _init_params(seqs, self.K, self.L, self.seed)
@@ -273,17 +279,16 @@ class ARHMM:
 
 # ---- State alignment for averaging refits ([guideline §4.4]) --------------
 
-def align_states(ref: ARHMM, other: ARHMM) -> np.ndarray:
+def align_states(ref, other) -> np.ndarray:
     """Hungarian match of ``other``'s states to ``ref`` by emission mean.
 
     Returns a permutation ``perm`` s.t. ``other`` state ``perm[k]`` matches
     ``ref`` state ``k`` — required before averaging refits, or the mean of
-    label-switched runs is meaningless ([guideline gotchas]).
+    label-switched runs is meaningless ([guideline gotchas]). Backend-
+    agnostic: uses each model's ``emission_means()``.
     """
     from scipy.optimize import linear_sum_assignment
-    # Compare on the intercept (mean-pose) term of each state's AR weights.
-    a = ref.params.W[:, -1, :]          # (K, d)
-    b = other.params.W[:, -1, :]
+    a, b = ref.emission_means(), other.emission_means()
     cost = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=-1)
     _, col = linear_sum_assignment(cost)
     return col

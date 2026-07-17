@@ -17,6 +17,7 @@ import pandas as pd
 
 from . import principal_movements as pm, statespace as ss, analysis as an
 from . import palette as pal
+from .backends import build_arhmm, available_backends
 
 
 def _subject_folds(subjects, n_folds, seed=0):
@@ -27,7 +28,7 @@ def _subject_folds(subjects, n_folds, seed=0):
 
 
 def select_model(series, subjects, K_grid, L_grid, n_folds=5, seed=0,
-                 verbose=True) -> dict:
+                 backend="numpy", fit_iters=30, verbose=True) -> dict:
     """Subject-CV model selection over (K, L) + family comparison ([§4.3])."""
     folds = _subject_folds(np.asarray(subjects), n_folds, seed)
     rows = []
@@ -35,8 +36,8 @@ def select_model(series, subjects, K_grid, L_grid, n_folds=5, seed=0,
         for L in L_grid:
             te_ll = []
             for tr, te in folds:
-                m = ss.ARHMM(K, L, seed=seed).fit([series[i] for i in tr],
-                                                  n_iter=30)
+                m = build_arhmm(K, L, backend, seed).fit(
+                    [series[i] for i in tr], n_iter=fit_iters)
                 te_ll.append(m.log_likelihood([series[i] for i in te]))
             rows.append({"model": "ar" if L > 0 else "gaussian", "K": K,
                          "L": L, "test_ll": float(np.mean(te_ll))})
@@ -55,12 +56,17 @@ def select_model(series, subjects, K_grid, L_grid, n_folds=5, seed=0,
     return {"table": table, "best_K": int(best.K), "best_L": int(best.L)}
 
 
-def fit_stable(series, K, L, n_restarts=25, seed=0, n_iter=50):
-    """Refit ``n_restarts`` times, align states, average params ([§4.4])."""
-    models = [ss.ARHMM(K, L, seed=seed + r).fit(series, n_iter=n_iter)
+def fit_stable(series, K, L, n_restarts=25, seed=0, n_iter=50, backend="numpy"):
+    """Refit ``n_restarts`` times, align states, average params ([§4.4]).
+
+    Parameter averaging is only well-defined for the NumPy backend (whose
+    state parameters are directly accessible); for ``ssm`` / ``dynamax`` the
+    best-log-likelihood restart is returned instead (still aligned-reported).
+    """
+    models = [build_arhmm(K, L, backend, seed + r).fit(series, n_iter=n_iter)
               for r in range(n_restarts)]
     best = max(models, key=lambda m: m.final_loglik)
-    if n_restarts == 1:
+    if n_restarts == 1 or getattr(best, "backend", "numpy") != "numpy":
         return best
     Ws, Qs, mu0s, pis, Ps = [], [], [], [], []
     for m in models:
@@ -104,8 +110,15 @@ def generative_check(model, series, out_dir, seed=0):
 
 def run_pipeline(data, out_dir="carepd_statespace/outputs",
                  K_grid=(2, 5, 8, 10, 15), L_grid=(1, 2, 3, 5, 8),
-                 n_restarts=25, n_folds=5, seed=0, verbose=True) -> dict:
-    """Run the whole pipeline and write outputs + the go/no-go verdict."""
+                 n_restarts=25, n_folds=5, seed=0, backend="numpy",
+                 cv_iters=30, fit_iters=50, verbose=True) -> dict:
+    """Run the whole pipeline and write outputs + the go/no-go verdict.
+
+    ``backend`` selects the ARHMM implementation ([guideline §4]):
+    ``"numpy"`` (default, always available), ``"ssm"`` (the paper's library),
+    ``"dynamax"`` (JAX), or ``"auto"``. The backend actually used is recorded
+    in the results and ``RESULTS.md``.
+    """
     out = Path(out_dir)
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "tables").mkdir(parents=True, exist_ok=True)
@@ -127,13 +140,18 @@ def run_pipeline(data, out_dir="carepd_statespace/outputs",
         f"(chance {site['cohort_chance']:.2f})")
 
     # §4 model selection + stable fit
-    log("§4 CV model selection ...")
+    if backend == "auto":
+        backend = ("ssm" if "ssm" in available_backends()
+                   else "dynamax" if "dynamax" in available_backends() else "numpy")
+    log(f"§4 CV model selection (backend={backend}) ...")
     sel = select_model(series, data.info.subject_id.values, K_grid, L_grid,
-                       n_folds, seed, verbose)
+                       n_folds, seed, backend=backend, fit_iters=cv_iters,
+                       verbose=verbose)
     K, L = sel["best_K"], sel["best_L"]
     sel["table"].to_csv(out / "tables" / "cv_scores.csv", index=False)
     log(f"  selected K={K}, L={L}; refitting x{n_restarts} ...")
-    model = fit_stable(series, K, L, n_restarts=n_restarts, seed=seed)
+    model = fit_stable(series, K, L, n_restarts=n_restarts, seed=seed,
+                       n_iter=fit_iters, backend=backend)
     written.append(generative_check(model, series, out / "figures", seed))
 
     # §5 decode + metrics
@@ -167,8 +185,8 @@ def run_pipeline(data, out_dir="carepd_statespace/outputs",
     results = {"n_walks": data.n_walks, "n_subjects": int(data.info.subject_id.nunique()),
                "d": data.d, "feature_set": data.feature_set,
                "n_pm": basis.n_components, "twonn": basis.twonn,
-               "K": K, "L": L, "site": site, "clinical": clinical,
-               "verdict": verdict}
+               "K": K, "L": L, "backend": getattr(model, "backend", "numpy"),
+               "site": site, "clinical": clinical, "verdict": verdict}
     with open(out / "tables" / "results.json", "w") as f:
         json.dump(_to_python(results), f, indent=2)
     written.append(_write_results_md(results, out))
@@ -205,7 +223,8 @@ def _write_results_md(results, out) -> Path:
          f"feature set {results['feature_set']} (d={results['d']}).",
          f"- Principal movements: {results['n_pm']} @90% variance "
          f"(TWO-NN intrinsic dim {results['twonn']:.1f}).",
-         f"- Selected model: ARHMM K={results['K']}, L={results['L']}.",
+         f"- Selected model: ARHMM K={results['K']}, L={results['L']} "
+         f"(backend: **{results.get('backend', 'numpy')}**).",
          f"- **Site confound:** cohort classifiable from PM weights at "
          f"{results['site']['cohort_clf_acc']:.2f} "
          f"(chance {results['site']['cohort_chance']:.2f}) — "

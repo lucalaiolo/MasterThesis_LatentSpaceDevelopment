@@ -35,20 +35,32 @@ pip install numpy scipy scikit-learn pandas matplotlib statsmodels
 pip install hmmlearn                    # optional
 ```
 
-## Run (once the CARE-PD Tier-1 `.pkl` files are available)
+## Run (once the CARE-PD h36m release is available)
+
+The CARE-PD h36m release keeps **3D joints and labels in two separate
+files** (this is the thing that trips people up): the per-cohort
+`h36m_3d_world_*.npz` holds only the `(F, 17, 3)` joints keyed
+`subject__walkid`, while the source SMPL `.pkl` (e.g. the Borealis `TWIKMK`
+deposit) holds only SMPL params + clinical labels. `load_h36m_cohorts`
+reads the joints from the `.npz` and joins the labels from the `.pkl` by
+walk id — mirroring the release reader in `architectures/care_pd.py`.
 
 ```python
-from carepd_statespace.carepd_adapter import load_cohort_pkls, build_dataset
+from carepd_statespace.carepd_adapter import load_h36m_cohorts, build_dataset
 from carepd_statespace.driver import run_pipeline
 
-walks = load_cohort_pkls({
-    "BMCLab":   "assets/datasets/BMCLab.pkl",
-    "KUL-DT-T": "assets/datasets/KUL-DT-T.pkl",
-    "E-LC":     "assets/datasets/E-LC.pkl"},
-    joints_key="joints3d")             # or pass pose_to_joints=<SMPL->H36M regressor>
+walks = load_h36m_cohorts(
+    "/content/drive/MyDrive/CARE-PD_h36m",             # <root>/<cohort>/h36m_3d_world_*.npz
+    source_dir="/content/assets/datasets/TWIKMK")      # <source_dir>/<cohort>.pkl (labels)
 data = build_dataset(walks, feature_set="B")     # HumanML3D decomposition (default)
 out  = run_pipeline(data)                          # -> carepd_statespace/outputs/ + RESULTS.md
 ```
+
+`load_h36m_cohorts` defaults to the three Tier-1 cohorts; pass `cohorts=` to
+subset, `npz_paths=` / `pkl_paths=` to point at files individually, or omit
+`source_dir` to run label-free (only the §6 clinical analysis needs labels).
+`load_cohort_pkls(...)` remains for a hand-built pickle that *already*
+carries joints under `joints_key` (or via a `pose_to_joints` regressor).
 
 `smoke_test.py` runs the whole pipeline on synthetic 3-cohort gait with a
 planted freezing signal (no data / no GPU needed) and reaches a **GO**
@@ -58,7 +70,7 @@ verdict — read it as a worked example.
 
 | Module | § | What it does |
 |:---|:---|:---|
-| `carepd_adapter.py` | §2 | SMPL→H36M-17 joints, egocentric norm (root-centre + **per-frame heading**), Set A / **Set B** (+root vel/height), gentle band-pass + MAD + resample to 15 Hz, variable-length walks + `info` |
+| `carepd_adapter.py` | §2 | loads H36M-17 joints (`.npz`) + labels (source `.pkl`) and joins them (`load_h36m_cohorts`), egocentric norm (root-centre + **per-frame heading**), Set A / **Set B** (+root vel/height), gentle band-pass + MAD + resample to 15 Hz, variable-length walks + `info` |
 | `principal_movements.py` | §3 | balanced-subset RobustScaler+SVD basis, 90%-var + **TWO-NN** count, project + velocity, variance curve (Fig 1b), **site diagnostic** |
 | `statespace.py` | §4 | NumPy **ARHMM** (EM, log-space FB, AR(L), Viterbi) + GMM + Gaussian HMM (`L=0`); Hungarian state alignment |
 | `driver.py` | §4, §8 | subject-CV over K×L (Fig 1d), stable refit×25 with alignment+averaging, generative check (Fig 1e), go/no-go gate |

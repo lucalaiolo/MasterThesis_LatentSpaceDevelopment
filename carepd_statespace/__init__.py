@@ -5,10 +5,12 @@ Tier-1 mocap cohorts (BMCLab, KUL-DT-T, E-LC), pooled, adapted for gait:
 3D joints + retained global motion, per-frame heading normalisation, a wider
 AR lag, subject-level CV, and a clinical analysis led by freezing of gait.
 
-    from carepd_statespace.carepd_adapter import load_cohort_pkls, build_dataset
+    from carepd_statespace.carepd_adapter import load_h36m_cohorts, build_dataset
     from carepd_statespace.driver import run_pipeline
 
-    walks = load_cohort_pkls({"BMCLab": "...", "KUL-DT-T": "...", "E-LC": "..."})
+    # h36m 3D joints (.npz) live apart from the clinical labels (source .pkl);
+    # load_h36m_cohorts reads the joints and joins the labels by walk id.
+    walks = load_h36m_cohorts("<CARE-PD_h36m root>", source_dir="<cohort .pkl dir>")
     data  = build_dataset(walks, feature_set="B")     # HumanML3D decomposition
     out   = run_pipeline(data)                          # -> outputs/ + RESULTS.md
 """

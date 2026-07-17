@@ -17,15 +17,26 @@ Key adaptations from the infant original ([guideline appendix]):
   of a step; do not high-pass away the ~1-2 Hz cadence;
 - walks stay **variable-length** (a list), never padded or concatenated.
 
-The joint extraction assumes the CARE-PD H36M 17-joint 3D asset (or joints
-regressed from SMPL with ``beta=0``). Point ``load_cohort_pkls`` at a
-``pose_to_joints`` callable if your ``.pkl`` stores raw SMPL parameters.
+Loading the real CARE-PD h36m release ([guideline §1]): joints and labels
+travel in **two separate files** (see ``architectures/care_pd.py`` for the
+full account). :func:`load_h36m_cohorts` is the loader for it — it reads the
+3D joints from the per-cohort ``h36m_3d_world_*.npz`` and joins the clinical
+labels from the source SMPL ``.pkl`` by walk id::
+
+    walks = load_h36m_cohorts("/content/drive/MyDrive/CARE-PD_h36m",
+                              source_dir="/content/assets/datasets/TWIKMK")
+
+The older :func:`load_cohort_pkls` is kept for hand-built pickles that
+*already* carry joints under ``joints_key`` (or a ``pose_to_joints`` SMPL->
+H36M regressor); it is **not** the path for the h36m release, whose ``.pkl``
+holds only SMPL parameters and labels — the 3D joints are in the ``.npz``.
 """
 
 from __future__ import annotations
 
 import pickle
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -220,15 +231,175 @@ def build_dataset(walks: list[Walk], feature_set: str = "B",
                           fps=dst_fps)
 
 
-# ---- Loading the CARE-PD .pkl files ([guideline §1, §2.1]) ----------------
+# ---- Loading the CARE-PD data ([guideline §1, §2.1]) ----------------------
 
 _MED_MAP = {1: "on", 0: "off", "on": "on", "off": "off",
             "ON": "on", "OFF": "off"}
+
+# The three Tier-1 mocap cohorts, in their canonical order.
+TIER1_COHORTS: tuple[str, ...] = ("BMCLab", "KUL-DT-T", "E-LC")
+
+# World-coordinate 3D variant inside each cohort's h36m directory. The
+# ``world2cam*`` / ``world2cam2img*`` siblings are view-projected (a nuisance
+# view axis, or dropped depth) and must be skipped — only the floor-aligned
+# world file is loaded.
+WORLD_NPZ_GLOB = "h36m_3d_world_*.npz"
+
+
+def _import_care_pd_reader():
+    """Import the sibling h36m-release reader, with a pointed error if absent.
+
+    ``architectures.care_pd`` is the tested source of truth for the on-disk
+    CARE-PD h36m layout (flat / nested / object-array ``.npz``, world-variant
+    globbing, double-keyed label join). It is NumPy-only — no torch — so this
+    import stays light.
+    """
+    try:
+        from architectures import care_pd
+    except Exception as exc:  # pragma: no cover - environment guard
+        raise ImportError(
+            "load_h36m_cohorts needs the sibling `architectures.care_pd` "
+            "module (the CARE-PD h36m release reader). Run from the "
+            "repository root so `architectures/` is importable "
+            f"(original import error: {exc!r})."
+        ) from exc
+    return care_pd
+
+
+def _resolve_h36m_npz(h36m_root, cohort: str, world_glob: str):
+    """Find one cohort's world-3D ``.npz`` under an ``h36m/`` release tree.
+
+    Handles the documented ``<root>/<cohort>/<variant>.npz`` layout and a
+    flat ``<root>/<cohort>.npz`` fallback; prefers the world variant, then
+    any ``.npz`` in the cohort directory.
+    """
+    root = Path(h36m_root)
+    cohort_dir = root / cohort
+    if cohort_dir.is_dir():
+        for pattern in (world_glob, "*.npz"):
+            matches = sorted(cohort_dir.glob(pattern))
+            if matches:
+                return matches[0]
+        raise FileNotFoundError(
+            f"cohort {cohort!r}: no {world_glob!r} (nor any .npz) in "
+            f"{cohort_dir}.")
+    for ext in (".npz", ".pkl"):
+        flat = root / f"{cohort}{ext}"
+        if flat.exists():
+            return flat
+    raise FileNotFoundError(
+        f"cohort {cohort!r}: neither {cohort_dir}/ nor "
+        f"{root / (cohort + '.npz')} exists under {root}.")
+
+
+def load_h36m_cohorts(h36m_root=None, cohorts: tuple[str, ...] = TIER1_COHORTS,
+                      source_dir=None, *, npz_paths: dict | None = None,
+                      pkl_paths: dict | None = None, fps: float = 30.0,
+                      world_glob: str = WORLD_NPZ_GLOB) -> list["Walk"]:
+    """Load the CARE-PD h36m release: 3D joints (``.npz``) + labels (``.pkl``).
+
+    This is the loader for the **real** CARE-PD h36m release, where joints and
+    labels live in separate files ([guideline §1]). For the layout the Colab
+    notebook produces::
+
+        <h36m_root>/BMCLab/h36m_3d_world_floorXZZplus_30f_or_longer.npz   # joints
+        <source_dir>/BMCLab.pkl                                          # labels
+
+    it is simply::
+
+        walks = load_h36m_cohorts(
+            "/content/drive/MyDrive/CARE-PD_h36m",
+            source_dir="/content/assets/datasets/TWIKMK")
+        data  = build_dataset(walks, feature_set="B")
+
+    Args:
+        h36m_root: directory holding ``<cohort>/h36m_3d_world_*.npz`` (or a
+            flat ``<cohort>.npz``). May be ``None`` if ``npz_paths`` names
+            every cohort's joints file explicitly.
+        cohorts: cohort names to load (default: the three Tier-1 mocap
+            cohorts, :data:`TIER1_COHORTS`).
+        source_dir: directory holding the per-cohort source ``.pkl``
+            (``<source_dir>/<cohort>.pkl``) that carries the labels. Optional
+            — without it the walks have no clinical labels, which is fine for
+            the principal-movement basis and ARHMM fit (only the §6 clinical
+            analysis needs them). A missing per-cohort ``.pkl`` is skipped.
+        npz_paths: optional ``{cohort: npz_path}`` overriding the
+            ``h36m_root`` lookup for those cohorts.
+        pkl_paths: optional ``{cohort: pkl_path}`` overriding the
+            ``source_dir`` lookup for those cohorts.
+        fps: frame rate of the h36m joints. The ``floorXZZplus`` release is
+            standardised to 30 fps, so the default is 30; override only for a
+            non-standard export. (The SMPL ``.pkl``'s own fps is deliberately
+            ignored — it is the *joints*, not the pkl SMPL poses, that
+            :func:`build_dataset` resamples downstream.)
+        world_glob: filename pattern selecting the world-coordinate 3D file
+            inside each cohort directory.
+
+    Returns:
+        A list of :class:`Walk` with raw ``(F, 17, 3)`` joints (no
+        preprocessing — :func:`build_dataset` runs the egocentric norm, root
+        channels, band-pass and resample) and labels attached. ``trans`` is
+        left ``None`` on purpose: the ``floorXZZplus`` pelvis joint already
+        carries each walk's global path in the joint coordinate frame, whereas
+        the SMPL ``.pkl`` translation lives in a *different* frame — mixing
+        them would corrupt the Set-B root-velocity channels.
+    """
+    care_pd = _import_care_pd_reader()
+    npz_paths = dict(npz_paths or {})
+    pkl_paths = dict(pkl_paths or {})
+    source_dir = Path(source_dir) if source_dir is not None else None
+
+    walks: list[Walk] = []
+    for cohort in cohorts:
+        if cohort in npz_paths:
+            npz = Path(npz_paths[cohort])
+        elif h36m_root is not None:
+            npz = _resolve_h36m_npz(h36m_root, cohort, world_glob)
+        else:
+            raise ValueError(
+                f"cohort {cohort!r}: pass h36m_root or npz_paths[{cohort!r}].")
+        pkl = None
+        if cohort in pkl_paths:
+            pkl = Path(pkl_paths[cohort])
+        elif source_dir is not None:
+            candidate = source_dir / f"{cohort}.pkl"
+            if candidate.exists():
+                pkl = candidate
+        # preprocess=False: keep raw joints; our egocentric norm (per-frame
+        # heading, retained root channels) differs from care_pd's per-walk
+        # align, so we do NOT want its preprocessing here.
+        arch_walks = care_pd.load_cohort(npz, cohort, source_pkl=pkl,
+                                         preprocess=False)
+        walks.extend(_walk_from_care_pd(aw, fps) for aw in arch_walks)
+    return walks
+
+
+def _walk_from_care_pd(aw, fps: float) -> "Walk":
+    """Convert an ``architectures.care_pd.Walk`` into our :class:`Walk`.
+
+    Maps the flat ``labels`` dict onto our typed clinical fields (FoG,
+    medication, UPDRS-gait, sex) using the same tolerant key matching as the
+    ``.pkl`` path, and drops ``trans`` (see :func:`load_h36m_cohorts`).
+    """
+    lab = aw.labels or {}
+    updrs = lab.get("UPDRS_GAIT")
+    if updrs is None:
+        updrs = lab.get("updrs_gait")
+    return Walk(
+        joints=np.asarray(aw.pose, dtype=np.float64),
+        cohort=aw.cohort, subject_id=str(aw.subject), walk_id=str(aw.walk_id),
+        fps=float(fps), fog=_extract_fog(lab), medication=_extract_med(lab),
+        updrs_gait=_num(updrs), sex=_extract_sex(lab), trans=None)
 
 
 def load_cohort_pkls(paths: dict[str, str], pose_to_joints=None,
                      joints_key: str = "joints3d") -> list[Walk]:
     """Read the Tier-1 cohort ``.pkl`` files into :class:`Walk` records.
+
+    Use this **only** for a hand-built / legacy pickle that already carries
+    joints. The real CARE-PD h36m release does not: its 3D joints live in a
+    separate ``.npz`` and the ``.pkl`` holds only SMPL parameters + labels —
+    load that with :func:`load_h36m_cohorts` instead.
 
     ``paths`` maps cohort name -> ``.pkl`` path. Each ``.pkl`` is keyed
     ``subject_id -> walk_id -> {pose, trans, beta, fps, UPDRS_GAIT,
@@ -238,11 +409,13 @@ def load_cohort_pkls(paths: dict[str, str], pose_to_joints=None,
     ``other`` carries the FoG label.
     """
     walks: list[Walk] = []
+    n_records = 0
     for cohort, path in paths.items():
         with open(path, "rb") as f:
             blob = pickle.load(f)
         for subject_id, walk_map in blob.items():
             for walk_id, rec in walk_map.items():
+                n_records += 1
                 joints = _extract_joints(rec, pose_to_joints, joints_key)
                 if joints is None:
                     continue
@@ -251,10 +424,19 @@ def load_cohort_pkls(paths: dict[str, str], pose_to_joints=None,
                     walk_id=str(walk_id), fps=float(rec.get("fps", 30.0)),
                     fog=_extract_fog(rec), medication=_extract_med(rec),
                     updrs_gait=_num(rec.get("UPDRS_GAIT")),
-                    sex=rec.get("sex", rec.get("other", {}).get("sex", np.nan)
-                        if isinstance(rec.get("other"), dict) else np.nan),
+                    sex=_extract_sex(rec),
                     trans=np.asarray(rec["trans"], float)
-                    if "trans" in rec else None))
+                    if isinstance(rec, dict) and "trans" in rec else None))
+    if not walks:
+        hint = (f" — all {n_records} records lacked a {joints_key!r} field and "
+                "no pose_to_joints was given" if n_records else " (no records)")
+        raise ValueError(
+            f"load_cohort_pkls loaded 0 walks from {list(paths)}{hint}. The "
+            "CARE-PD h36m release stores 3D joints in a separate .npz (the "
+            ".pkl carries only SMPL params + labels) — use "
+            "load_h36m_cohorts(h36m_root, source_dir=...) instead, or pass "
+            "pose_to_joints=<SMPL->H36M regressor> if this .pkl really holds "
+            "SMPL parameters.")
     return walks
 
 
@@ -281,7 +463,20 @@ def _extract_fog(rec):
 
 def _extract_med(rec):
     v = rec.get("medication") if isinstance(rec, dict) else None
+    if v is None and isinstance(rec, dict):
+        v = rec.get("med")                      # care_pd standardises to "med"
     return _MED_MAP.get(v, np.nan if v is None else v)
+
+
+def _extract_sex(rec):
+    other = rec.get("other") if isinstance(rec, dict) else None
+    for src in (rec if isinstance(rec, dict) else {},
+                other if isinstance(other, dict) else {}):
+        for k in ("sex", "gender"):
+            v = src.get(k)
+            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                return v
+    return np.nan
 
 
 def _truthy(v):

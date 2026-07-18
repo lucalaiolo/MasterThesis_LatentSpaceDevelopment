@@ -358,7 +358,10 @@ def write_model_summary(results: dict, out_path, meta: dict | None = None):
     # 7. Dynamics.
     L.append("## Temporal dynamics\n")
     if m["hmm_k"] is not None:
-        dwell = _dig(results, "dynamics", "hmm_dwell_seconds")
+        # Prefer the bounded empirical dwell; the closed-form can saturate at
+        # the trajectory duration for a near-absorbing state.
+        dwell = (_dig(results, "dynamics", "hmm_empirical_dwell_seconds")
+                 or _dig(results, "dynamics", "hmm_dwell_seconds"))
         ou = _dig(results, "dynamics", "ou_timescales_seconds")
         L.append(f"- HMM regimes: **{m['hmm_k']} states**; change-point "
                  f"segments: {m['n_segments']}.")

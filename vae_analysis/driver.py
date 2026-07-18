@@ -530,6 +530,9 @@ def run_all_analyses(checkpoint_path: str | Path,
                     results["dynamics"]["hmm_k"] = hmm["k"]
                     results["dynamics"]["hmm_dwell_seconds"] = \
                         hmm["dwell_seconds"].tolist()
+                    if "empirical_dwell_seconds" in hmm:
+                        results["dynamics"]["hmm_empirical_dwell_seconds"] = \
+                            hmm["empirical_dwell_seconds"].tolist()
                     _save(_plot_hmm_states(traj, hmm, plt),
                           "dynamics_hmm_states.png")
                 except Exception as e:

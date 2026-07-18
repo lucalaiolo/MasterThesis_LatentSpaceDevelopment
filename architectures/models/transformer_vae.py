@@ -30,6 +30,13 @@ class TransformerVAE(nn.Module):
     encoding, and L pre-norm transformer blocks with H heads run over
     the T tokens. A final linear projection returns DJ channels per
     frame (D the coordinate dimension).
+
+    Depth is a free hyperparameter: ``n_layers`` sets both stacks, and
+    ``n_enc_layers`` / ``n_dec_layers`` override each side independently
+    for deeper (or asymmetric) models. Because the blocks are pre-norm
+    (``norm_first=True``), each stack ends in a terminal LayerNorm — the
+    standard pre-norm final norm — so the residual stream stays
+    well-conditioned as depth grows past the [ARCH §6.1] default of 3.
     """
 
     def __init__(self, T: int, J: int, d_z: int = 32,
@@ -37,7 +44,9 @@ class TransformerVAE(nn.Module):
                  ffn_ratio: int = 4, dropout: float = 0.1,
                  inpainting: bool = False,
                  n_cond: int = 0, cond_dim: int = 8,
-                 cond_dropout: float = 0.0, n_dims: int = 3):
+                 cond_dropout: float = 0.0, n_dims: int = 3,
+                 n_enc_layers: int | None = None,
+                 n_dec_layers: int | None = None):
         super().__init__()
         self.T = T
         self.J = J
@@ -45,6 +54,13 @@ class TransformerVAE(nn.Module):
         self.n_dims = n_dims
         self.d_model = d_model
         self.inpainting = inpainting
+
+        # Per-side depth: fall back to the shared `n_layers` when a side
+        # override is not given, so deeper models are a one-line change.
+        n_enc = n_layers if n_enc_layers is None else n_enc_layers
+        n_dec = n_layers if n_dec_layers is None else n_dec_layers
+        self.n_enc_layers = n_enc
+        self.n_dec_layers = n_dec
 
         # Conditioning ([CARE-PD §6]); built only when requested so the
         # plain-VAE parameter budget is untouched.
@@ -69,7 +85,12 @@ class TransformerVAE(nn.Module):
             dropout=dropout, activation="gelu",
             batch_first=True, norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        # Terminal LayerNorm: pre-norm blocks leave the last residual add
+        # un-normalised, so a deep stack's output magnitude drifts without
+        # it. This is the canonical pre-norm final norm and matters more
+        # the deeper the model is.
+        self.encoder = nn.TransformerEncoder(
+            enc_layer, num_layers=n_enc, norm=nn.LayerNorm(d_model))
         # e(c) concatenated to the class-token representation before the
         # posterior heads.
         self.heads = BottleneckHeads(d_model + d_c, d_z)
@@ -88,7 +109,8 @@ class TransformerVAE(nn.Module):
             dropout=dropout, activation="gelu",
             batch_first=True, norm_first=True,
         )
-        self.decoder = nn.TransformerEncoder(dec_layer, num_layers=n_layers)
+        self.decoder = nn.TransformerEncoder(
+            dec_layer, num_layers=n_dec, norm=nn.LayerNorm(d_model))
 
         # Full-clip head. Not mask-conditioned; used by all three recipes.
         self.dec_output_full = nn.Linear(d_model, n_dims * J)

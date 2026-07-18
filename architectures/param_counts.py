@@ -4,9 +4,10 @@ Reproduces the numbers in [ARCH §6.1]. Useful for two things: matching
 the design note before training, and sizing a model to a target budget
 by scanning C or d_model.
 
-All counts include bias terms and exclude LayerNorm parameters, which
-the design note rounds away (under 1k in total for either model at the
-default sizes).
+All counts include bias terms and exclude LayerNorm parameters (the
+per-block norms plus the transformer's terminal pre-norm LayerNorm),
+which the design note rounds away — a small, depth-linear remainder that
+the smoke test reports as the actual-vs-analytical delta.
 """
 
 from __future__ import annotations
@@ -54,7 +55,8 @@ def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
     D = getattr(config, "n_dims", 3)
     d_z = config.latent_dim
     dm = config.d_model
-    L = config.n_layers
+    L_enc = config.encoder_layers()
+    L_dec = config.decoder_layers()
     ffn = config.ffn_ratio * dm
 
     def linear(inp, out):
@@ -76,10 +78,10 @@ def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
     parts = {
         "encoder_token_embed": linear((D + 1) * J, dm),
         "encoder_class_token": dm,
-        "encoder_stack": L * transformer_block(),
+        "encoder_stack": L_enc * transformer_block(),
         "bottleneck_heads": 2 * linear(dm, d_z),
         "decoder_query_lift": linear(d_z, dm),
-        "decoder_stack": L * transformer_block(),
+        "decoder_stack": L_dec * transformer_block(),
         "decoder_output_full": linear(dm, D * J),
     }
     # Recipe 3 adds a second, mask-conditioned output head ([MVAE §5.1]).

@@ -33,7 +33,15 @@ class TrainingConfig:
             downsampling factor. With (1, 2, 2) the encoder halves T twice.
         d_model: the transformer model width.
         n_heads: attention head count.
-        n_layers: transformer block count in each of the encoder and decoder.
+        n_layers: transformer block count used for *both* the encoder and
+            the decoder unless overridden per side (below). Free to set
+            deeper than the [ARCH §6.1] default of 3 — the pre-norm stacks
+            carry a terminal LayerNorm so depth stays well-conditioned.
+        n_enc_layers: optional encoder-only block count. ``None`` (default)
+            falls back to ``n_layers``; set it to make the encoder deeper
+            (or shallower) than the decoder.
+        n_dec_layers: optional decoder-only block count. ``None`` (default)
+            falls back to ``n_layers``.
         ffn_ratio: feedforward inner width as a multiple of d_model.
         dropout: applied after attention and after the feedforward.
         batch_size: B in [MVAE §6.4].
@@ -211,6 +219,8 @@ class TrainingConfig:
     d_model: int = 96
     n_heads: int = 4
     n_layers: int = 3
+    n_enc_layers: int | None = None
+    n_dec_layers: int | None = None
     ffn_ratio: int = 4
     dropout: float = 0.1
 
@@ -281,6 +291,14 @@ class TrainingConfig:
             f *= s
         return f
 
+    def encoder_layers(self) -> int:
+        """Transformer encoder depth, resolving the per-side override."""
+        return self.n_layers if self.n_enc_layers is None else self.n_enc_layers
+
+    def decoder_layers(self) -> int:
+        """Transformer decoder depth, resolving the per-side override."""
+        return self.n_layers if self.n_dec_layers is None else self.n_dec_layers
+
     def validate(self) -> None:
         """Cheap checks that catch bad settings before the run starts."""
         if self.clip_length % self.downsample_factor() != 0:
@@ -292,6 +310,13 @@ class TrainingConfig:
             raise ValueError(
                 f"d_model ({self.d_model}) must divide by n_heads "
                 f"({self.n_heads})."
+            )
+        if self.encoder_layers() < 1 or self.decoder_layers() < 1:
+            raise ValueError(
+                f"transformer depth must be >= 1 per side (got encoder="
+                f"{self.encoder_layers()}, decoder={self.decoder_layers()}; "
+                f"n_layers={self.n_layers}, n_enc_layers={self.n_enc_layers}, "
+                f"n_dec_layers={self.n_dec_layers})."
             )
         if self.n_dims < 1:
             raise ValueError(

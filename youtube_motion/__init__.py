@@ -51,11 +51,14 @@ __all__ = [
     # analysis (lazy — pulls in vae_analysis / torch):
     "analyze_checkpoint",
     "analyze_best",
+    "analyze_sweep",
+    "compare_models",
     "coco18_skeleton",
 ]
 
 _LAZY_DRIVER = {"run_sweep", "build_base_config", "ALL_ARCHITECTURES"}
-_LAZY_ANALYSIS = {"analyze_checkpoint", "analyze_best", "coco18_skeleton"}
+_LAZY_ANALYSIS = {"analyze_checkpoint", "analyze_best", "analyze_sweep",
+                  "compare_models", "coco18_skeleton"}
 
 
 def __getattr__(name):

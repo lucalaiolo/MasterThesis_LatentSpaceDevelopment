@@ -92,16 +92,34 @@ def hmm_states(trajectory: np.ndarray, k_range=range(2, 9),
     except ImportError as e:
         raise ImportError("hmm_states needs hmmlearn; pip install hmmlearn.") from e
 
+    # Cap the state count by the trajectory length: fitting more states than
+    # the data can occupy leaves a state unvisited, whose transition row sums
+    # to zero — which hmmlearn rejects ("transmat_ rows must sum to 1"). Keep
+    # at least ~5 windows per state. For a long trajectory this leaves the
+    # default range (2..8) untouched.
+    n = len(trajectory)
+    k_max = min(max(2, n // 5), n - 1)
+    ks = [k for k in k_range if 2 <= k <= k_max]
+    if not ks:
+        raise ValueError(
+            f"trajectory too short ({n} windows) to fit an HMM; need at least "
+            f"~10 windows (encode a longer video or shorten the window/stride).")
+
     best, best_bic, best_k = None, np.inf, None
-    for k in k_range:
-        hmm = GaussianHMM(n_components=k, covariance_type="full",
-                          n_iter=200, random_state=seed)
-        hmm.fit(trajectory)
-        ll = hmm.score(trajectory)
+    for k in ks:
+        try:
+            hmm = GaussianHMM(n_components=k, covariance_type="full",
+                              n_iter=200, random_state=seed)
+            hmm.fit(trajectory)
+            ll = hmm.score(trajectory)
+        except Exception:  # noqa: BLE001 - a degenerate fit at this k; skip it
+            continue
         n_params = k * trajectory.shape[1] + k * trajectory.shape[1] + k * k
-        bic = -2 * ll + n_params * np.log(len(trajectory))
+        bic = -2 * ll + n_params * np.log(n)
         if bic < best_bic:
             best, best_bic, best_k = hmm, bic, k
+    if best is None:
+        raise ValueError("no HMM converged for any candidate state count.")
 
     states = best.predict(trajectory)
     occ = np.array([np.mean(states == s) for s in range(best_k)])

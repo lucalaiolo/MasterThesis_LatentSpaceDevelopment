@@ -266,7 +266,9 @@ def train(config: TrainingConfig,
         print(f"[ckpt] best.pt = epoch {best_epoch} "
               f"(val {metric}={best_val:.4f}) -> {best_ckpt}")
 
-    # Best-effort summary plots. Skipped silently if matplotlib is missing.
+    # Best-effort summary plots. Never let a plotting problem sink a run that
+    # already trained and checkpointed: skip on a missing matplotlib, and
+    # skip (with a traceback) on any other plotting error rather than raising.
     try:
         from .visualize import plot_training_summary
         written = plot_training_summary(
@@ -276,6 +278,10 @@ def train(config: TrainingConfig,
         print(f"[plots] wrote {len(written)} figure(s) to {out / 'plots'}")
     except ImportError as e:
         print(f"[plots] skipped: {e}")
+    except Exception as e:  # noqa: BLE001 - plotting is non-essential
+        import traceback
+        print(f"[plots] skipped (plotting error): {e}")
+        traceback.print_exc()
 
     return {"model": model, "mixture": mixture, "site_adversary": adversary,
             "history": history, "checkpoint": best_ckpt or last_ckpt,

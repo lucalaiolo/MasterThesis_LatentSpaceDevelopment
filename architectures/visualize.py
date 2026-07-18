@@ -319,12 +319,16 @@ def plot_latent_pca(stats: dict, colors: np.ndarray | None = None,
     explained = (S[:2] ** 2) / (S ** 2).sum()
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    sc = ax.scatter(scores[:, 0], scores[:, 1],
-                    c=colors if colors is not None else "steelblue",
-                    s=10, alpha=0.7, cmap="viridis")
     if colors is not None:
+        sc = ax.scatter(scores[:, 0], scores[:, 1], c=colors,
+                        s=10, alpha=0.7, cmap="viridis")
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(label)
+    else:
+        # No per-point scalar to map — a flat colour, no cmap (avoids the
+        # "No data for colormapping" warning).
+        ax.scatter(scores[:, 0], scores[:, 1], color="steelblue",
+                   s=10, alpha=0.7)
     ax.set_xlabel(f"PC1 ({100 * explained[0]:.1f} %)")
     ax.set_ylabel(f"PC2 ({100 * explained[1]:.1f} %)")
     ax.set_title("Posterior means, first two PCs")
@@ -339,9 +343,9 @@ def plot_latent_traversal(model, ref_clip: np.ndarray, ref_mask: np.ndarray,
     """Sweep one latent coord at a time and plot the decoded trajectory.
 
     Rows are latent dimensions, columns are alpha offsets. Each cell
-    plots x/y/z of joint `joint_idx` over time. Monotone, meaningful
-    changes across a row read as an interpretable latent axis
-    ([MVAE §7.3]).
+    plots the coordinates (x, y for 2D; x, y, z for 3D) of joint
+    `joint_idx` over time. Monotone, meaningful changes across a row
+    read as an interpretable latent axis ([MVAE §7.3]).
     """
     plt = _import_matplotlib()
     torch = _import_torch()
@@ -350,7 +354,9 @@ def plot_latent_traversal(model, ref_clip: np.ndarray, ref_mask: np.ndarray,
         X = torch.from_numpy(ref_clip[None].astype(np.float32)).to(device)
         M = torch.from_numpy(ref_mask[None].astype(np.float32)).to(device)
         mu0, _ = model.encode(X, M)
-        T, J, _ = ref_clip.shape
+        T, J, D = ref_clip.shape
+        coord_labels = (["x", "y", "z"][:D] if D <= 3
+                        else [f"c{i}" for i in range(D)])
 
         fig, axes = plt.subplots(len(dims), len(alphas),
                                  figsize=(1.8 * len(alphas), 1.6 * len(dims)),
@@ -360,11 +366,10 @@ def plot_latent_traversal(model, ref_clip: np.ndarray, ref_mask: np.ndarray,
                 z = mu0.clone()
                 z[0, d] = z[0, d] + a
                 X_hat = _decode_full(model, z, M)
-                traj = X_hat[0, :, joint_idx].cpu().numpy()  # (T, 3)
+                traj = X_hat[0, :, joint_idx].cpu().numpy()  # (T, D)
                 ax = axes[r, c]
-                ax.plot(np.arange(T), traj[:, 0], "-", linewidth=1, label="x")
-                ax.plot(np.arange(T), traj[:, 1], "-", linewidth=1, label="y")
-                ax.plot(np.arange(T), traj[:, 2], "-", linewidth=1, label="z")
+                for k, lab in enumerate(coord_labels):
+                    ax.plot(np.arange(T), traj[:, k], "-", linewidth=1, label=lab)
                 ax.set_title(rf"$z_{{{d}}}$ += {a:+.1f}", fontsize=8)
                 ax.grid(True, alpha=0.3)
         axes[0, 0].legend(fontsize=7, loc="upper right")
@@ -420,21 +425,38 @@ def compute_predictions(model, X: np.ndarray, M: np.ndarray,
 
 def plot_pose_frame(x_frame: np.ndarray, ax=None, edges: Iterable[tuple[int, int]] | None = None,
                     color: str = "steelblue", label: str = ""):
-    """Scatter one frame's joints in 3D, optionally with skeleton edges."""
+    """Scatter one frame's joints, optionally with skeleton edges.
+
+    Works for both 2D (image-plane) and 3D poses: the coordinate count is
+    read from ``x_frame.shape[-1]``, so a 2D clip is drawn on plain axes and
+    a 3D clip on a 3D projection.
+    """
     plt = _import_matplotlib()
+    threeD = x_frame.shape[-1] >= 3
     if ax is None:
         fig = plt.figure(figsize=(4, 4))
-        ax = fig.add_subplot(111, projection="3d")
-    ax.scatter(x_frame[:, 0], x_frame[:, 1], x_frame[:, 2],
-               s=20, color=color, label=label)
+        ax = (fig.add_subplot(111, projection="3d") if threeD
+              else fig.add_subplot(111))
+    if threeD:
+        ax.scatter(x_frame[:, 0], x_frame[:, 1], x_frame[:, 2],
+                   s=20, color=color, label=label)
+    else:
+        ax.scatter(x_frame[:, 0], x_frame[:, 1], s=20, color=color, label=label)
     if edges is not None:
         for a, b in edges:
-            ax.plot([x_frame[a, 0], x_frame[b, 0]],
-                    [x_frame[a, 1], x_frame[b, 1]],
-                    [x_frame[a, 2], x_frame[b, 2]], color=color, linewidth=1)
+            xs = [x_frame[a, 0], x_frame[b, 0]]
+            ys = [x_frame[a, 1], x_frame[b, 1]]
+            if threeD:
+                ax.plot(xs, ys, [x_frame[a, 2], x_frame[b, 2]],
+                        color=color, linewidth=1)
+            else:
+                ax.plot(xs, ys, color=color, linewidth=1)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_zlabel("z")
+    if threeD:
+        ax.set_zlabel("z")
+    else:
+        ax.set_aspect("equal")
     return ax
 
 
@@ -443,17 +465,19 @@ def plot_pose_comparison(x_true: np.ndarray, x_pred: np.ndarray,
                          edges: Iterable[tuple[int, int]] | None = None):
     """Grid of ground-truth vs reconstructed poses at selected frames.
 
-    `x_true`, `x_pred` are single clips of shape (T, J, 3). Default
-    frames are the first, middle, and last.
+    `x_true`, `x_pred` are single clips of shape (T, J, D), D = 2 or 3.
+    Default frames are the first, middle, and last.
     """
     plt = _import_matplotlib()
     T = x_true.shape[0]
+    threeD = x_true.shape[-1] >= 3
     if frames is None:
         frames = [0, T // 2, T - 1]
 
     fig = plt.figure(figsize=(3.6 * len(frames), 3.6))
     for i, t in enumerate(frames):
-        ax = fig.add_subplot(1, len(frames), i + 1, projection="3d")
+        ax = (fig.add_subplot(1, len(frames), i + 1, projection="3d") if threeD
+              else fig.add_subplot(1, len(frames), i + 1))
         plot_pose_frame(x_true[t], ax=ax, edges=edges,
                         color="black", label="true")
         plot_pose_frame(x_pred[t], ax=ax, edges=edges,
@@ -496,59 +520,83 @@ def animate_pose_comparison(clip_true: np.ndarray, clip_pred: np.ndarray,
 
     clips = [np.asarray(clip_true), np.asarray(clip_pred)]
     T = clips[0].shape[0]
+    D = clips[0].shape[-1]
+    threeD = D >= 3
 
     fig = plt.figure(figsize=figsize)
-    axes = [fig.add_subplot(1, 2, i + 1, projection="3d") for i in range(2)]
+    axes = [(fig.add_subplot(1, 2, i + 1, projection="3d") if threeD
+             else fig.add_subplot(1, 2, i + 1)) for i in range(2)]
     titles = ["Ground truth", "Reconstruction"]
 
-    # Shared bounding box, equal aspect on all three axes.
-    all_pts = np.concatenate([c.reshape(-1, 3) for c in clips], axis=0)
+    # Shared bounding box, equal aspect on every axis.
+    all_pts = np.concatenate([c.reshape(-1, D) for c in clips], axis=0)
     mins = all_pts.min(axis=0)
     maxs = all_pts.max(axis=0)
     center = 0.5 * (mins + maxs)
     half = 0.55 * (maxs - mins).max()
-    lims = [(center[i] - half, center[i] + half) for i in range(3)]
+    lims = [(center[i] - half, center[i] + half) for i in range(D)]
 
     scatters, lines_per_ax = [], []
     for ax, title, clip, color in zip(axes, titles, clips, colors):
-        scat = ax.scatter(clip[0, :, 0], clip[0, :, 1], clip[0, :, 2],
-                          s=6, color=color)
+        if threeD:
+            scat = ax.scatter(clip[0, :, 0], clip[0, :, 1], clip[0, :, 2],
+                              s=6, color=color)
+        else:
+            scat = ax.scatter(clip[0, :, 0], clip[0, :, 1], s=6, color=color)
         scatters.append(scat)
         lines = []
         if edges is not None:
             for a, b in edges:
-                (ln,) = ax.plot(
-                    [clip[0, a, 0], clip[0, b, 0]],
-                    [clip[0, a, 1], clip[0, b, 1]],
-                    [clip[0, a, 2], clip[0, b, 2]],
-                    color=color, linewidth=0.9)
+                if threeD:
+                    (ln,) = ax.plot(
+                        [clip[0, a, 0], clip[0, b, 0]],
+                        [clip[0, a, 1], clip[0, b, 1]],
+                        [clip[0, a, 2], clip[0, b, 2]],
+                        color=color, linewidth=0.9)
+                else:
+                    (ln,) = ax.plot(
+                        [clip[0, a, 0], clip[0, b, 0]],
+                        [clip[0, a, 1], clip[0, b, 1]],
+                        color=color, linewidth=0.9)
                 lines.append(ln)
         lines_per_ax.append(lines)
         ax.set_xlim(*lims[0])
         ax.set_ylim(*lims[1])
-        ax.set_zlim(*lims[2])
-        try:
-            ax.set_box_aspect((1, 1, 1))
-        except Exception:  # pragma: no cover — very old matplotlib
-            pass
-        ax.view_init(elev=elev, azim=azim)
-        ax.set_title(title, fontsize=10)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_zlabel("z")
+        ax.set_title(title, fontsize=10)
+        if threeD:
+            ax.set_zlim(*lims[2])
+            try:
+                ax.set_box_aspect((1, 1, 1))
+            except Exception:  # pragma: no cover — very old matplotlib
+                pass
+            ax.view_init(elev=elev, azim=azim)
+            ax.set_zlabel("z")
+        else:
+            ax.set_aspect("equal")
 
     caption = fig.suptitle("", fontsize=10)
 
     def update(t):
         for scat, lines, clip in zip(scatters, lines_per_ax, clips):
-            scat._offsets3d = (clip[t, :, 0], clip[t, :, 1], clip[t, :, 2])
+            if threeD:
+                scat._offsets3d = (clip[t, :, 0], clip[t, :, 1], clip[t, :, 2])
+            else:
+                scat.set_offsets(np.c_[clip[t, :, 0], clip[t, :, 1]])
             if edges is not None:
                 for (a, b), ln in zip(edges, lines):
-                    ln.set_data_3d(
-                        [clip[t, a, 0], clip[t, b, 0]],
-                        [clip[t, a, 1], clip[t, b, 1]],
-                        [clip[t, a, 2], clip[t, b, 2]],
-                    )
+                    if threeD:
+                        ln.set_data_3d(
+                            [clip[t, a, 0], clip[t, b, 0]],
+                            [clip[t, a, 1], clip[t, b, 1]],
+                            [clip[t, a, 2], clip[t, b, 2]],
+                        )
+                    else:
+                        ln.set_data(
+                            [clip[t, a, 0], clip[t, b, 0]],
+                            [clip[t, a, 1], clip[t, b, 1]],
+                        )
         caption.set_text(f"frame {t + 1} / {T}")
         return []
 
@@ -561,14 +609,17 @@ def plot_joint_trajectory(x_true: np.ndarray, x_pred: np.ndarray,
                           joint_idx: int = 0):
     """Coordinate trajectories for one joint over time — true vs predicted.
 
-    Three lines each for true and predicted (x, y, z). `x_true` and
-    `x_pred` are single clips of shape (T, J, 3).
+    One row per coordinate (x, y for 2D poses; x, y, z for 3D). `x_true`
+    and `x_pred` are single clips of shape (T, J, D).
     """
     plt = _import_matplotlib()
     T = x_true.shape[0]
-    fig, axes = plt.subplots(3, 1, figsize=(7.5, 5), sharex=True)
-    labels = ["x", "y", "z"]
-    for c in range(3):
+    D = x_true.shape[-1]
+    labels = (["x", "y", "z"][:D] if D <= 3 else [f"c{i}" for i in range(D)])
+    fig, axes = plt.subplots(D, 1, figsize=(7.5, 1.7 * D), sharex=True,
+                             squeeze=False)
+    axes = axes[:, 0]
+    for c in range(D):
         axes[c].plot(np.arange(T), x_true[:, joint_idx, c], "-",
                      color="black", linewidth=1.4, label="true")
         axes[c].plot(np.arange(T), x_pred[:, joint_idx, c], "--",

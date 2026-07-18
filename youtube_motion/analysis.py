@@ -139,8 +139,10 @@ def analyze_checkpoint(checkpoint_path: str,
             umap-learn is not installed.
         umap_seed: seed for the UMAP layout.
         **kwargs: forwarded to :func:`vae_analysis.driver.run_all_analyses`
-            (e.g. ``include_dynamics``, ``n_anchors``, ``n_jacobian_clips``,
-            ``include_persistent_homology``, ``mask_policy_override``).
+            (e.g. ``split="all"`` to analyse the whole dataset instead of the
+            held-out split, ``include_dynamics``, ``n_anchors``,
+            ``n_jacobian_clips``, ``include_persistent_homology``,
+            ``mask_policy_override``).
     Returns:
         The ``run_all_analyses`` result dict (``results`` / ``written`` /
         ``latent``), with the UMAP figure appended to ``written``.
@@ -530,6 +532,9 @@ def main(argv=None) -> int:
     ap.add_argument("--preprocess", default="none",
                     choices=["none", "center", "center_scale"])
     ap.add_argument("--max-videos", type=int, default=None)
+    ap.add_argument("--split", default="val", choices=["val", "all", "train"],
+                    help="clips to analyse: 'val' (held-out, default), 'all' "
+                    "(whole dataset — the full latent manifold), or 'train'")
     ap.add_argument("--no-umap", action="store_true",
                     help="skip the UMAP embedding plot")
     ap.add_argument("--no-dynamics", action="store_true",
@@ -545,6 +550,7 @@ def main(argv=None) -> int:
 
     kwargs = dict(
         device=args.device,
+        split=args.split,
         add_umap=not args.no_umap,
         include_dynamics=not args.no_dynamics,
         include_persistent_homology=not args.no_persistent_homology,

@@ -167,13 +167,21 @@ from youtube_motion.analysis import analyze_checkpoint, analyze_best
 
 bundle = load_youtube_csv("keypoints.csv")     # the SAME data the model trained on
 
-# one checkpoint …
+# one checkpoint … (split="all" characterises the whole dataset, not just val)
 analyze_checkpoint("checkpoints/youtube_motion/conv/recipe1_uniform/best.pt",
-                   bundle, out_dir="analysis/conv_r1", device="cuda")
+                   bundle, out_dir="analysis/conv_r1", device="cuda", split="all")
 
 # … or the best model from a finished sweep
 analyze_best("checkpoints/youtube_motion", bundle, metric="mpjpe_all")
 ```
+
+By default the analysis encodes the **held-out validation split** (the honest
+choice for generalisation-flavoured metrics). Pass `split="all"` (or
+`--split all` on the CLI) to encode **every clip** — the full latent manifold,
+which is what you usually want for UMAP / clustering / geometry / dynamics.
+`split="train"` is the complement. Two metrics change meaning on `all`/`train`
+(they assume unseen data): the screening typicality and the q(z)-vs-prior
+two-sample test — everything else is unaffected.
 
 CLI:
 

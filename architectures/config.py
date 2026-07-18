@@ -20,6 +20,10 @@ class TrainingConfig:
     Attributes:
         clip_length: T, the number of frames per clip.
         n_joints: J, the joint count of the skeleton. Generic.
+        n_dims: D, the coordinate dimension per joint. 3 (default) for 3D
+            motion capture; 2 for image-plane keypoints (e.g. OpenPose /
+            COCO 2D pose). Every model, loss, and parameter count is generic
+            in D, so a 2D dataset only needs ``n_dims=2`` — no other change.
         fps: recording rate, used only for schedule reporting.
         architecture: which model to build, "conv" or "transformer".
         latent_dim: d_z, the latent width.
@@ -193,6 +197,7 @@ class TrainingConfig:
     # Data.
     clip_length: int = 32
     n_joints: int = 22
+    n_dims: int = 3
     fps: int = 25
 
     # Model.
@@ -287,6 +292,11 @@ class TrainingConfig:
             raise ValueError(
                 f"d_model ({self.d_model}) must divide by n_heads "
                 f"({self.n_heads})."
+            )
+        if self.n_dims < 1:
+            raise ValueError(
+                f"n_dims ({self.n_dims}) must be >= 1 (2 for 2D keypoints, "
+                f"3 for 3D motion capture)."
             )
         if self.recipe in (2, 3) and self.mask_policy == "none":
             raise ValueError(

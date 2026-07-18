@@ -15,6 +15,7 @@ def build_model(config):
     The mixture prior itself is a separate object — see ``build_mixture``.
     """
     inpainting = config.recipe == 3
+    n_dims = getattr(config, "n_dims", 3)
     if config.architecture == "conv":
         return ConvVAE(
             T=config.clip_length,
@@ -27,6 +28,7 @@ def build_model(config):
             n_cond=config.n_cond,
             cond_dim=config.cond_dim,
             cond_dropout=config.cond_dropout,
+            n_dims=n_dims,
         )
     if config.architecture == "transformer":
         return TransformerVAE(
@@ -42,6 +44,7 @@ def build_model(config):
             n_cond=config.n_cond,
             cond_dim=config.cond_dim,
             cond_dropout=config.cond_dropout,
+            n_dims=n_dims,
         )
     raise ValueError(f"unknown architecture: {config.architecture!r}")
 

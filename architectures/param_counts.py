@@ -18,6 +18,7 @@ def conv_param_count(config: TrainingConfig) -> dict[str, int]:
     """Convolutional model parameter counts by component ([ARCH §6.1])."""
     T = config.clip_length
     J = config.n_joints
+    D = getattr(config, "n_dims", 3)
     d_z = config.latent_dim
     C = config.conv_base_channels
     k = config.conv_kernel_sizes
@@ -31,18 +32,18 @@ def conv_param_count(config: TrainingConfig) -> dict[str, int]:
         return inp * out + out
 
     parts = {
-        "encoder_block_1": conv1d(4 * J, C, k[0]),
+        "encoder_block_1": conv1d((D + 1) * J, C, k[0]),
         "encoder_block_2": conv1d(C, 2 * C, k[1]),
         "encoder_block_3": conv1d(2 * C, 2 * C, k[2]),
         "bottleneck_heads": 2 * linear(2 * C * T_bot, d_z),
         "decoder_lift": linear(d_z, 2 * C * T_bot),
         "decoder_block_3": conv1d(2 * C, 2 * C, k[2]),
         "decoder_block_2": conv1d(2 * C, C, k[1]),
-        "decoder_output_full": conv1d(C, 3 * J, k[0]),
+        "decoder_output_full": conv1d(C, D * J, k[0]),
     }
     # Recipe 3 adds a second, mask-conditioned output head ([MVAE §5.1]).
     if config.recipe == 3:
-        parts["decoder_output_inp"] = conv1d(C + J, 3 * J, k[0])
+        parts["decoder_output_inp"] = conv1d(C + J, D * J, k[0])
     parts["total"] = sum(parts.values())
     return parts
 
@@ -50,6 +51,7 @@ def conv_param_count(config: TrainingConfig) -> dict[str, int]:
 def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
     """Transformer model parameter counts by component ([ARCH §6.1])."""
     J = config.n_joints
+    D = getattr(config, "n_dims", 3)
     d_z = config.latent_dim
     dm = config.d_model
     L = config.n_layers
@@ -72,17 +74,17 @@ def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
         return attention_block() + ffn_block()
 
     parts = {
-        "encoder_token_embed": linear(4 * J, dm),
+        "encoder_token_embed": linear((D + 1) * J, dm),
         "encoder_class_token": dm,
         "encoder_stack": L * transformer_block(),
         "bottleneck_heads": 2 * linear(dm, d_z),
         "decoder_query_lift": linear(d_z, dm),
         "decoder_stack": L * transformer_block(),
-        "decoder_output_full": linear(dm, 3 * J),
+        "decoder_output_full": linear(dm, D * J),
     }
     # Recipe 3 adds a second, mask-conditioned output head ([MVAE §5.1]).
     if config.recipe == 3:
-        parts["decoder_output_inp"] = linear(dm + J, 3 * J)
+        parts["decoder_output_inp"] = linear(dm + J, D * J)
     parts["total"] = sum(parts.values())
     return parts
 

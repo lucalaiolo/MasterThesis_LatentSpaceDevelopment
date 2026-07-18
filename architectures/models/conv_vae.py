@@ -48,7 +48,7 @@ class ConvVAE(nn.Module):
 
     Decoder ([ARCH §3.2]): a linear lift reshapes z to (2C, T / 4), two
     transposed-convolution blocks return to (C, T), and a final Conv1d
-    projects to the (3J, T) output.
+    projects to the (DJ, T) output (D the coordinate dimension).
 
     The `inpainting` flag adds Recipe 3's second decoder head. The
     shared decoder trunk feeds a `dec_output_full` that reconstructs the
@@ -68,16 +68,19 @@ class ConvVAE(nn.Module):
                  strides: tuple[int, int, int] = (1, 2, 2),
                  inpainting: bool = False,
                  n_cond: int = 0, cond_dim: int = 8,
-                 cond_dropout: float = 0.0):
+                 cond_dropout: float = 0.0, n_dims: int = 3):
         super().__init__()
         self.T = T
         self.J = J
         self.d_z = d_z
+        self.n_dims = n_dims
         self.inpainting = inpainting
 
         C = base_channels
-        in_channels = 4 * J
-        out_channels = 3 * J
+        # Each joint contributes D coordinate channels plus one mask channel
+        # on input ([ARCH §2.1, §2.2]); the output is just the D coordinates.
+        in_channels = (n_dims + 1) * J
+        out_channels = n_dims * J
         downsample = strides[0] * strides[1] * strides[2]
         assert T % downsample == 0, "clip length must divide the total stride."
 
@@ -123,13 +126,13 @@ class ConvVAE(nn.Module):
         """Map (clip, mask[, cohort]) to (mu, logvar).
 
         Args:
-            X: (B, T, J, 3).
+            X: (B, T, J, D).
             M: (B, T, J).
             c: optional (B,) conditioning ids; ignored for a plain VAE.
         Returns:
             (mu, logvar), each (B, d_z).
         """
-        x = pack_encoder_input(X, M)                 # (B, T, 4J)
+        x = pack_encoder_input(X, M)                 # (B, T, (D + 1)J)
         h = self.enc(x.transpose(1, 2))              # (B, 2C, T / down)
         h = h.flatten(1)
         if self.cond is not None:
@@ -149,9 +152,9 @@ class ConvVAE(nn.Module):
     def decode_full(self, z, c=None):
         """Full-clip reconstruction head, ignoring the mask."""
         g = self._decode_trunk(z, c)
-        x_hat = self.dec_output_full(g)              # (B, 3J, T)
+        x_hat = self.dec_output_full(g)              # (B, DJ, T)
         B = z.shape[0]
-        return x_hat.transpose(1, 2).reshape(B, self.T, self.J, 3)
+        return x_hat.transpose(1, 2).reshape(B, self.T, self.J, self.n_dims)
 
     def decode_inp(self, z, M, c=None):
         """Mask-conditioned inpainting head (Recipe 3 only)."""
@@ -159,9 +162,9 @@ class ConvVAE(nn.Module):
             raise RuntimeError("Model was built without the inpainting head.")
         g = self._decode_trunk(z, c)
         g = torch.cat([g, M.transpose(1, 2)], dim=1)  # (B, C + J, T)
-        x_hat = self.dec_output_inp(g)               # (B, 3J, T)
+        x_hat = self.dec_output_inp(g)               # (B, DJ, T)
         B = z.shape[0]
-        return x_hat.transpose(1, 2).reshape(B, self.T, self.J, 3)
+        return x_hat.transpose(1, 2).reshape(B, self.T, self.J, self.n_dims)
 
     # ---- Combined --------------------------------------------------------
     def forward(self, X, M, c=None):

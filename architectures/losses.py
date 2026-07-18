@@ -72,7 +72,7 @@ def reconstruction_mse(x_hat, x):
     """Mean squared error over every joint and coordinate.
 
     Args:
-        x_hat, x: (B, T, J, 3).
+        x_hat, x: (B, T, J, D), D the coordinate dimension.
     Returns:
         Scalar mean over the batch, time, joints, and coordinates.
     """
@@ -86,14 +86,16 @@ def reconstruction_mse_hidden(x_hat, x, M):
     magnitude stays stable across masks with different hide-fractions.
 
     Args:
-        x_hat, x: (B, T, J, 3).
+        x_hat, x: (B, T, J, D), D the coordinate dimension (3 for 3D, 2 for
+            2D image-plane keypoints).
         M: (B, T, J), 1 for visible.
     Returns:
         Scalar mean over hidden joint coordinates.
     """
-    err_sq = (x_hat - x).pow(2)                        # (B, T, J, 3)
+    D = x_hat.shape[-1]
+    err_sq = (x_hat - x).pow(2)                        # (B, T, J, D)
     hidden = (1 - M).unsqueeze(-1)                     # (B, T, J, 1)
-    n_inp = (hidden.sum() * 3).clamp_min(1.0)
+    n_inp = (hidden.sum() * D).clamp_min(1.0)
     return (err_sq * hidden).sum() / n_inp
 
 

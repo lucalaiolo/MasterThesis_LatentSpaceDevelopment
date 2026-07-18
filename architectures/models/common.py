@@ -73,15 +73,17 @@ def pack_encoder_input(X, M):
     joint apart from a real joint at the origin.
 
     Args:
-        X: (B, T, J, 3).
+        X: (B, T, J, D), D the coordinate dimension (3 for 3D, 2 for 2D
+            image-plane keypoints).
         M: (B, T, J), 1 for visible.
     Returns:
-        (B, T, 4J).
+        (B, T, (D + 1)J) — the DJ masked coordinates followed by the J
+        mask channels.
     """
-    B, T, J, _ = X.shape
-    X_masked = X * M.unsqueeze(-1)                 # (B, T, J, 3)
-    X_flat = X_masked.reshape(B, T, J * 3)         # (B, T, 3J)
-    return torch.cat([X_flat, M], dim=-1)          # (B, T, 4J)
+    B, T, J, D = X.shape
+    X_masked = X * M.unsqueeze(-1)                 # (B, T, J, D)
+    X_flat = X_masked.reshape(B, T, J * D)         # (B, T, DJ)
+    return torch.cat([X_flat, M], dim=-1)          # (B, T, (D + 1)J)
 
 
 class BottleneckHeads(nn.Module):

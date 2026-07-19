@@ -185,14 +185,60 @@ def anchored_param_count(config: TrainingConfig) -> dict[str, int]:
     return parts
 
 
+def anchored_temporal_param_count(config: TrainingConfig) -> dict[str, int]:
+    """Anchored frame-token transformer parameter counts.
+
+    The frame-token backbone (``n_layers`` single-axis blocks per stack, a class
+    token, terminal norms) plus the anchor machinery: a conditioning MLP
+    ``(D*J + 1) -> d_model -> d_model``; one encoder FiLM site; a FiLM site
+    before every decoder layer. The residual frame token embeds ``(D+1)*J`` and
+    the output head is ``d_model -> D*J``. Excludes LayerNorm scales/biases and
+    assumes ``n_cond == 0``.
+    """
+    J = config.n_joints
+    D = getattr(config, "n_dims", 3)
+    d_z = config.latent_dim
+    dm = config.d_model
+    L = config.n_layers
+    ffn = config.ffn_ratio * dm
+
+    def linear(inp, out):
+        return inp * out + out
+
+    def transformer_block():
+        attn = 3 * dm * dm + 3 * dm + dm * dm + dm
+        ff = dm * ffn + ffn + ffn * dm + dm
+        return attn + ff
+
+    film = linear(dm, 2 * dm)
+
+    parts = {
+        "cond_mlp": linear(D * J + 1, dm) + linear(dm, dm),
+        "encoder_token_embed": linear((D + 1) * J, dm),
+        "encoder_class_token": dm,
+        "encoder_film": film,                           # single encoder site
+        "encoder_stack": L * transformer_block(),
+        "bottleneck_heads": 2 * linear(dm, d_z),
+        "decoder_query_lift": linear(d_z, dm),
+        "decoder_stack": L * transformer_block(),
+        "decoder_film": L * film,                       # one per decoder layer
+        "decoder_output_full": linear(dm, D * J),
+    }
+    if config.recipe == 3:
+        parts["decoder_output_inp"] = linear(dm + J, D * J)
+    parts["total"] = sum(parts.values())
+    return parts
+
+
 def summarise(config: TrainingConfig) -> dict[str, int]:
     """One entry point: return the counts for whichever architecture is set."""
     if config.architecture == "conv":
         return conv_param_count(config)
     if config.architecture == "transformer":
         attention = getattr(config, "transformer_attention", "temporal")
-        if attention == "anchored":
-            return anchored_param_count(config)
+        if getattr(config, "anchored_residual", False):
+            return (anchored_param_count(config) if attention == "factorized"
+                    else anchored_temporal_param_count(config))
         if attention == "factorized":
             return spatiotemporal_param_count(config)
         return transformer_param_count(config)

@@ -52,23 +52,28 @@ class TrainingConfig:
             **temporal** attention (across frames within a joint), the
             divided space-time / PoseFormer construction. Ignored when
             ``architecture == "conv"``.
-            "anchored" — the factorized backbone applied to the *residual*
-            ``r = (x - a) / s`` (mean pose ``a`` and torso scale ``s``
-            removed), with ``(vec(a), s)`` fed in as FiLM conditioning and
-            the clip reassembled as ``x_hat = a + s * r_hat`` outside the
-            network ([ARCH §4.4]). Forces the latent to encode movement, not
-            the mean pose — the fix for a decoder that reproduces only the
-            static average pose. Uses ``anchor_shoulder_joints`` /
-            ``anchor_hip_joints`` for ``s``.
+        anchored_residual: when True, the transformer models the *residual*
+            ``r = (x - a) / s`` (mean pose ``a`` and torso scale ``s`` removed)
+            instead of the absolute pose, with ``(vec(a), s)`` fed in as FiLM
+            conditioning and the clip reassembled as ``x_hat = a + s * r_hat``
+            outside the network ([ARCH §4.4]). Forces the latent to encode
+            movement, not the mean pose — the fix for a decoder that reproduces
+            only the static average pose. **Orthogonal to
+            ``transformer_attention``**: combine it with ``"temporal"`` (the
+            frame-token anchored model) or ``"factorized"`` (the space-time
+            anchored model). Ignored when ``architecture == "conv"``. Uses
+            ``anchor_shoulder_joints`` / ``anchor_hip_joints`` for ``s``. (The
+            legacy value ``transformer_attention="anchored"`` still works and
+            is normalised to ``"factorized"`` + ``anchored_residual=True``.)
         anchor_shoulder_joints: (left, right) shoulder joint indices whose
             midpoint is the top of the torso segment used for the scale ``s``
-            of the ``"anchored"`` model. ``None`` (default) falls back to a
+            when ``anchored_residual``. ``None`` (default) falls back to a
             generic per-frame bounding-box diagonal. COCO-18: (5, 2).
         anchor_hip_joints: (left, right) hip joint indices for the bottom of
             the torso segment. COCO-18: (11, 8). Both anchor-joint fields must
             be set together, or both left ``None``.
         anchor_scale_eps: lower clamp on the scale ``s`` so a still clip never
-            divides the residual by ~0. Only used by the ``"anchored"`` model.
+            divides the residual by ~0. Only used when ``anchored_residual``.
         batch_size: B in [MVAE §6.4].
         n_epochs: total training epochs.
         learning_rate: peak learning rate.
@@ -255,8 +260,8 @@ class TrainingConfig:
     n_dec_layers: int | None = None
     ffn_ratio: int = 4
     dropout: float = 0.1
-    transformer_attention: Literal["temporal", "factorized",
-                                   "anchored"] = "temporal"
+    transformer_attention: Literal["temporal", "factorized"] = "temporal"
+    anchored_residual: bool = False
     anchor_shoulder_joints: tuple[int, int] | None = None
     anchor_hip_joints: tuple[int, int] | None = None
     anchor_scale_eps: float = 1e-3
@@ -322,6 +327,14 @@ class TrainingConfig:
     save_every: int = 10
     out_dir: str = "checkpoints"
 
+    def __post_init__(self) -> None:
+        # Legacy alias: transformer_attention="anchored" was the factorized
+        # anchored model before anchoring became an orthogonal toggle. Normalise
+        # it so old configs / checkpoints keep working.
+        if getattr(self, "transformer_attention", None) == "anchored":
+            self.transformer_attention = "factorized"
+            self.anchored_residual = True
+
     def downsample_factor(self) -> int:
         """Product of the three encoder strides. The encoder divides T by this."""
         f = 1
@@ -356,17 +369,17 @@ class TrainingConfig:
                 f"n_layers={self.n_layers}, n_enc_layers={self.n_enc_layers}, "
                 f"n_dec_layers={self.n_dec_layers})."
             )
-        if (self.transformer_attention in ("factorized", "anchored")
+        if ((self.transformer_attention == "factorized" or self.anchored_residual)
                 and (self.n_enc_layers is not None
                      or self.n_dec_layers is not None)):
             raise ValueError(
-                f"n_enc_layers / n_dec_layers have no effect with "
-                f"transformer_attention={self.transformer_attention!r}: the "
-                f"space-time backbone shares one n_layers across both stacks. "
-                f"Set n_layers instead, or use "
-                f"transformer_attention='temporal' for per-side depth."
+                "n_enc_layers / n_dec_layers have no effect with "
+                "transformer_attention='factorized' or anchored_residual=True: "
+                "these backbones share one n_layers across both stacks. Set "
+                "n_layers instead, or use transformer_attention='temporal' with "
+                "anchored_residual=False for per-side depth."
             )
-        if self.transformer_attention == "anchored":
+        if self.anchored_residual:
             sh, hp = self.anchor_shoulder_joints, self.anchor_hip_joints
             if (sh is None) != (hp is None):
                 raise ValueError(

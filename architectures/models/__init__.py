@@ -3,12 +3,12 @@
 from .conv_vae import ConvVAE
 from .transformer_vae import TransformerVAE
 from .spatiotemporal_vae import SpatioTemporalTransformerVAE
-from .anchored_vae import AnchoredSpatioTemporalVAE
+from .anchored_vae import AnchoredSpatioTemporalVAE, AnchoredTemporalVAE
 from .gaussian_mixture import GaussianMixturePrior
 
 __all__ = ["ConvVAE", "TransformerVAE", "SpatioTemporalTransformerVAE",
-           "AnchoredSpatioTemporalVAE", "GaussianMixturePrior",
-           "build_model", "build_mixture"]
+           "AnchoredSpatioTemporalVAE", "AnchoredTemporalVAE",
+           "GaussianMixturePrior", "build_model", "build_mixture"]
 
 
 def build_model(config):
@@ -50,10 +50,13 @@ def build_model(config):
             cond_dropout=config.cond_dropout,
             n_dims=n_dims,
         )
-        if attention == "anchored":
-            # Residual + FiLM model. Shares one n_layers (rejected per-side in
+        if getattr(config, "anchored_residual", False):
+            # Residual + FiLM model, on either backbone (orthogonal to the
+            # attention pattern). Shares one n_layers (per-side rejected in
             # validate) and takes the torso-scale joint indices.
-            return AnchoredSpatioTemporalVAE(
+            anchor_cls = (AnchoredSpatioTemporalVAE if attention == "factorized"
+                          else AnchoredTemporalVAE)
+            return anchor_cls(
                 **common,
                 shoulder_joints=getattr(config, "anchor_shoulder_joints", None),
                 hip_joints=getattr(config, "anchor_hip_joints", None),

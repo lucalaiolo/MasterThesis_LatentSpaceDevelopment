@@ -38,6 +38,8 @@ def build_model(config):
             d_model=config.d_model,
             n_heads=config.n_heads,
             n_layers=config.n_layers,
+            n_enc_layers=getattr(config, "n_enc_layers", None),
+            n_dec_layers=getattr(config, "n_dec_layers", None),
             ffn_ratio=config.ffn_ratio,
             dropout=config.dropout,
             inpainting=inpainting,

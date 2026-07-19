@@ -14,6 +14,10 @@ The training loop calls these each step:
     reconstruction_mse_hidden  mean squared error over hidden joints only;
                                the inpainting term for Recipe 3's
                                second head ([MVAE §5.2]).
+    reconstruction_velocity_mse
+                               mean squared error between the frame-to-frame
+                               velocities of reconstruction and target; the
+                               optional temporal-smoothness term.
 """
 
 from __future__ import annotations
@@ -97,6 +101,32 @@ def reconstruction_mse_hidden(x_hat, x, M):
     hidden = (1 - M).unsqueeze(-1)                     # (B, T, J, 1)
     n_inp = (hidden.sum() * D).clamp_min(1.0)
     return (err_sq * hidden).sum() / n_inp
+
+
+def reconstruction_velocity_mse(x_hat, x):
+    """Mean squared error between frame-to-frame velocities.
+
+    A clip's velocity is its first temporal difference,
+    ``v[t] = x[t+1] - x[t]``. Matching ``v_hat`` to ``v`` penalises
+    reconstructions that land the per-frame positions roughly right but
+    get the *motion* wrong — the usual source of temporal jitter in pose
+    VAEs. It complements the position MSE (which is blind to the sign or
+    timing of frame-to-frame change), so use it as an added term, not a
+    replacement.
+
+    Args:
+        x_hat, x: (B, T, J, D), D the coordinate dimension (3 for 3D, 2 for
+            2D image-plane keypoints).
+    Returns:
+        Scalar mean over the batch, the T-1 velocities, joints, and
+        coordinates. A single-frame clip (T < 2) has no velocity, so a
+        zero (still graph-connected) scalar is returned.
+    """
+    if x_hat.shape[1] < 2:
+        return (x_hat * 0.0).sum()
+    v_hat = x_hat[:, 1:] - x_hat[:, :-1]
+    v = x[:, 1:] - x[:, :-1]
+    return (v_hat - v).pow(2).mean()
 
 
 def beta_schedule(epoch: int, warmup_epochs: int, beta_max: float) -> float:

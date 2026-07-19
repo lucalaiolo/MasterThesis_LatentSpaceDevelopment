@@ -31,6 +31,7 @@ from .config import TrainingConfig
 from .data import build_clips, make_loader, train_val_split
 from .losses import (kl_gaussian, kl_gaussian_free_bits,
                      reconstruction_mse, reconstruction_mse_hidden,
+                     reconstruction_velocity_mse,
                      beta_schedule, delayed_warmup_schedule)
 from .mask_policies import build_policy
 from .models import build_model, build_mixture
@@ -246,6 +247,9 @@ def train(config: TrainingConfig,
             extra += (f" advAcc={train_stats['adv_acc']:.2f}"
                       f" (chance {1.0 / adversary.net[-1].out_features:.2f})"
                       f" lam={_site_adv_lambda(config, epoch):.2f}")
+        if getattr(config, "lambda_velocity", 0.0) > 0:
+            extra += (f" vel={train_stats['rec_vel']:.4f}/"
+                      f"{val_stats['rec_vel']:.4f}")
         print(f"[epoch {epoch:3d}] "
               f"beta={train_stats['beta']:.2e} "
               f"loss={train_stats['loss']:.4f}/{val_stats['loss']:.4f} "
@@ -307,6 +311,8 @@ def _val_selection_score(config, val_stats) -> float:
         score = float(val_stats["rec_full"]) + beta_ceiling * float(val_stats["kl"])
         if config.recipe in (2, 3):
             score += config.lambda_aux * float(val_stats["rec_aux"])
+        if getattr(config, "lambda_velocity", 0.0) > 0:
+            score += config.lambda_velocity * float(val_stats.get("rec_vel", 0.0))
         if config.n_components > 0:
             score += (config.gm_beta_z * float(val_stats["kl_z"])
                       + config.gm_beta_y * float(val_stats["kl_y"]))
@@ -416,7 +422,7 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
     cached and returned as ``(mu_all, logvar_all)`` so the caller can run
     the EM M-step; ``None`` otherwise.
     """
-    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0,
+    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0, "rec_vel": 0.0,
               "kl": 0.0, "kl_z": 0.0, "kl_y": 0.0, "entropy": 0.0,
               "beta": 0.0, "adv_loss": 0.0, "adv_acc": 0.0}
     n_batches = 0
@@ -443,7 +449,7 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
             cache_logvar.append(parts["logvar"].detach())
 
         totals["loss"] += float(loss)
-        for key in ("rec_full", "rec_aux", "kl", "kl_z", "kl_y",
+        for key in ("rec_full", "rec_aux", "rec_vel", "kl", "kl_z", "kl_y",
                     "entropy", "beta", "adv_loss", "adv_acc"):
             totals[key] += float(parts[key])
         n_batches += 1
@@ -549,6 +555,11 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
         L = MSE(X, X_hat_full) + lambda * MSE_hidden(X, X_hat_inp, M)
             + beta * KL.
 
+    When ``config.lambda_velocity > 0`` an extra term
+    ``lambda_velocity * MSE(velocity(X_hat_full), velocity(X))`` is added
+    to every recipe, scoring the reconstruction's frame-to-frame motion
+    (temporal-smoothness regulariser); it is 0 otherwise.
+
     When a ``mixture`` is supplied the prior term changes ([CARE-PD §7.3],
     [GM-VAE §3.3]). The standard-normal KL becomes an auxiliary
     regulariser (weight ``beta``), and two mixture terms are added:
@@ -577,6 +588,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
 
     if config.recipe == 1:
         X_hat, mu, logvar = model(X, M, c)
+        x_hat_full = X_hat
         rec_full = reconstruction_mse(X_hat, X)
         rec_aux = zero
         kl = _kl_term(mu, logvar, config)
@@ -585,6 +597,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
         # Primary pass: clean clip in, full-clip MSE + KL.
         M_ones = torch.ones_like(M)
         X_hat_primary, mu, logvar = model(X, M_ones, c)
+        x_hat_full = X_hat_primary
         rec_full = reconstruction_mse(X_hat_primary, X)
         kl = _kl_term(mu, logvar, config)
 
@@ -595,6 +608,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     elif config.recipe == 3:
         # Single masked pass; two decoder heads.
         X_hat_full, X_hat_inp, mu, logvar = model(X, M, c)
+        x_hat_full = X_hat_full
         rec_full = reconstruction_mse(X_hat_full, X)
         rec_aux = reconstruction_mse_hidden(X_hat_inp, X, M)
         kl = _kl_term(mu, logvar, config)
@@ -602,9 +616,17 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     else:
         raise ValueError(f"unknown recipe: {config.recipe!r}")
 
+    # Optional velocity term: match the reconstruction's frame-to-frame
+    # motion to the target's, scored on the full-clip head for every recipe.
+    lambda_vel = getattr(config, "lambda_velocity", 0.0)
+    rec_vel = (reconstruction_velocity_mse(x_hat_full, X)
+               if lambda_vel > 0 else zero)
+
     loss = rec_full
     if config.recipe in (2, 3):
         loss = loss + config.lambda_aux * rec_aux
+    if lambda_vel > 0:
+        loss = loss + lambda_vel * rec_vel
 
     kl_z = zero
     kl_y = zero
@@ -651,6 +673,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
 
     beta_tensor = torch.as_tensor(beta, device=X.device, dtype=rec_full.dtype)
     return loss, {"rec_full": rec_full, "rec_aux": rec_aux,
+                  "rec_vel": rec_vel,
                   "kl": kl, "kl_z": kl_z, "kl_y": kl_y,
                   "entropy": entropy, "beta": beta_tensor,
                   "adv_loss": adv_loss, "adv_acc": adv_acc,
@@ -664,7 +687,8 @@ def train_sweep(base_config: TrainingConfig,
                 recipes: tuple[int, ...] = ALL_RECIPES,
                 mask_policies: tuple[str, ...] = ALL_MASK_POLICIES,
                 cohort_per_video: np.ndarray | list[int] | None = None,
-                ) -> dict[tuple[int, str], dict]:
+                n_layers_grid: tuple[int, ...] | None = None,
+                ) -> dict[tuple, dict]:
     """Run `train` across every valid (recipe, mask_policy) combination.
 
     Shared knobs — architecture, latent width, batch size, epochs, beta
@@ -673,50 +697,72 @@ def train_sweep(base_config: TrainingConfig,
     run's outputs to a subdirectory `<base out_dir>/recipe{N}_{policy}`
     so nothing collides.
 
+    Transformer **depth** can be swept as an extra axis with
+    ``n_layers_grid``: pass e.g. ``(3, 6, 12)`` to train every
+    (depth, recipe, policy) combination. Each depth overrides
+    ``base_config.n_layers`` (both encoder and decoder), its runs land in
+    ``<base out_dir>/L{depth}/recipe{N}_{policy}``, and the result keys
+    grow to ``(n_layers, recipe, mask_policy)``. Left as ``None`` (the
+    default) the depth stays whatever ``base_config`` carries and the keys
+    remain the original ``(recipe, mask_policy)`` — a no-op for callers
+    that only want to sweep recipe and policy. (For a conv backbone,
+    depth is fixed by the three-block design, so a grid is ignored beyond
+    its effect on the config.)
+
     Skipped combos: Recipes 2 and 3 with `mask_policy="none"` (rejected
     by `TrainingConfig.validate`), and `"limb"` when no `limbs` map was
     passed.
 
     Args:
-        base_config: template config; `recipe`, `mask_policy`, and
-            `out_dir` are overridden per run.
+        base_config: template config; `recipe`, `mask_policy`, `n_layers`
+            (when a grid is given), and `out_dir` are overridden per run.
         videos: forwarded to `train`.
         limbs: joint-index lists per limb name; required for the "limb"
             policy, ignored otherwise.
         stride: forwarded to `train`.
         recipes: which recipes to sweep. Defaults to (1, 2, 3).
         mask_policies: which policies to sweep. Defaults to all six.
+        n_layers_grid: optional transformer depths to sweep. ``None``
+            keeps ``base_config``'s depth and the two-field result keys.
     Returns:
-        Dict keyed by (recipe, mask_policy) with each run's `train`
-        return value.
+        Dict keyed by (recipe, mask_policy), or by (n_layers, recipe,
+        mask_policy) when ``n_layers_grid`` is given, with each run's
+        `train` return value.
     """
     base_out = Path(base_config.out_dir)
-    results: dict[tuple[int, str], dict] = {}
+    results: dict[tuple, dict] = {}
+    sweep_depth = n_layers_grid is not None
+    depths = list(n_layers_grid) if sweep_depth else [None]
 
-    for recipe in recipes:
-        for policy in mask_policies:
-            if recipe in (2, 3) and policy == "none":
-                print(f"[sweep] skip recipe={recipe} policy={policy!r}: "
-                      "recipes 2 and 3 need a mask policy.")
-                continue
-            if policy == "limb" and not limbs:
-                print(f"[sweep] skip recipe={recipe} policy={policy!r}: "
-                      "no `limbs` map provided.")
-                continue
+    for depth in depths:
+        for recipe in recipes:
+            for policy in mask_policies:
+                tag = f"depth={depth} " if sweep_depth else ""
+                if recipe in (2, 3) and policy == "none":
+                    print(f"[sweep] skip {tag}recipe={recipe} policy={policy!r}: "
+                          "recipes 2 and 3 need a mask policy.")
+                    continue
+                if policy == "limb" and not limbs:
+                    print(f"[sweep] skip {tag}recipe={recipe} policy={policy!r}: "
+                          "no `limbs` map provided.")
+                    continue
 
-            sub = base_out / f"recipe{recipe}_{policy}"
-            cfg = dataclasses.replace(
-                base_config,
-                recipe=recipe,
-                mask_policy=policy,
-                out_dir=str(sub),
-            )
-            print(f"\n[sweep] === recipe={recipe} policy={policy!r} "
-                  f"-> {sub} ===")
-            results[(recipe, policy)] = train(
-                cfg, videos, limbs=limbs, stride=stride,
-                cohort_per_video=cohort_per_video,
-            )
+                overrides = dict(recipe=recipe, mask_policy=policy)
+                if sweep_depth:
+                    overrides["n_layers"] = depth
+                    sub = base_out / f"L{depth}" / f"recipe{recipe}_{policy}"
+                    key: tuple = (depth, recipe, policy)
+                else:
+                    sub = base_out / f"recipe{recipe}_{policy}"
+                    key = (recipe, policy)
+                cfg = dataclasses.replace(base_config, out_dir=str(sub),
+                                          **overrides)
+                print(f"\n[sweep] === {tag}recipe={recipe} policy={policy!r} "
+                      f"-> {sub} ===")
+                results[key] = train(
+                    cfg, videos, limbs=limbs, stride=stride,
+                    cohort_per_video=cohort_per_video,
+                )
 
     return results
 
@@ -729,7 +775,8 @@ def model_selection(base_config: TrainingConfig,
                     limbs: dict[str, list[int]] | None = None,
                     stride: int | None = None,
                     metric: str = "mpjpe_all",
-                    eval_seed: int = 0) -> dict:
+                    eval_seed: int = 0,
+                    n_layers_grid: tuple[int, ...] | None = None) -> dict:
     """Sweep (recipe × mask policy) and pick the best by held-out reconstruction.
 
     Model selection ([CARE-PD §4.9]): the masking recipe and policy are
@@ -762,12 +809,19 @@ def model_selection(base_config: TrainingConfig,
         stride: clip stride; defaults to ``clip_length // 2`` (as in ``train``).
         metric: which held-out MPJPE to rank on.
         eval_seed: seeds the evaluation mask draws.
+        n_layers_grid: optional transformer depths to add as a selection
+            axis (forwarded to :func:`train_sweep`). When given, the table
+            and ranking range over ``(n_layers, recipe, policy)`` and
+            ``best_config`` also pins the winning depth; ``None`` keeps the
+            original ``(recipe, policy)`` selection.
     Returns:
-        Dict with ``best`` (the winning ``(recipe, policy)``), ``best_config``
-        (a :class:`TrainingConfig` with those two fields set — feed it to the
-        final progression), ``best_run`` (that run's :func:`train` output,
-        incl. the checkpoint path), ``table`` (every combination's MPJPE
-        dict), and ``runs`` (the raw :func:`train_sweep` output).
+        Dict with ``best`` (the winning key — ``(recipe, policy)``, or
+        ``(n_layers, recipe, policy)`` when a depth grid is swept),
+        ``best_config`` (a :class:`TrainingConfig` with those fields set —
+        feed it to the final progression), ``best_run`` (that run's
+        :func:`train` output, incl. the checkpoint path), ``table`` (every
+        combination's MPJPE dict), and ``runs`` (the raw
+        :func:`train_sweep` output).
     """
     torch = _torch()
     from .evaluate import evaluate
@@ -777,7 +831,8 @@ def model_selection(base_config: TrainingConfig,
 
     runs = train_sweep(base_config, videos, limbs=limbs, stride=stride,
                        recipes=recipes, mask_policies=mask_policies,
-                       cohort_per_video=cohort_per_video)
+                       cohort_per_video=cohort_per_video,
+                       n_layers_grid=n_layers_grid)
 
     # Rebuild the exact time-based val split train() used internally, so the
     # selection metric is measured on data no run trained on.
@@ -792,11 +847,23 @@ def model_selection(base_config: TrainingConfig,
     device = torch.device(base_config.device if torch.cuda.is_available()
                           or base_config.device == "cpu" else "cpu")
 
-    table: dict[tuple[int, str], dict] = {}
-    for (recipe, policy), run in runs.items():
-        cfg = dataclasses.replace(base_config, recipe=recipe, mask_policy=policy)
+    def _unpack_key(k):
+        """(recipe, policy[, depth]) from either key shape."""
+        if len(k) == 3:
+            depth, recipe, policy = k
+            return recipe, policy, depth
+        recipe, policy = k
+        return recipe, policy, None
+
+    table: dict[tuple, dict] = {}
+    for key, run in runs.items():
+        recipe, policy, depth = _unpack_key(key)
+        overrides = dict(recipe=recipe, mask_policy=policy)
+        if depth is not None:
+            overrides["n_layers"] = depth
+        cfg = dataclasses.replace(base_config, **overrides)
         pol = build_policy(cfg, limbs=limbs)
-        table[(recipe, policy)] = evaluate(
+        table[key] = evaluate(
             run["model"], val_clips, pol, batch_size=base_config.batch_size,
             device=str(device), seed=eval_seed, recipe=recipe,
             cohort=val_cohort)
@@ -809,12 +876,17 @@ def model_selection(base_config: TrainingConfig,
 
     ranked = sorted(table, key=lambda k: table[k][metric])
     best = ranked[0]
-    best_config = dataclasses.replace(base_config, recipe=best[0],
-                                      mask_policy=best[1])
+    best_recipe, best_policy, best_depth = _unpack_key(best)
+    best_overrides = dict(recipe=best_recipe, mask_policy=best_policy)
+    if best_depth is not None:
+        best_overrides["n_layers"] = best_depth
+    best_config = dataclasses.replace(base_config, **best_overrides)
     print(f"\n[model-selection] ranking by {metric} (lower is better):")
     for k in ranked:
+        recipe, policy, depth = _unpack_key(k)
         star = "  <- best" if k == best else ""
-        print(f"    recipe={k[0]} policy={k[1]:<14} "
+        depth_tag = f"L={depth} " if depth is not None else ""
+        print(f"    {depth_tag}recipe={recipe} policy={policy:<14} "
               f"{metric}={table[k][metric]:.4f} mm"
               f"  (inpaint={table[k]['mpjpe_inpainted']:.4f}){star}")
 

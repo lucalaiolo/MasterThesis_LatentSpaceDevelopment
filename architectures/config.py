@@ -33,7 +33,15 @@ class TrainingConfig:
             downsampling factor. With (1, 2, 2) the encoder halves T twice.
         d_model: the transformer model width.
         n_heads: attention head count.
-        n_layers: transformer block count in each of the encoder and decoder.
+        n_layers: transformer block count used for *both* the encoder and
+            the decoder unless overridden per side (below). Free to set
+            deeper than the [ARCH §6.1] default of 3 — the pre-norm stacks
+            carry a terminal LayerNorm so depth stays well-conditioned.
+        n_enc_layers: optional encoder-only block count. ``None`` (default)
+            falls back to ``n_layers``; set it to make the encoder deeper
+            (or shallower) than the decoder.
+        n_dec_layers: optional decoder-only block count. ``None`` (default)
+            falls back to ``n_layers``.
         ffn_ratio: feedforward inner width as a multiple of d_model.
         dropout: applied after attention and after the feedforward.
         batch_size: B in [MVAE §6.4].
@@ -76,6 +84,13 @@ class TrainingConfig:
             weights the masked-pass reconstruction ([MVAE §4.2]);
             Recipe 3 weights the hidden-only inpainting head ([MVAE §5.2]).
             Ignored for Recipe 1.
+        lambda_velocity: weight on the optional velocity (temporal-
+            difference) reconstruction term. 0.0 (default) disables it.
+            When > 0 the loss adds ``lambda_velocity *
+            reconstruction_velocity_mse(x_hat, x)`` on the full-clip
+            reconstruction, so the generated motion — not just the per-
+            frame pose — is scored against the target. Cheap regulariser
+            against temporal jitter; applies to every recipe.
         n_cond: number of conditioning categories for the CVAE arm
             ([CARE-PD §6]). 0 (default) disables conditioning and gives a
             plain VAE. Set to the cohort count to condition on cohort. The
@@ -211,6 +226,8 @@ class TrainingConfig:
     d_model: int = 96
     n_heads: int = 4
     n_layers: int = 3
+    n_enc_layers: int | None = None
+    n_dec_layers: int | None = None
     ffn_ratio: int = 4
     dropout: float = 0.1
 
@@ -230,6 +247,7 @@ class TrainingConfig:
     # Recipe.
     recipe: Literal[1, 2, 3] = 1
     lambda_aux: float = 1.0
+    lambda_velocity: float = 0.0
 
     # Conditioning (CVAE / GM-CVAE arm, [CARE-PD §6]).
     n_cond: int = 0
@@ -281,6 +299,14 @@ class TrainingConfig:
             f *= s
         return f
 
+    def encoder_layers(self) -> int:
+        """Transformer encoder depth, resolving the per-side override."""
+        return self.n_layers if self.n_enc_layers is None else self.n_enc_layers
+
+    def decoder_layers(self) -> int:
+        """Transformer decoder depth, resolving the per-side override."""
+        return self.n_layers if self.n_dec_layers is None else self.n_dec_layers
+
     def validate(self) -> None:
         """Cheap checks that catch bad settings before the run starts."""
         if self.clip_length % self.downsample_factor() != 0:
@@ -293,6 +319,13 @@ class TrainingConfig:
                 f"d_model ({self.d_model}) must divide by n_heads "
                 f"({self.n_heads})."
             )
+        if self.encoder_layers() < 1 or self.decoder_layers() < 1:
+            raise ValueError(
+                f"transformer depth must be >= 1 per side (got encoder="
+                f"{self.encoder_layers()}, decoder={self.decoder_layers()}; "
+                f"n_layers={self.n_layers}, n_enc_layers={self.n_enc_layers}, "
+                f"n_dec_layers={self.n_dec_layers})."
+            )
         if self.n_dims < 1:
             raise ValueError(
                 f"n_dims ({self.n_dims}) must be >= 1 (2 for 2D keypoints, "
@@ -303,6 +336,11 @@ class TrainingConfig:
                 f"Recipe {self.recipe} needs a mask policy; set 'uniform' or 'limb'. "
                 f"Recipe 2's auxiliary pass and Recipe 3's inpainting head "
                 f"both require joints to be hidden."
+            )
+        if self.lambda_velocity < 0:
+            raise ValueError(
+                f"lambda_velocity ({self.lambda_velocity}) must be >= 0 "
+                f"(0 disables the velocity term)."
             )
         if self.n_cond < 0:
             raise ValueError(f"n_cond ({self.n_cond}) must be >= 0.")

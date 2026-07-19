@@ -111,6 +111,7 @@ def run_sweep(bundle: YoutubeMotionBundle,
               metric: str = "mpjpe_all",
               stride: int | None = None,
               eval_seed: int = 0,
+              n_layers_grid: tuple[int, ...] | None = None,
               **config_overrides) -> dict:
     """Train + score every valid (architecture, recipe, mask policy) combo.
 
@@ -138,6 +139,12 @@ def run_sweep(bundle: YoutubeMotionBundle,
             ``"mpjpe_inpainted"`` (hidden-joint inpainting). Lower is better.
         stride: clip hop; defaults to ``clip_length // 2``.
         eval_seed: seeds the evaluation mask draws.
+        n_layers_grid: optional transformer depths to sweep as an extra
+            axis (e.g. ``(3, 6, 12)``). Each depth overrides ``n_layers``
+            (both encoder and decoder) and its runs land under
+            ``<out_dir>/<arch>/L{depth}/recipe{N}_{policy}``. ``None``
+            (default) keeps ``base_config``'s depth. The conv backbone
+            ignores depth beyond storing it on the record.
         **config_overrides: forwarded to :func:`build_base_config` when
             ``base_config`` is None.
     Returns:
@@ -171,30 +178,44 @@ def run_sweep(bundle: YoutubeMotionBundle,
           f"clip_length={base_config.clip_length}, stride={stride}")
 
     records: list[dict] = []
-    table: dict[tuple[str, int, str], dict] = {}
+    table: dict[tuple, dict] = {}
     has_limbs = bool(bundle.limbs)
+    sweep_depth = n_layers_grid is not None
+    depths = list(n_layers_grid) if sweep_depth else [None]
 
     for arch in architectures:
-        for recipe in recipes:
-            for policy in mask_policies:
-                skip = _valid_combo(recipe, policy, has_limbs)
-                if skip:
-                    print(f"[sweep] skip {arch}/recipe{recipe}/{policy}: {skip}")
-                    continue
+        for depth in depths:
+            for recipe in recipes:
+                for policy in mask_policies:
+                    skip = _valid_combo(recipe, policy, has_limbs)
+                    if skip:
+                        dtag = f"L{depth}/" if sweep_depth else ""
+                        print(f"[sweep] skip {arch}/{dtag}recipe{recipe}/"
+                              f"{policy}: {skip}")
+                        continue
 
-                sub = root / arch / f"recipe{recipe}_{policy}"
-                cfg = dataclasses.replace(
-                    base_config, architecture=arch, recipe=recipe,
-                    mask_policy=policy, out_dir=str(sub),
-                    mask_limb_names=(list(bundle.limbs) if policy == "limb"
-                                     else list(base_config.mask_limb_names)),
-                )
-                print(f"\n[sweep] === {arch} | recipe {recipe} | {policy} "
-                      f"-> {sub} ===")
-                rec = _run_one(cfg, bundle, val_clips, stride, metric,
-                               eval_seed)
-                records.append(rec)
-                table[(arch, recipe, policy)] = rec
+                    overrides = dict(
+                        architecture=arch, recipe=recipe, mask_policy=policy,
+                        mask_limb_names=(list(bundle.limbs) if policy == "limb"
+                                         else list(base_config.mask_limb_names)),
+                    )
+                    if sweep_depth:
+                        overrides["n_layers"] = depth
+                        sub = root / arch / f"L{depth}" / f"recipe{recipe}_{policy}"
+                        key: tuple = (arch, depth, recipe, policy)
+                        dtag = f"L{depth} | "
+                    else:
+                        sub = root / arch / f"recipe{recipe}_{policy}"
+                        key = (arch, recipe, policy)
+                        dtag = ""
+                    cfg = dataclasses.replace(base_config, out_dir=str(sub),
+                                              **overrides)
+                    print(f"\n[sweep] === {arch} | {dtag}recipe {recipe} | "
+                          f"{policy} -> {sub} ===")
+                    rec = _run_one(cfg, bundle, val_clips, stride, metric,
+                                   eval_seed)
+                    records.append(rec)
+                    table[key] = rec
 
     ranked = _rank(records, metric)
     best = ranked[0] if ranked else None
@@ -228,7 +249,9 @@ def _run_one(cfg: TrainingConfig, bundle: YoutubeMotionBundle,
              eval_seed: int) -> dict:
     """Train one config and score it, returning a flat record dict."""
     base = {"architecture": cfg.architecture, "recipe": cfg.recipe,
-            "mask_policy": cfg.mask_policy, "out_dir": cfg.out_dir}
+            "mask_policy": cfg.mask_policy, "n_layers": cfg.n_layers,
+            "n_enc_layers": cfg.encoder_layers(),
+            "n_dec_layers": cfg.decoder_layers(), "out_dir": cfg.out_dir}
     t0 = time.time()
     try:
         cfg.validate()

@@ -124,7 +124,8 @@ def spatiotemporal_param_count(config: TrainingConfig) -> dict[str, int]:
         "encoder_token_embed": linear(D + 1, dm),
         "encoder_joint_pos": J * dm,
         "encoder_stack": L * 2 * transformer_block(),   # spatial + temporal
-        "bottleneck_heads": 2 * linear(dm, d_z),
+        # Bottleneck reads every joint (pool over time, keep joints).
+        "bottleneck_heads": 2 * linear(J * dm, d_z),
         "decoder_query_lift": linear(d_z, dm),
         "decoder_joint_pos": J * dm,
         "decoder_stack": L * 2 * transformer_block(),

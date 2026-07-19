@@ -60,8 +60,8 @@ class SpatioTemporalTransformerVAE(nn.Module):
     Encoder: a per-(joint, frame) token embeds the joint's ``n_dims``
     coordinates plus a mask channel; a learned joint (spatial) embedding and a
     sinusoidal temporal positional encoding are added; ``n_layers`` factorised
-    blocks run; the tokens are mean-pooled over time and joints and fed to the
-    posterior heads.
+    blocks run; the tokens are pooled over time (keeping the joints) and fed to
+    the posterior heads.
 
     Decoder: the latent is lifted to a query, broadcast to every (joint, frame)
     position with the same spatial + temporal encodings, refined by ``n_layers``
@@ -105,7 +105,13 @@ class SpatioTemporalTransformerVAE(nn.Module):
         self.enc_blocks = nn.ModuleList(
             [_SpatioTemporalBlock(d_model, n_heads, ff, dropout)
              for _ in range(n_layers)])
-        self.heads = BottleneckHeads(d_model + d_c, d_z)
+        # Terminal norm for the pre-norm stack (the frame-token model has one).
+        self.enc_norm = nn.LayerNorm(d_model)
+        # Bottleneck: pool over time, keep the J joints. A plain mean over all
+        # T*J tokens averages the clip signal away at init — the encoder then
+        # maps every clip to nearly the same latent and cannot bootstrap — so
+        # the per-joint structure is preserved and every joint is read.
+        self.heads = BottleneckHeads(J * d_model + d_c, d_z)
 
         # ---- Decoder ------------------------------------------------------
         self.query_lift = nn.Linear(d_z + d_c, d_model)
@@ -116,6 +122,7 @@ class SpatioTemporalTransformerVAE(nn.Module):
         self.dec_blocks = nn.ModuleList(
             [_SpatioTemporalBlock(d_model, n_heads, ff, dropout)
              for _ in range(n_layers)])
+        self.dec_norm = nn.LayerNorm(d_model)
         self.dec_output_full = nn.Linear(d_model, n_dims)
         if inpainting:
             # Mask-conditioned per token: each joint token is told if it is
@@ -143,7 +150,8 @@ class SpatioTemporalTransformerVAE(nn.Module):
         h = h + self.enc_joint + self.enc_time[None, :, None, :]
         for blk in self.enc_blocks:
             h = blk(h)
-        h = h.mean(dim=(1, 2))                            # pool T, J -> (B, d_model)
+        h = self.enc_norm(h)                              # terminal pre-norm
+        h = h.mean(dim=1).reshape(B, self.J * self.d_model)  # pool time, keep joints
         if self.cond is not None:
             e = self.cond.encoder_vector(c, B, h.device)
             h = torch.cat([h, e], dim=1)
@@ -161,6 +169,7 @@ class SpatioTemporalTransformerVAE(nn.Module):
         h = q
         for blk in self.dec_blocks:
             h = blk(h)
+        h = self.dec_norm(h)                              # terminal pre-norm
         return h                                          # (B, T, J, d_model)
 
     def decode_full(self, z, c=None):

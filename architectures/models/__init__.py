@@ -33,17 +33,13 @@ def build_model(config):
         )
     if config.architecture == "transformer":
         attention = getattr(config, "transformer_attention", "temporal")
-        cls = (SpatioTemporalTransformerVAE if attention == "factorized"
-               else TransformerVAE)
-        return cls(
+        common = dict(
             T=config.clip_length,
             J=config.n_joints,
             d_z=config.latent_dim,
             d_model=config.d_model,
             n_heads=config.n_heads,
             n_layers=config.n_layers,
-            n_enc_layers=getattr(config, "n_enc_layers", None),
-            n_dec_layers=getattr(config, "n_dec_layers", None),
             ffn_ratio=config.ffn_ratio,
             dropout=config.dropout,
             inpainting=inpainting,
@@ -51,6 +47,17 @@ def build_model(config):
             cond_dim=config.cond_dim,
             cond_dropout=config.cond_dropout,
             n_dims=n_dims,
+        )
+        if attention == "factorized":
+            # SpatioTemporalTransformerVAE shares one n_layers across both
+            # stacks (see TrainingConfig.validate — the per-side override
+            # is rejected for this attention mode), so it takes no
+            # n_enc_layers / n_dec_layers kwargs.
+            return SpatioTemporalTransformerVAE(**common)
+        return TransformerVAE(
+            **common,
+            n_enc_layers=getattr(config, "n_enc_layers", None),
+            n_dec_layers=getattr(config, "n_dec_layers", None),
         )
     raise ValueError(f"unknown architecture: {config.architecture!r}")
 

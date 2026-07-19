@@ -335,6 +335,16 @@ class TrainingConfig:
                 f"n_layers={self.n_layers}, n_enc_layers={self.n_enc_layers}, "
                 f"n_dec_layers={self.n_dec_layers})."
             )
+        if (self.transformer_attention == "factorized"
+                and (self.n_enc_layers is not None
+                     or self.n_dec_layers is not None)):
+            raise ValueError(
+                "n_enc_layers / n_dec_layers have no effect with "
+                "transformer_attention='factorized': "
+                "SpatioTemporalTransformerVAE shares one n_layers across "
+                "both stacks. Set n_layers instead, or use "
+                "transformer_attention='temporal' for per-side depth."
+            )
         if self.n_dims < 1:
             raise ValueError(
                 f"n_dims ({self.n_dims}) must be >= 1 (2 for 2D keypoints, "

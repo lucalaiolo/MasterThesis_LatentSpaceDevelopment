@@ -48,15 +48,26 @@ __all__ = [
     "run_sweep",
     "build_base_config",
     "ALL_ARCHITECTURES",
+    # analysis (lazy — pulls in vae_analysis / torch):
+    "analyze_checkpoint",
+    "analyze_best",
+    "analyze_sweep",
+    "compare_models",
+    "coco18_skeleton",
 ]
 
-_LAZY = {"run_sweep", "build_base_config", "ALL_ARCHITECTURES"}
+_LAZY_DRIVER = {"run_sweep", "build_base_config", "ALL_ARCHITECTURES"}
+_LAZY_ANALYSIS = {"analyze_checkpoint", "analyze_best", "analyze_sweep",
+                  "compare_models", "coco18_skeleton"}
 
 
 def __getattr__(name):
-    if name in _LAZY:
+    if name in _LAZY_DRIVER:
         from . import driver
         return getattr(driver, name)
+    if name in _LAZY_ANALYSIS:
+        from . import analysis
+        return getattr(analysis, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

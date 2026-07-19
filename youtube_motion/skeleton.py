@@ -68,6 +68,19 @@ COCO18_LIMBS: dict[str, list[int]] = {
     "head":      [0, 14, 15, 16, 17],
 }
 
+# Bilateral (left, right) joint pairs for the symmetry / laterality analyses
+# ([vae_analysis §15]). Midline joints (Nose, Neck) are deliberately omitted.
+COCO18_LEFT_RIGHT: list[tuple[int, int]] = [
+    (5, 2),    # LShoulder <-> RShoulder
+    (6, 3),    # LElbow    <-> RElbow
+    (7, 4),    # LWrist    <-> RWrist
+    (11, 8),   # LHip      <-> RHip
+    (12, 9),   # LKnee     <-> RKnee
+    (13, 10),  # LAnkle    <-> RAnkle
+    (15, 14),  # LEye      <-> REye
+    (17, 16),  # LEar      <-> REar
+]
+
 # Bone connectivity (0-indexed joint pairs), the standard OpenPose COCO pose
 # graph. Used only for visualisation / structural analysis, never in training.
 COCO18_BONES: list[tuple[int, int]] = [

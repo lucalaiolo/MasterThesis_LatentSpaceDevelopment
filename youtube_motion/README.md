@@ -140,11 +140,91 @@ speed-based policies (`top_k_speed`, `softmax_speed`, `per_frame_speed`), `limb`
 
 | File | What it does |
 |:---|:---|
-| `skeleton.py` | COCO-18 joint names, limb groups, bones, root / torso joints |
+| `skeleton.py` | COCO-18 joint names, limb groups, bones, left-right pairs, root / torso joints |
 | `data.py`     | long-CSV → list of `(F, 18, 2)` videos; missing-joint interpolation; preprocessing; `YoutubeMotionBundle` |
 | `driver.py`   | `run_sweep` (arch × recipe × policy), `build_base_config`, CLI, ranked `results.{json,md}` |
+| `analysis.py` | latent-space analysis on a trained checkpoint: UMAP embeddings, decoder/encoder **Jacobians**, **HMM** dynamics, geometry — wraps `vae_analysis` with a COCO-18 skeleton |
 | `smoke_test.py` | synthetic-data end-to-end run of the whole sweep (worked example) |
 | `test_no_torch.py` | numpy-only checks: skeleton, adapter, preprocessing, 2D param counts |
+
+## Analyse the latent space
+
+Once you have a trained checkpoint, `analysis.py` runs the whole
+`vae_analysis` battery on it — the modules are generic in the coordinate
+dimension, so they work on the 2D latents unchanged. It builds a COCO-18
+`Skeleton` (bones, limbs, left-right pairs) so the skeleton-dependent analyses
+run, and adds a **UMAP** embedding plot on top (the core driver defaults to
+PCA).
+
+```
+pip install scipy scikit-learn                 # core analysis deps
+pip install umap-learn hmmlearn ripser ruptures  # optional: UMAP / HMM / homology / change points
+```
+
+```python
+from youtube_motion.data import load_youtube_csv
+from youtube_motion.analysis import analyze_checkpoint, analyze_best
+
+bundle = load_youtube_csv("keypoints.csv")     # the SAME data the model trained on
+
+# one checkpoint … (split="all" characterises the whole dataset, not just val)
+analyze_checkpoint("checkpoints/youtube_motion/conv/recipe1_uniform/best.pt",
+                   bundle, out_dir="analysis/conv_r1", device="cuda", split="all")
+
+# … or the best model from a finished sweep
+analyze_best("checkpoints/youtube_motion", bundle, metric="mpjpe_all")
+```
+
+By default the analysis encodes the **held-out validation split** (the honest
+choice for generalisation-flavoured metrics). Pass `split="all"` (or
+`--split all` on the CLI) to encode **every clip** — the full latent manifold,
+which is what you usually want for UMAP / clustering / geometry / dynamics.
+`split="train"` is the complement. Two metrics change meaning on `all`/`train`
+(they assume unseen data): the screening typicality and the q(z)-vs-prior
+two-sample test — everything else is unaffected.
+
+CLI:
+
+```
+python -m youtube_motion.analysis --csv keypoints.csv \
+    --checkpoint checkpoints/youtube_motion/conv/recipe1_uniform/best.pt
+python -m youtube_motion.analysis --csv keypoints.csv \
+    --sweep-out checkpoints/youtube_motion --metric mpjpe_all
+```
+
+It writes PNGs + `results.json` + a plain-language `summary.md` to `out_dir`,
+including `umap_embeddings.png` (UMAP of posterior means, coloured by video and
+by clip time), the decoder / encoder Jacobian sensitivity maps, the
+pullback-metric spectrum, and — on the longest video — the HMM state
+segmentation, change points, and Ornstein-Uhlenbeck timescales. The
+`summary.md` reads the numbers back as verdicts (posterior collapse, prior
+match, decoder anisotropy, disentanglement, dynamics, mask robustness).
+Optional analyses (UMAP, HMM, persistent homology, change points) skip cleanly
+when their package is absent. Pass the same knobs
+`vae_analysis.driver.run_all_analyses` takes (`include_dynamics`, `n_anchors`,
+`n_jacobian_clips`, `mask_policy_override`, …) straight through.
+
+### Compare models across the sweep
+
+`analyze_sweep` runs the analysis on several models from a finished sweep and
+writes a cross-model `comparison.md` / `comparison.json` (one row per model:
+active-unit fraction, intrinsic dim, cluster K, c2st AUC, MIG/DCI, decoder
+condition number, HMM states, mask-jitter, …), on top of each model's own
+`summary.md`.
+
+```python
+from youtube_motion.analysis import analyze_sweep
+analyze_sweep("checkpoints/youtube_motion", bundle,
+              which="best_per_arch",       # "best" | "best_per_arch" | "all"
+              device="cuda", include_persistent_homology=False)
+```
+
+CLI:
+
+```
+python -m youtube_motion.analysis --csv keypoints.csv \
+    --sweep-out checkpoints/youtube_motion --which best_per_arch
+```
 
 ## Sanity check
 

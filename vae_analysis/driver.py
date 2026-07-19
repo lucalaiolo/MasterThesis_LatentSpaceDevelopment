@@ -89,6 +89,7 @@ def run_all_analyses(checkpoint_path: str | Path,
                      n_jacobian_clips: int = 8,
                      traversal_steps: tuple[float, ...] = (-3, -2, -1, 0, 1, 2, 3),
                      clinical_labels: np.ndarray | None = None,
+                     split: str = "val",
                      ) -> dict:
     """Run the core latent-space analyses on one checkpoint.
 
@@ -111,6 +112,10 @@ def run_all_analyses(checkpoint_path: str | Path,
             model was trained with `mask_policy="limb"`.
         n_perm: permutation count for `mmd_prior_test`.
         rng_seed: seed for stochastic analyses.
+        split: which clips to analyse — "val" (default, the held-out split),
+            "all" (every clip, the full latent manifold), or "train". Use
+            "all" to characterise the whole dataset (UMAP / clustering /
+            geometry / dynamics).
 
     Returns:
         Dict with `results` (all scalars), `written` (list of PNG
@@ -143,10 +148,26 @@ def run_all_analyses(checkpoint_path: str | Path,
     clips, video_id, time_index = build_clips(
         videos, config.clip_length, stride,
     )
-    _, val_mask = train_val_split(clips, video_id)
-    X_val = clips[val_mask].astype(np.float32)
-    vid_val = video_id[val_mask]
-    t_val = time_index[val_mask]
+    train_mask, val_mask = train_val_split(clips, video_id)
+    # Which clips to characterise. "val" (default) is the held-out split the
+    # model never trained on — the honest choice for generalisation-flavoured
+    # metrics. "all" uses every clip, the fuller picture of the latent
+    # manifold (UMAP / clustering / geometry / dynamics); "train" is the
+    # complement. Note metrics that lean on "unseen" data (screening
+    # typicality, the q(z)-vs-prior two-sample) lose that reading on "all"/"train".
+    if split == "val":
+        sel = val_mask
+    elif split == "train":
+        sel = train_mask
+    elif split == "all":
+        sel = np.ones(len(clips), dtype=bool)
+    else:
+        raise ValueError(f"split must be 'val', 'train', or 'all', got {split!r}.")
+
+    # These arrays hold the *selected* split (name kept for brevity).
+    X_val = clips[sel].astype(np.float32)
+    vid_val = video_id[sel]
+    t_val = time_index[sel]
 
     policy = build_policy(config, limbs=limbs)
     # Draw one mask per clip. Speed-based policies need the clip.
@@ -158,7 +179,8 @@ def run_all_analyses(checkpoint_path: str | Path,
     latent = encode_dataset(adapter, X_val, M_val,
                             video_id=vid_val, time_index=t_val)
     latent.sample(rng)
-    print(f"[analysis] encoded {latent.n} val clips, d_z = {latent.d_z}")
+    print(f"[analysis] encoded {latent.n} clips (split={split!r}), "
+          f"d_z = {latent.d_z}")
 
     if out_dir is None:
         out_dir = Path(checkpoint_path).parent / "vae_analysis"
@@ -530,6 +552,9 @@ def run_all_analyses(checkpoint_path: str | Path,
                     results["dynamics"]["hmm_k"] = hmm["k"]
                     results["dynamics"]["hmm_dwell_seconds"] = \
                         hmm["dwell_seconds"].tolist()
+                    if "empirical_dwell_seconds" in hmm:
+                        results["dynamics"]["hmm_empirical_dwell_seconds"] = \
+                            hmm["empirical_dwell_seconds"].tolist()
                     _save(_plot_hmm_states(traj, hmm, plt),
                           "dynamics_hmm_states.png")
                 except Exception as e:

@@ -2,10 +2,11 @@
 
 from .conv_vae import ConvVAE
 from .transformer_vae import TransformerVAE
+from .spatiotemporal_vae import SpatioTemporalTransformerVAE
 from .gaussian_mixture import GaussianMixturePrior
 
-__all__ = ["ConvVAE", "TransformerVAE", "GaussianMixturePrior",
-           "build_model", "build_mixture"]
+__all__ = ["ConvVAE", "TransformerVAE", "SpatioTemporalTransformerVAE",
+           "GaussianMixturePrior", "build_model", "build_mixture"]
 
 
 def build_model(config):
@@ -31,7 +32,10 @@ def build_model(config):
             n_dims=n_dims,
         )
     if config.architecture == "transformer":
-        return TransformerVAE(
+        attention = getattr(config, "transformer_attention", "temporal")
+        cls = (SpatioTemporalTransformerVAE if attention == "factorized"
+               else TransformerVAE)
+        return cls(
             T=config.clip_length,
             J=config.n_joints,
             d_z=config.latent_dim,

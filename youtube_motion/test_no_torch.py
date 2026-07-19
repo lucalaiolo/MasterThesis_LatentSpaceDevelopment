@@ -22,8 +22,8 @@ from architectures.param_counts import summarise
 
 from .data import (interpolate_missing, load_youtube_csv, preprocess_video,
                    root_center, torso_scale)
-from .skeleton import (COCO18_BONES, COCO18_KEYPOINT_NAMES, COCO18_LIMBS,
-                       N_DIMS, N_JOINTS, ROOT_JOINT)
+from .skeleton import (COCO18_BONES, COCO18_KEYPOINT_NAMES, COCO18_LEFT_RIGHT,
+                       COCO18_LIMBS, N_DIMS, N_JOINTS, ROOT_JOINT)
 
 
 def _write_toy_csv(path: str, videos: dict[str, tuple[int, int]],
@@ -60,8 +60,32 @@ def test_skeleton():
     for idx in COCO18_LIMBS.values():
         assert seen.isdisjoint(idx)
         seen.update(idx)
+    # Left-right pairs: valid, distinct, and never a midline joint.
+    midline = {0, 1}  # Nose, Neck
+    for l, r in COCO18_LEFT_RIGHT:
+        assert 0 <= l < N_JOINTS and 0 <= r < N_JOINTS, (l, r)
+        assert l != r and l not in midline and r not in midline, (l, r)
+        assert COCO18_KEYPOINT_NAMES[l].startswith("L")
+        assert COCO18_KEYPOINT_NAMES[r].startswith("R")
     print(f"skeleton: 18 COCO joints, {len(COCO18_BONES)} bones, "
-          f"{len(COCO18_LIMBS)} limbs, all indices valid")
+          f"{len(COCO18_LIMBS)} limbs, {len(COCO18_LEFT_RIGHT)} L/R pairs, "
+          f"all indices valid")
+
+
+def test_analysis_skeleton():
+    # coco18_skeleton() builds a valid vae_analysis Skeleton (numpy-only path).
+    from .analysis import coco18_skeleton
+    skel = coco18_skeleton()
+    assert skel.n_joints == N_JOINTS
+    assert len(skel.bones) == len(COCO18_BONES)
+    assert len(skel.left_right) == len(COCO18_LEFT_RIGHT)
+    assert skel.limbs and skel.lateral_axis == 0
+    # The flip permutation must be a genuine involution (swap twice = identity).
+    P = skel.flip_permutation()
+    assert np.allclose(P @ P, np.eye(N_JOINTS))
+    print(f"analysis skeleton: Skeleton(J={skel.n_joints}, "
+          f"{len(skel.bones)} bones, {len(skel.left_right)} L/R), "
+          f"flip is an involution  OK")
 
 
 def test_interpolate_missing():
@@ -161,6 +185,7 @@ def test_param_counts_2d():
 
 def main():
     test_skeleton()
+    test_analysis_skeleton()
     test_interpolate_missing()
     test_csv_basic()
     test_csv_missing_interpolated()

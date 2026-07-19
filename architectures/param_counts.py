@@ -91,10 +91,57 @@ def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
     return parts
 
 
+def spatiotemporal_param_count(config: TrainingConfig) -> dict[str, int]:
+    """Factorised space-time transformer parameter counts by component.
+
+    One token per (joint, frame): the token embed is D+1 -> d_model, a learned
+    joint (spatial) embedding of J*d_model is added on each of the encoder and
+    decoder, and every factorised block holds *two* transformer sub-layers
+    (spatial + temporal), so the stacks cost ``2 * n_layers`` blocks. Like the
+    frame-token count, this excludes LayerNorm scales/biases and assumes
+    ``n_cond == 0``.
+    """
+    J = config.n_joints
+    D = getattr(config, "n_dims", 3)
+    d_z = config.latent_dim
+    dm = config.d_model
+    L = config.n_layers
+    ffn = config.ffn_ratio * dm
+
+    def linear(inp, out):
+        return inp * out + out
+
+    def attention_block():
+        return 3 * dm * dm + 3 * dm + dm * dm + dm
+
+    def ffn_block():
+        return dm * ffn + ffn + ffn * dm + dm
+
+    def transformer_block():
+        return attention_block() + ffn_block()
+
+    parts = {
+        "encoder_token_embed": linear(D + 1, dm),
+        "encoder_joint_pos": J * dm,
+        "encoder_stack": L * 2 * transformer_block(),   # spatial + temporal
+        "bottleneck_heads": 2 * linear(dm, d_z),
+        "decoder_query_lift": linear(d_z, dm),
+        "decoder_joint_pos": J * dm,
+        "decoder_stack": L * 2 * transformer_block(),
+        "decoder_output_full": linear(dm, D),
+    }
+    if config.recipe == 3:
+        parts["decoder_output_inp"] = linear(dm + 1, D)
+    parts["total"] = sum(parts.values())
+    return parts
+
+
 def summarise(config: TrainingConfig) -> dict[str, int]:
     """One entry point: return the counts for whichever architecture is set."""
     if config.architecture == "conv":
         return conv_param_count(config)
     if config.architecture == "transformer":
+        if getattr(config, "transformer_attention", "temporal") == "factorized":
+            return spatiotemporal_param_count(config)
         return transformer_param_count(config)
     raise ValueError(f"unknown architecture: {config.architecture!r}")

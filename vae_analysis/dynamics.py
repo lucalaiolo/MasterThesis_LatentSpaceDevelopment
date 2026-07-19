@@ -72,7 +72,8 @@ def change_points(trajectory: np.ndarray, penalty: float = 10.0) -> dict:
 
 
 def hmm_states(trajectory: np.ndarray, k_range=range(2, 9),
-               stride_seconds: float = 1.0, seed: int = 0) -> dict:
+               stride_seconds: float = 1.0, seed: int = 0,
+               covariance_type: str = "diag") -> dict:
     """Fit a Gaussian hidden Markov model and pick the state count by BIC.
 
     A hidden Markov model (HMM) treats the trajectory as jumps between a
@@ -84,6 +85,12 @@ def hmm_states(trajectory: np.ndarray, k_range=range(2, 9),
         trajectory: coarse latents, shape (K, d_z).
         k_range: candidate state counts.
         stride_seconds: real time between latent samples, for dwell times.
+        covariance_type: per-state covariance model ("diag" by default).
+            ``"full"`` costs ``d_z*(d_z+1)/2`` parameters per state, which
+            overwhelms a short trajectory in a wide latent (a 32-dim full
+            covariance is 528 numbers per state) and yields a degenerate,
+            non-converging fit; ``"diag"`` costs only ``d_z`` per state and
+            is the robust default for regime segmentation.
     Returns:
         Dict with the chosen model and its summaries.
     """
@@ -92,23 +99,97 @@ def hmm_states(trajectory: np.ndarray, k_range=range(2, 9),
     except ImportError as e:
         raise ImportError("hmm_states needs hmmlearn; pip install hmmlearn.") from e
 
+    n, f = len(trajectory), int(trajectory.shape[1])
+
+    def _n_params(k: int) -> int:
+        """Free scalar parameters of a k-state GaussianHMM at this cov type."""
+        trans = k * (k - 1) + (k - 1)              # transmat + startprob
+        means = k * f
+        if covariance_type == "full":
+            cov = k * f * (f + 1) // 2
+        elif covariance_type == "tied":
+            cov = f * (f + 1) // 2
+        elif covariance_type == "spherical":
+            cov = k
+        else:                                       # "diag"
+            cov = k * f
+        return trans + means + cov
+
+    # Cap the state count two ways. (1) Enough windows to occupy each state
+    # (~5 per state): fewer, and a state goes unvisited, whose transition row
+    # sums to zero — which hmmlearn rejects. (2) Few enough parameters not to
+    # exceed the data (n*f scalar observations): more parameters than data
+    # gives a singular covariance and an EM that will not converge. For a long
+    # trajectory in a modest latent both caps leave the default range untouched.
+    budget = n * f
+    k_max = min(max(2, n // 5), n - 1)
+    ks = [k for k in k_range if 2 <= k <= k_max and _n_params(k) <= budget]
+    if not ks:
+        raise ValueError(
+            f"trajectory too short ({n} windows, dim {f}) to fit an HMM without "
+            f"overfitting; encode a longer video, shorten the window/stride, or "
+            f"reduce the latent dimension before the HMM.")
+
+    # We sweep k and select by BIC, deliberately skipping fits that fail to
+    # converge, so hmmlearn's per-candidate chatter is noise here. hmmlearn
+    # emits it through both `warnings` (the degenerate-params note) and its
+    # `logging` logger (the "not converging" / zero-transmat-row notes), so
+    # silence both channels for the duration of the sweep.
+    import logging
+    import warnings
+    hmm_logger = logging.getLogger("hmmlearn")
+    prev_level = hmm_logger.level
     best, best_bic, best_k = None, np.inf, None
-    for k in k_range:
-        hmm = GaussianHMM(n_components=k, covariance_type="full",
-                          n_iter=200, random_state=seed)
-        hmm.fit(trajectory)
-        ll = hmm.score(trajectory)
-        n_params = k * trajectory.shape[1] + k * trajectory.shape[1] + k * k
-        bic = -2 * ll + n_params * np.log(len(trajectory))
-        if bic < best_bic:
-            best, best_bic, best_k = hmm, bic, k
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", module="hmmlearn")
+        hmm_logger.setLevel(logging.ERROR)
+        try:
+            for k in ks:
+                try:
+                    hmm = GaussianHMM(n_components=k,
+                                      covariance_type=covariance_type,
+                                      n_iter=200, random_state=seed)
+                    hmm.fit(trajectory)
+                    ll = hmm.score(trajectory)
+                except Exception:  # noqa: BLE001 - degenerate fit at this k; skip
+                    continue
+                if not np.isfinite(ll):
+                    continue
+                bic = -2 * ll + _n_params(k) * np.log(n)
+                if bic < best_bic:
+                    best, best_bic, best_k = hmm, bic, k
+        finally:
+            hmm_logger.setLevel(prev_level)
+    if best is None:
+        raise ValueError("no HMM converged for any candidate state count.")
 
     states = best.predict(trajectory)
     occ = np.array([np.mean(states == s) for s in range(best_k)])
-    dwell = stride_seconds / (1.0 - np.diag(best.transmat_) + 1e-12)
+
+    # Closed-form mean dwell 1/(1 - p_ii) blows up for a near-absorbing state
+    # (p_ii -> 1), so it is clipped to the trajectory duration — a state cannot
+    # dwell longer than the recording. The empirical dwell (mean observed
+    # run-length per state) is the honest, always-bounded readout.
+    total_seconds = n * stride_seconds
+    dwell = np.minimum(stride_seconds / (1.0 - np.diag(best.transmat_) + 1e-12),
+                       total_seconds)
+    emp = np.full(best_k, np.nan)
+    for s in range(best_k):
+        runs, run = [], 0
+        for st in states:
+            if st == s:
+                run += 1
+            elif run:
+                runs.append(run)
+                run = 0
+        if run:
+            runs.append(run)
+        if runs:
+            emp[s] = float(np.mean(runs)) * stride_seconds
     return {"model": best, "k": best_k, "states": states,
             "transition": best.transmat_, "means": best.means_,
-            "occupancy": occ, "dwell_seconds": dwell}
+            "occupancy": occ, "dwell_seconds": dwell,
+            "empirical_dwell_seconds": emp}
 
 
 def ou_process(trajectory: np.ndarray, stride_seconds: float = 1.0) -> dict:

@@ -4,11 +4,13 @@ from .conv_vae import ConvVAE
 from .transformer_vae import TransformerVAE
 from .spatiotemporal_vae import SpatioTemporalTransformerVAE
 from .anchored_vae import AnchoredSpatioTemporalVAE, AnchoredTemporalVAE
+from .temporal_conv_vae import TemporalConvVAE
 from .gaussian_mixture import GaussianMixturePrior
 
 __all__ = ["ConvVAE", "TransformerVAE", "SpatioTemporalTransformerVAE",
            "AnchoredSpatioTemporalVAE", "AnchoredTemporalVAE",
-           "GaussianMixturePrior", "build_model", "build_mixture"]
+           "TemporalConvVAE", "GaussianMixturePrior",
+           "build_model", "build_mixture"]
 
 
 def build_model(config):
@@ -19,8 +21,9 @@ def build_model(config):
     """
     inpainting = config.recipe == 3
     n_dims = getattr(config, "n_dims", 3)
-    if config.architecture == "conv":
-        return ConvVAE(
+    if config.architecture in ("conv", "temporal_conv"):
+        cls = TemporalConvVAE if config.architecture == "temporal_conv" else ConvVAE
+        return cls(
             T=config.clip_length,
             J=config.n_joints,
             d_z=config.latent_dim,

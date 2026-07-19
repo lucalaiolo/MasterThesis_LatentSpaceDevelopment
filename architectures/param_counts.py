@@ -91,6 +91,38 @@ def transformer_param_count(config: TrainingConfig) -> dict[str, int]:
     return parts
 
 
+def temporal_conv_param_count(config: TrainingConfig) -> dict[str, int]:
+    """Temporal-latent convolutional model parameter counts.
+
+    Same conv trunk as :func:`conv_param_count`, but the flatten + linear
+    posterior/lift is replaced by 1x1 convs that read a ``d_z`` latent at every
+    ``T/l`` window (posterior) and lift it back (decoder). Excludes LayerNorm.
+    """
+    J = config.n_joints
+    D = getattr(config, "n_dims", 3)
+    d_z = config.latent_dim
+    C = config.conv_base_channels
+    k = config.conv_kernel_sizes
+
+    def conv1d(c_in, c_out, kernel):
+        return kernel * c_in * c_out + c_out
+
+    parts = {
+        "encoder_block_1": conv1d((D + 1) * J, C, k[0]),
+        "encoder_block_2": conv1d(C, 2 * C, k[1]),
+        "encoder_block_3": conv1d(2 * C, 2 * C, k[2]),
+        "posterior_heads": 2 * conv1d(2 * C, d_z, 1),   # per-window mu, logvar
+        "decoder_from_z": conv1d(d_z, 2 * C, 1),         # per-window lift
+        "decoder_block_3": conv1d(2 * C, 2 * C, k[2]),
+        "decoder_block_2": conv1d(2 * C, C, k[1]),
+        "decoder_output_full": conv1d(C, D * J, k[0]),
+    }
+    if config.recipe == 3:
+        parts["decoder_output_inp"] = conv1d(C + J, D * J, k[0])
+    parts["total"] = sum(parts.values())
+    return parts
+
+
 def spatiotemporal_param_count(config: TrainingConfig) -> dict[str, int]:
     """Factorised space-time transformer parameter counts by component.
 
@@ -234,6 +266,8 @@ def summarise(config: TrainingConfig) -> dict[str, int]:
     """One entry point: return the counts for whichever architecture is set."""
     if config.architecture == "conv":
         return conv_param_count(config)
+    if config.architecture == "temporal_conv":
+        return temporal_conv_param_count(config)
     if config.architecture == "transformer":
         attention = getattr(config, "transformer_attention", "temporal")
         if getattr(config, "anchored_residual", False):

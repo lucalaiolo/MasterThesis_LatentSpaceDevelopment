@@ -25,8 +25,15 @@ class TrainingConfig:
             COCO 2D pose). Every model, loss, and parameter count is generic
             in D, so a 2D dataset only needs ``n_dims=2`` — no other change.
         fps: recording rate, used only for schedule reporting.
-        architecture: which model to build, "conv" or "transformer".
-        latent_dim: d_z, the latent width.
+        architecture: which model to build. "conv" or "transformer" compress
+            the clip to one latent vector; "temporal_conv" keeps a latent
+            **per time-window** (the T2M-GPT / MotionGPT style) so the
+            reconstruction can move instead of collapsing to a static mean
+            pose ([ARCH §4.5]). For "temporal_conv" the effective latent is
+            ``latent_dim * (clip_length / downsample)`` — ``latent_dim`` is the
+            per-window width and the conv strides set the down-sampling.
+        latent_dim: d_z, the latent width. For "temporal_conv" this is the
+            width of *each* window's latent, not the whole clip's.
         conv_base_channels: C in [ARCH §3].
         conv_kernel_sizes: the three encoder kernels.
         conv_strides: the three encoder strides; the product sets the
@@ -246,7 +253,7 @@ class TrainingConfig:
     fps: int = 25
 
     # Model.
-    architecture: Literal["conv", "transformer"] = "conv"
+    architecture: Literal["conv", "transformer", "temporal_conv"] = "conv"
     latent_dim: int = 32
 
     conv_base_channels: int = 64

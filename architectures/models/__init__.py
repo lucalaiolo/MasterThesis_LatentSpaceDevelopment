@@ -3,10 +3,12 @@
 from .conv_vae import ConvVAE
 from .transformer_vae import TransformerVAE
 from .spatiotemporal_vae import SpatioTemporalTransformerVAE
+from .anchored_vae import AnchoredSpatioTemporalVAE
 from .gaussian_mixture import GaussianMixturePrior
 
 __all__ = ["ConvVAE", "TransformerVAE", "SpatioTemporalTransformerVAE",
-           "GaussianMixturePrior", "build_model", "build_mixture"]
+           "AnchoredSpatioTemporalVAE", "GaussianMixturePrior",
+           "build_model", "build_mixture"]
 
 
 def build_model(config):
@@ -33,17 +35,13 @@ def build_model(config):
         )
     if config.architecture == "transformer":
         attention = getattr(config, "transformer_attention", "temporal")
-        cls = (SpatioTemporalTransformerVAE if attention == "factorized"
-               else TransformerVAE)
-        return cls(
+        common = dict(
             T=config.clip_length,
             J=config.n_joints,
             d_z=config.latent_dim,
             d_model=config.d_model,
             n_heads=config.n_heads,
             n_layers=config.n_layers,
-            n_enc_layers=getattr(config, "n_enc_layers", None),
-            n_dec_layers=getattr(config, "n_dec_layers", None),
             ffn_ratio=config.ffn_ratio,
             dropout=config.dropout,
             inpainting=inpainting,
@@ -51,6 +49,26 @@ def build_model(config):
             cond_dim=config.cond_dim,
             cond_dropout=config.cond_dropout,
             n_dims=n_dims,
+        )
+        if attention == "anchored":
+            # Residual + FiLM model. Shares one n_layers (rejected per-side in
+            # validate) and takes the torso-scale joint indices.
+            return AnchoredSpatioTemporalVAE(
+                **common,
+                shoulder_joints=getattr(config, "anchor_shoulder_joints", None),
+                hip_joints=getattr(config, "anchor_hip_joints", None),
+                scale_eps=getattr(config, "anchor_scale_eps", 1e-3),
+            )
+        if attention == "factorized":
+            # SpatioTemporalTransformerVAE shares one n_layers across both
+            # stacks (see TrainingConfig.validate — the per-side override
+            # is rejected for this attention mode), so it takes no
+            # n_enc_layers / n_dec_layers kwargs.
+            return SpatioTemporalTransformerVAE(**common)
+        return TransformerVAE(
+            **common,
+            n_enc_layers=getattr(config, "n_enc_layers", None),
+            n_dec_layers=getattr(config, "n_dec_layers", None),
         )
     raise ValueError(f"unknown architecture: {config.architecture!r}")
 

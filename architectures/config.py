@@ -36,6 +36,14 @@ class TrainingConfig:
         n_layers: transformer block count in each of the encoder and decoder.
         ffn_ratio: feedforward inner width as a multiple of d_model.
         dropout: applied after attention and after the feedforward.
+        transformer_attention: how the transformer attends ([ARCH §4]).
+            "temporal" (default) — the frame-token model: each frame is one
+            token (its J joints flattened) and attention runs over time only.
+            "factorized" — one token per (joint, frame) with alternating
+            **spatial** attention (across joints within a frame) and
+            **temporal** attention (across frames within a joint), the
+            divided space-time / PoseFormer construction. Ignored when
+            ``architecture == "conv"``.
         batch_size: B in [MVAE §6.4].
         n_epochs: total training epochs.
         learning_rate: peak learning rate.
@@ -213,6 +221,7 @@ class TrainingConfig:
     n_layers: int = 3
     ffn_ratio: int = 4
     dropout: float = 0.1
+    transformer_attention: Literal["temporal", "factorized"] = "temporal"
 
     # Training.
     batch_size: int = 64

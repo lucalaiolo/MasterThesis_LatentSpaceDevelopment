@@ -45,6 +45,29 @@ model = out["model"]
 `smoke_test.py` runs every combination of architecture and recipe on
 synthetic data for two epochs; read it as a full worked example.
 
+### Transformer attention: temporal or factorized
+
+The transformer comes in two attention flavours, chosen by
+`transformer_attention`:
+
+```python
+TrainingConfig(architecture="transformer",
+               transformer_attention="temporal")    # default: frame-token, time-only
+TrainingConfig(architecture="transformer",
+               transformer_attention="factorized")   # per-joint tokens, spatial + temporal
+```
+
+- **`"temporal"`** (default, [ARCH §4.1-4.2]) collapses each frame's J joints
+  into one token and attends over time only.
+- **`"factorized"`** ([ARCH §4.3]) keeps **one token per (joint, frame)** and
+  alternates *spatial* attention (across joints within a frame — pose
+  structure) with *temporal* attention (across frames within a joint —
+  motion). This is the divided space-time / PoseFormer construction; it
+  separates the two inductive biases and is quadratic in J and T separately
+  rather than in J·T. At the same `d_model`/`n_layers` it is a larger model
+  (each block holds a spatial *and* a temporal sub-layer), so drop `n_layers`
+  if you want to match a parameter budget.
+
 ## The three recipes ([MVAE §3-5])
 
 | Recipe | Forward passes | Reconstruction terms | Where the KL comes from |
@@ -68,7 +91,8 @@ ablation ([MVAE §8]).
 | `losses.py`         | KL (vanilla and free-bits), full-clip MSE, hidden-only MSE, beta schedule |
 | `models/common.py`  | LayerNorm across channels, sinusoidal PE, reparameterisation |
 | `models/conv_vae.py`         | 1D temporal convolutional VAE ([ARCH §3]) |
-| `models/transformer_vae.py`  | frame-token transformer VAE ([ARCH §4.1, §4.2]) |
+| `models/transformer_vae.py`  | frame-token transformer VAE, temporal attention only ([ARCH §4.1, §4.2]) |
+| `models/spatiotemporal_vae.py` | factorised space-time transformer VAE — alternating spatial + temporal attention ([ARCH §4.3]) |
 | `train.py`          | end-to-end loop, per-epoch validation, checkpoints |
 | `evaluate.py`       | MPJPE reconstruction, MPJPE inpainting ([MVAE §7]) |
 | `visualize.py`      | loss curves, latent diagnostics, pose reconstructions, mask previews |

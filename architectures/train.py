@@ -31,6 +31,7 @@ from .config import TrainingConfig
 from .data import build_clips, make_loader, train_val_split
 from .losses import (kl_gaussian, kl_gaussian_free_bits,
                      reconstruction_mse, reconstruction_mse_hidden,
+                     reconstruction_velocity_mse,
                      beta_schedule, delayed_warmup_schedule)
 from .mask_policies import build_policy
 from .models import build_model, build_mixture
@@ -246,6 +247,9 @@ def train(config: TrainingConfig,
             extra += (f" advAcc={train_stats['adv_acc']:.2f}"
                       f" (chance {1.0 / adversary.net[-1].out_features:.2f})"
                       f" lam={_site_adv_lambda(config, epoch):.2f}")
+        if getattr(config, "lambda_velocity", 0.0) > 0:
+            extra += (f" vel={train_stats['rec_vel']:.4f}/"
+                      f"{val_stats['rec_vel']:.4f}")
         print(f"[epoch {epoch:3d}] "
               f"beta={train_stats['beta']:.2e} "
               f"loss={train_stats['loss']:.4f}/{val_stats['loss']:.4f} "
@@ -307,6 +311,8 @@ def _val_selection_score(config, val_stats) -> float:
         score = float(val_stats["rec_full"]) + beta_ceiling * float(val_stats["kl"])
         if config.recipe in (2, 3):
             score += config.lambda_aux * float(val_stats["rec_aux"])
+        if getattr(config, "lambda_velocity", 0.0) > 0:
+            score += config.lambda_velocity * float(val_stats.get("rec_vel", 0.0))
         if config.n_components > 0:
             score += (config.gm_beta_z * float(val_stats["kl_z"])
                       + config.gm_beta_y * float(val_stats["kl_y"]))
@@ -416,7 +422,7 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
     cached and returned as ``(mu_all, logvar_all)`` so the caller can run
     the EM M-step; ``None`` otherwise.
     """
-    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0,
+    totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0, "rec_vel": 0.0,
               "kl": 0.0, "kl_z": 0.0, "kl_y": 0.0, "entropy": 0.0,
               "beta": 0.0, "adv_loss": 0.0, "adv_acc": 0.0}
     n_batches = 0
@@ -443,7 +449,7 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
             cache_logvar.append(parts["logvar"].detach())
 
         totals["loss"] += float(loss)
-        for key in ("rec_full", "rec_aux", "kl", "kl_z", "kl_y",
+        for key in ("rec_full", "rec_aux", "rec_vel", "kl", "kl_z", "kl_y",
                     "entropy", "beta", "adv_loss", "adv_acc"):
             totals[key] += float(parts[key])
         n_batches += 1
@@ -549,6 +555,11 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
         L = MSE(X, X_hat_full) + lambda * MSE_hidden(X, X_hat_inp, M)
             + beta * KL.
 
+    When ``config.lambda_velocity > 0`` an extra term
+    ``lambda_velocity * MSE(velocity(X_hat_full), velocity(X))`` is added
+    to every recipe, scoring the reconstruction's frame-to-frame motion
+    (temporal-smoothness regulariser); it is 0 otherwise.
+
     When a ``mixture`` is supplied the prior term changes ([CARE-PD §7.3],
     [GM-VAE §3.3]). The standard-normal KL becomes an auxiliary
     regulariser (weight ``beta``), and two mixture terms are added:
@@ -577,6 +588,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
 
     if config.recipe == 1:
         X_hat, mu, logvar = model(X, M, c)
+        x_hat_full = X_hat
         rec_full = reconstruction_mse(X_hat, X)
         rec_aux = zero
         kl = _kl_term(mu, logvar, config)
@@ -585,6 +597,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
         # Primary pass: clean clip in, full-clip MSE + KL.
         M_ones = torch.ones_like(M)
         X_hat_primary, mu, logvar = model(X, M_ones, c)
+        x_hat_full = X_hat_primary
         rec_full = reconstruction_mse(X_hat_primary, X)
         kl = _kl_term(mu, logvar, config)
 
@@ -595,6 +608,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     elif config.recipe == 3:
         # Single masked pass; two decoder heads.
         X_hat_full, X_hat_inp, mu, logvar = model(X, M, c)
+        x_hat_full = X_hat_full
         rec_full = reconstruction_mse(X_hat_full, X)
         rec_aux = reconstruction_mse_hidden(X_hat_inp, X, M)
         kl = _kl_term(mu, logvar, config)
@@ -602,9 +616,17 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     else:
         raise ValueError(f"unknown recipe: {config.recipe!r}")
 
+    # Optional velocity term: match the reconstruction's frame-to-frame
+    # motion to the target's, scored on the full-clip head for every recipe.
+    lambda_vel = getattr(config, "lambda_velocity", 0.0)
+    rec_vel = (reconstruction_velocity_mse(x_hat_full, X)
+               if lambda_vel > 0 else zero)
+
     loss = rec_full
     if config.recipe in (2, 3):
         loss = loss + config.lambda_aux * rec_aux
+    if lambda_vel > 0:
+        loss = loss + lambda_vel * rec_vel
 
     kl_z = zero
     kl_y = zero
@@ -651,6 +673,7 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
 
     beta_tensor = torch.as_tensor(beta, device=X.device, dtype=rec_full.dtype)
     return loss, {"rec_full": rec_full, "rec_aux": rec_aux,
+                  "rec_vel": rec_vel,
                   "kl": kl, "kl_z": kl_z, "kl_y": kl_y,
                   "entropy": entropy, "beta": beta_tensor,
                   "adv_loss": adv_loss, "adv_acc": adv_acc,

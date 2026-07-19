@@ -84,6 +84,13 @@ class TrainingConfig:
             weights the masked-pass reconstruction ([MVAE §4.2]);
             Recipe 3 weights the hidden-only inpainting head ([MVAE §5.2]).
             Ignored for Recipe 1.
+        lambda_velocity: weight on the optional velocity (temporal-
+            difference) reconstruction term. 0.0 (default) disables it.
+            When > 0 the loss adds ``lambda_velocity *
+            reconstruction_velocity_mse(x_hat, x)`` on the full-clip
+            reconstruction, so the generated motion — not just the per-
+            frame pose — is scored against the target. Cheap regulariser
+            against temporal jitter; applies to every recipe.
         n_cond: number of conditioning categories for the CVAE arm
             ([CARE-PD §6]). 0 (default) disables conditioning and gives a
             plain VAE. Set to the cohort count to condition on cohort. The
@@ -240,6 +247,7 @@ class TrainingConfig:
     # Recipe.
     recipe: Literal[1, 2, 3] = 1
     lambda_aux: float = 1.0
+    lambda_velocity: float = 0.0
 
     # Conditioning (CVAE / GM-CVAE arm, [CARE-PD §6]).
     n_cond: int = 0
@@ -328,6 +336,11 @@ class TrainingConfig:
                 f"Recipe {self.recipe} needs a mask policy; set 'uniform' or 'limb'. "
                 f"Recipe 2's auxiliary pass and Recipe 3's inpainting head "
                 f"both require joints to be hidden."
+            )
+        if self.lambda_velocity < 0:
+            raise ValueError(
+                f"lambda_velocity ({self.lambda_velocity}) must be >= 0 "
+                f"(0 disables the velocity term)."
             )
         if self.n_cond < 0:
             raise ValueError(f"n_cond ({self.n_cond}) must be >= 0.")

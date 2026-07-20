@@ -5,11 +5,12 @@ from .transformer_vae import TransformerVAE
 from .spatiotemporal_vae import SpatioTemporalTransformerVAE
 from .anchored_vae import AnchoredSpatioTemporalVAE, AnchoredTemporalVAE
 from .temporal_conv_vae import TemporalConvVAE
+from .temporal_transformer_vae import TemporalTransformerVAE
 from .gaussian_mixture import GaussianMixturePrior
 
 __all__ = ["ConvVAE", "TransformerVAE", "SpatioTemporalTransformerVAE",
            "AnchoredSpatioTemporalVAE", "AnchoredTemporalVAE",
-           "TemporalConvVAE", "GaussianMixturePrior",
+           "TemporalConvVAE", "TemporalTransformerVAE", "GaussianMixturePrior",
            "build_model", "build_mixture"]
 
 
@@ -21,6 +22,23 @@ def build_model(config):
     """
     inpainting = config.recipe == 3
     n_dims = getattr(config, "n_dims", 3)
+    if config.architecture == "temporal_transformer":
+        return TemporalTransformerVAE(
+            T=config.clip_length,
+            J=config.n_joints,
+            d_z=config.latent_dim,
+            d_model=config.d_model,
+            n_heads=config.n_heads,
+            n_layers=config.n_layers,
+            ffn_ratio=config.ffn_ratio,
+            dropout=config.dropout,
+            inpainting=inpainting,
+            n_cond=config.n_cond,
+            cond_dim=config.cond_dim,
+            cond_dropout=config.cond_dropout,
+            n_dims=n_dims,
+            downsample=getattr(config, "temporal_downsample", 4),
+        )
     if config.architecture in ("conv", "temporal_conv"):
         cls = TemporalConvVAE if config.architecture == "temporal_conv" else ConvVAE
         return cls(

@@ -123,6 +123,43 @@ def temporal_conv_param_count(config: TrainingConfig) -> dict[str, int]:
     return parts
 
 
+def temporal_transformer_param_count(config: TrainingConfig) -> dict[str, int]:
+    """Temporal-latent transformer parameter counts.
+
+    Frame-token embed ``(D+1)J -> d_model``; ``n_layers`` transformer blocks in
+    each of the encoder and decoder; per-window posterior heads and lift
+    (``d_model <-> d_z``); a ``d_model -> D*J`` output head. Excludes LayerNorm
+    and assumes ``n_cond == 0``.
+    """
+    J = config.n_joints
+    D = getattr(config, "n_dims", 3)
+    d_z = config.latent_dim
+    dm = config.d_model
+    L = config.n_layers
+    ffn = config.ffn_ratio * dm
+
+    def linear(inp, out):
+        return inp * out + out
+
+    def transformer_block():
+        attn = 3 * dm * dm + 3 * dm + dm * dm + dm
+        ff = dm * ffn + ffn + ffn * dm + dm
+        return attn + ff
+
+    parts = {
+        "encoder_token_embed": linear((D + 1) * J, dm),
+        "encoder_stack": L * transformer_block(),
+        "posterior_heads": 2 * linear(dm, d_z),        # per-window mu, logvar
+        "decoder_from_z": linear(d_z, dm),             # per-window lift
+        "decoder_stack": L * transformer_block(),
+        "decoder_output_full": linear(dm, D * J),
+    }
+    if config.recipe == 3:
+        parts["decoder_output_inp"] = linear(dm + J, D * J)
+    parts["total"] = sum(parts.values())
+    return parts
+
+
 def spatiotemporal_param_count(config: TrainingConfig) -> dict[str, int]:
     """Factorised space-time transformer parameter counts by component.
 
@@ -268,6 +305,8 @@ def summarise(config: TrainingConfig) -> dict[str, int]:
         return conv_param_count(config)
     if config.architecture == "temporal_conv":
         return temporal_conv_param_count(config)
+    if config.architecture == "temporal_transformer":
+        return temporal_transformer_param_count(config)
     if config.architecture == "transformer":
         attention = getattr(config, "transformer_attention", "temporal")
         if getattr(config, "anchored_residual", False):

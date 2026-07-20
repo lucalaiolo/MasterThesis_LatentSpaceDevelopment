@@ -26,13 +26,19 @@ class TrainingConfig:
             in D, so a 2D dataset only needs ``n_dims=2`` — no other change.
         fps: recording rate, used only for schedule reporting.
         architecture: which model to build. "conv" or "transformer" compress
-            the clip to one latent vector; "temporal_conv" keeps a latent
-            **per time-window** (the T2M-GPT / MotionGPT style) so the
-            reconstruction can move instead of collapsing to a static mean
-            pose ([ARCH §4.5]). For "temporal_conv" the effective latent is
+            the clip to one latent vector; "temporal_conv" (conv backbone) and
+            "temporal_transformer" (attention backbone) keep a latent **per
+            time-window** (the T2M-GPT / MotionGPT style) so the reconstruction
+            can move instead of collapsing to a static mean pose
+            ([ARCH §4.5-4.6]). For the temporal models the effective latent is
             ``latent_dim * (clip_length / downsample)`` — ``latent_dim`` is the
-            per-window width and the conv strides set the down-sampling.
-        latent_dim: d_z, the latent width. For "temporal_conv" this is the
+            per-window width. "temporal_conv" sets the down-sampling from the
+            conv strides; "temporal_transformer" from ``temporal_downsample``.
+        temporal_downsample: window length ``l`` for "temporal_transformer" —
+            the T frames are grouped into ``T/l`` latent windows.
+            ``clip_length`` must divide it. Ignored by the other architectures
+            (the conv models get their down-sampling from ``conv_strides``).
+        latent_dim: d_z, the latent width. For the temporal models this is the
             width of *each* window's latent, not the whole clip's.
         conv_base_channels: C in [ARCH §3].
         conv_kernel_sizes: the three encoder kernels.
@@ -253,7 +259,8 @@ class TrainingConfig:
     fps: int = 25
 
     # Model.
-    architecture: Literal["conv", "transformer", "temporal_conv"] = "conv"
+    architecture: Literal["conv", "transformer", "temporal_conv",
+                          "temporal_transformer"] = "conv"
     latent_dim: int = 32
 
     conv_base_channels: int = 64
@@ -267,6 +274,7 @@ class TrainingConfig:
     n_dec_layers: int | None = None
     ffn_ratio: int = 4
     dropout: float = 0.1
+    temporal_downsample: int = 4
     transformer_attention: Literal["temporal", "factorized"] = "temporal"
     anchored_residual: bool = False
     anchor_shoulder_joints: tuple[int, int] | None = None
@@ -368,6 +376,12 @@ class TrainingConfig:
             raise ValueError(
                 f"d_model ({self.d_model}) must divide by n_heads "
                 f"({self.n_heads})."
+            )
+        if (self.architecture == "temporal_transformer"
+                and self.clip_length % self.temporal_downsample != 0):
+            raise ValueError(
+                f"clip_length ({self.clip_length}) must divide by "
+                f"temporal_downsample ({self.temporal_downsample})."
             )
         if self.encoder_layers() < 1 or self.decoder_layers() < 1:
             raise ValueError(

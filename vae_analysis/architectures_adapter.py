@@ -51,6 +51,35 @@ class ArchitecturesAdapter:
             xh = self.net.decode_full(zt)
         return np.asarray(xh.cpu())
 
+    # ---- Temporal-latent window layout (temporal_* models only). ----
+    def is_temporal(self) -> bool:
+        """True when the wrapped net keeps a per-window latent sequence."""
+        return hasattr(self.net, "window_latents")
+
+    def n_windows(self) -> int:
+        return int(self.net.n_windows())
+
+    @property
+    def d_z(self) -> int:
+        """Per-window latent width (``d`` in the HMM notation)."""
+        return int(self.net.d_z)
+
+    def window_latents(self, z):
+        """Flattened latent ``(B, d_z*n_win)`` -> windows ``(B, n_win, d_z)`` (NumPy).
+
+        Delegates to the model so the conv/transformer flatten-order
+        difference stays where it belongs.
+        """
+        torch = self.torch
+        zt = torch.as_tensor(np.asarray(z), dtype=torch.float32)
+        return np.asarray(self.net.window_latents(zt))
+
+    def flatten_windows(self, w):
+        """Windows ``(B, n_win, d_z)`` -> flattened latent ``(B, d_z*n_win)`` (NumPy)."""
+        torch = self.torch
+        wt = torch.as_tensor(np.asarray(w), dtype=torch.float32)
+        return np.asarray(self.net.flatten_windows(wt))
+
     # ---- Single-clip methods in torch, used by the Jacobian tools. ----
     def encode_mean_torch(self, X, M):
         # X (T, J, 3), M (T, J); return mu (d_z,). jacrev calls this with

@@ -130,19 +130,49 @@ def make_loader(clips: np.ndarray, mask_policy, batch_size: int,
 def train_val_split(clips: np.ndarray, video_id: np.ndarray,
                     val_fraction: float = 0.15, seed: int = 0
                     ) -> tuple[np.ndarray, np.ndarray]:
-    """Split by holding out the last fraction of each video by time.
+    """Hold out whole videos for validation (a subject-wise split).
 
-    Splitting at random would leak content between neighbouring clips.
-    Splitting by clip index within each video keeps the two halves apart.
+    Every clip of a held-out video goes to validation and none of its
+    clips are ever seen in training. This is the honest split for a
+    generalisation claim: a within-video time cut still trains and
+    validates on the *same* subject, and neighbouring clips overlap in
+    frames, so it leaks. A whole-video hold-out keeps subjects disjoint.
+
+    ``round(n_videos * val_fraction)`` videos are held out, clamped to at
+    least one and at most ``n_videos - 1`` so neither split is empty. The
+    choice is deterministic in ``seed`` (a shuffle of the unique video
+    ids), so every caller that rebuilds the split — sweep scoring, the
+    drivers, the analysis pass — sees the same partition.
+
+    Falls back to the old within-video time cut only when there is a
+    single video, where a video-wise split is impossible.
 
     Returns:
         (train_mask, val_mask): boolean arrays over the clip index.
     """
     train = np.zeros(len(clips), dtype=bool)
     val = np.zeros(len(clips), dtype=bool)
-    for v in np.unique(video_id):
+    vids = np.unique(video_id)
+
+    if len(vids) < 2:
+        # Only one video: fall back to a within-video time cut so the
+        # caller still gets a non-empty val split.
+        for v in vids:
+            idx = np.where(video_id == v)[0]
+            cut = int(len(idx) * (1 - val_fraction))
+            train[idx[:cut]] = True
+            val[idx[cut:]] = True
+        return train, val
+
+    n_val = int(round(len(vids) * val_fraction))
+    n_val = max(1, min(n_val, len(vids) - 1))
+    order = np.random.default_rng(seed).permutation(vids)
+    val_vids = set(order[:n_val].tolist())
+
+    for v in vids:
         idx = np.where(video_id == v)[0]
-        cut = int(len(idx) * (1 - val_fraction))
-        train[idx[:cut]] = True
-        val[idx[cut:]] = True
+        if v in val_vids:
+            val[idx] = True
+        else:
+            train[idx] = True
     return train, val

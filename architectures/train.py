@@ -834,8 +834,8 @@ def model_selection(base_config: TrainingConfig,
                        cohort_per_video=cohort_per_video,
                        n_layers_grid=n_layers_grid)
 
-    # Rebuild the exact time-based val split train() used internally, so the
-    # selection metric is measured on data no run trained on.
+    # Rebuild the exact video-wise val split train() used internally, so the
+    # selection metric is measured on subjects no run trained on.
     clips, video_id, _ = build_clips(videos, base_config.clip_length, stride)
     _, val_mask = train_val_split(clips, video_id)
     val_clips = clips[val_mask]

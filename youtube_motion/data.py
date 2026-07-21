@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .skeleton import (COCO18_LIMBS, N_DIMS, N_JOINTS, ROOT_JOINT,
-                       TORSO_JOINTS, coco18_limbs)
+                       TORSO_JOINTS, coco18_limbs, skeleton_for)
 
 
 # ---- Preprocessing (pure NumPy, generic in J) -----------------------------
@@ -140,9 +140,11 @@ class YoutubeMotionBundle:
         videos: list of per-video arrays, each (F_v, J, 2) float32.
         video_names: the ``video`` id string for each entry in ``videos``.
         fps: per-video recording rate (median of the frame times), or None.
-        n_joints: J (18 for COCO-18).
+        n_joints: J (15 for BODY-15, 18 for COCO-18).
         n_dims: coordinate dimension (2).
         limbs: limb-name -> joint-index map for the ``limb`` mask policy.
+        bones: (a, b) joint-index pairs for stick-figure visualisation.
+        left_right: bilateral (left, right) joint pairs for symmetry analyses.
     """
     videos: list[np.ndarray]
     video_names: list[str]
@@ -150,6 +152,8 @@ class YoutubeMotionBundle:
     n_joints: int = N_JOINTS
     n_dims: int = N_DIMS
     limbs: dict[str, list[int]] = field(default_factory=coco18_limbs)
+    bones: list[tuple[int, int]] = field(default_factory=list)
+    left_right: list[tuple[int, int]] = field(default_factory=list)
 
     @property
     def n_videos(self) -> int:
@@ -186,7 +190,7 @@ DEFAULT_COLUMNS = {
 
 
 def load_youtube_csv(path: str,
-                     n_joints: int = N_JOINTS,
+                     n_joints: int | None = None,
                      preprocess: str = "none",
                      min_frames: int = 1,
                      max_videos: int | None = None,
@@ -201,18 +205,26 @@ def load_youtube_csv(path: str,
     filled by :func:`interpolate_missing`. Frame indices are shifted so the
     earliest frame of each video maps to 0, preserving gaps (and thus timing).
 
+    The joint count is **auto-detected** by default (``n_joints=None``): J is
+    set to ``max(part_idx) + 1`` seen in the file, then the matching skeleton
+    (BODY-15 or COCO-18) fixes the limbs, bones, left/right pairs, and the
+    root / torso joints used by ``center`` / ``center_scale``. Pass an explicit
+    ``n_joints`` to force a layout (rows with ``part_idx >= n_joints`` are then
+    dropped).
+
     Args:
         path: path to the CSV (with a header row).
-        n_joints: J. Rows whose ``part_idx`` is outside ``[0, J)`` are ignored.
+        n_joints: J, or None to auto-detect from the data (recommended).
         preprocess: "none" (default), "center", or "center_scale"
-            (:func:`preprocess_video`).
+            (:func:`preprocess_video`). Root / torso joints come from the
+            resolved skeleton.
         min_frames: drop videos shorter than this many frames (too short to
             window). Must be >= 1.
         max_videos: keep at most this many videos (handy for a quick look);
             None keeps all.
         columns: override the CSV column names; keys are the logical fields
             ``video, frame, x, y, part_idx, fps`` (see ``DEFAULT_COLUMNS``).
-        limbs: limb map for the bundle; defaults to the COCO-18 limbs.
+        limbs: limb map for the bundle; defaults to the resolved skeleton's.
     Returns:
         A populated :class:`YoutubeMotionBundle`.
     """
@@ -221,6 +233,7 @@ def load_youtube_csv(path: str,
     # video id -> {"rows": [(frame, part_idx, x, y)], "fps": [..], order: int}
     grouped: dict[str, dict] = {}
     order: list[str] = []
+    max_pi = -1                                    # for auto-detecting J
 
     with open(path, newline="") as fh:
         reader = csv.DictReader(fh)
@@ -247,8 +260,13 @@ def load_youtube_csv(path: str,
                 fr = int(float(row[cols["frame"]]))
             except (TypeError, ValueError):
                 continue                           # unparseable index -> skip
-            if pi < 0 or pi >= n_joints:
+            if pi < 0:
                 continue
+            # When J is fixed, drop out-of-range joints here; when auto-
+            # detecting, keep every row and learn J from the observed maximum.
+            if n_joints is not None and pi >= n_joints:
+                continue
+            max_pi = max(max_pi, pi)
             x = _to_float(row[cols["x"]])
             y = _to_float(row[cols["y"]])
             g["rows"].append((fr, pi, x, y))
@@ -256,6 +274,13 @@ def load_youtube_csv(path: str,
                 f = _to_float(row[cols["fps"]])
                 if np.isfinite(f):
                     g["fps"].append(f)
+
+    if max_pi < 0:
+        raise ValueError(
+            f"no usable keypoint rows parsed from {path!r}. Check the column "
+            f"mapping ({cols}).")
+    J = n_joints if n_joints is not None else max_pi + 1
+    skel = skeleton_for(J)                          # raises on an unknown J
 
     videos: list[np.ndarray] = []
     names: list[str] = []
@@ -269,12 +294,16 @@ def load_youtube_csv(path: str,
         F = f_max - f_min + 1
         if F < min_frames:
             continue
-        pose = np.full((F, n_joints, N_DIMS), np.nan, dtype=np.float64)
+        pose = np.full((F, J, N_DIMS), np.nan, dtype=np.float64)
         for fr, pi, x, y in rows:
+            if pi >= J:
+                continue                            # explicit J smaller than data
             pose[fr - f_min, pi, 0] = x
             pose[fr - f_min, pi, 1] = y
         pose = interpolate_missing(pose)
-        pose = preprocess_video(pose, mode=preprocess)
+        pose = preprocess_video(pose, mode=preprocess,
+                                root_joint=skel["root_joint"],
+                                torso_joints=skel["torso_joints"])
         videos.append(pose)
         names.append(vid)
         fv = grouped[vid]["fps"]
@@ -283,13 +312,14 @@ def load_youtube_csv(path: str,
     if not videos:
         raise ValueError(
             f"no usable videos parsed from {path!r} (min_frames={min_frames}). "
-            f"Check the column mapping and that part_idx is in [0, {n_joints})."
+            f"Check the column mapping and that part_idx is in [0, {J})."
         )
 
     return YoutubeMotionBundle(
         videos=videos, video_names=names, fps=fps_out,
-        n_joints=n_joints, n_dims=N_DIMS,
-        limbs=(limbs if limbs is not None else coco18_limbs()),
+        n_joints=J, n_dims=N_DIMS,
+        limbs=(limbs if limbs is not None else skel["limbs"]),
+        bones=skel["bones"], left_right=skel["left_right"],
     )
 
 

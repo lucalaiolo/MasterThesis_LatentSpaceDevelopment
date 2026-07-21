@@ -206,6 +206,42 @@ def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
             "max_ratio": max_ratio, "passed": bool(max_ratio < tol),
             "tol": tol}
 
+# === SOUND seam gate — replaces `assert seam["passed"]` =====================
+def seam_gate(Z, lengths, *, n_win, l, f_win, stride,
+              jump_tol=1.5, comb_tol=3.0, min_harm=2):
+    import numpy as np
+    from scipy.signal import welch
+    step, blocks = stride // l, np.cumsum(np.r_[0, lengths])
+    # (a) boundary-jump: extra step size at clip seams vs interior
+    bnd, itr = [], []
+    for a, b in zip(blocks[:-1], blocks[1:]):
+        seg = Z[a:b]
+        if len(seg) < 2: continue
+        d = np.linalg.norm(np.diff(seg, axis=0), axis=1)
+        m = (np.arange(1, len(seg)) % step == 0)
+        bnd.append(d[m]); itr.append(d[~m])
+    jump = np.concatenate(bnd).mean() / np.concatenate(itr).mean()
+    # (b) local-baseline comb test at the seam harmonics
+    Ps = []
+    for a, b in zip(blocks[:-1], blocks[1:]):
+        seg = Z[a:b]
+        if len(seg) < 4 * n_win: continue
+        f, P = welch(seg, fs=f_win, axis=0, nperseg=4 * n_win); Ps.append(P.mean(1))
+    f_seam = f_win / n_win
+    harm = f_seam * np.arange(1, 6); harm = harm[harm < f_win / 2]
+    locs = []
+    if Ps:
+        Pavg = np.mean(Ps, axis=0)
+        hbins = {int(np.argmin(np.abs(f - h))) for h in harm}
+        for h in harm:
+            b0 = int(np.argmin(np.abs(f - h)))
+            nb = [j for j in range(max(1, b0-3), min(len(f), b0+4))
+                  if j != b0 and j not in hbins]
+            locs.append(Pavg[b0] / (np.median(Pavg[nb]) + 1e-12))
+    locs = np.array(locs) if locs else np.array([np.nan])
+    n_comb = int(np.sum(locs > comb_tol))
+    return {"jump": jump, "local_harmonic": locs, "n_comb_lines": n_comb,
+            "passed": bool(jump < jump_tol and n_comb < min_harm)}
 
 # ---------------------------------------------------------------------------
 # 3. Full-covariance HMM fit  (§2, §5.2; Guardrails 2.2, 2.4, 2.5)

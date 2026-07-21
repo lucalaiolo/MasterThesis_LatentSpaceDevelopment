@@ -25,8 +25,11 @@ torch-free environment can still ``from youtube_motion import load_youtube_csv``
 
 from .data import (YoutubeMotionBundle, interpolate_missing, load_youtube_csv,
                    preprocess_video, root_center, torso_scale)
-from .skeleton import (COCO18_BONES, COCO18_KEYPOINT_NAMES, COCO18_LIMBS,
-                       COCO18_NAME_TO_IDX, N_DIMS, N_JOINTS, coco18_limbs)
+from .skeleton import (BODY15_BONES, BODY15_KEYPOINT_NAMES, BODY15_LIMBS,
+                       BODY15_LEFT_RIGHT, BODY15_NAME_TO_IDX, body15_limbs,
+                       COCO18_BONES, COCO18_KEYPOINT_NAMES, COCO18_LIMBS,
+                       COCO18_NAME_TO_IDX, N_DIMS, N_JOINTS, coco18_limbs,
+                       skeleton_for)
 
 __all__ = [
     # data
@@ -42,6 +45,13 @@ __all__ = [
     "COCO18_LIMBS",
     "COCO18_BONES",
     "coco18_limbs",
+    "BODY15_KEYPOINT_NAMES",
+    "BODY15_NAME_TO_IDX",
+    "BODY15_LIMBS",
+    "BODY15_BONES",
+    "BODY15_LEFT_RIGHT",
+    "body15_limbs",
+    "skeleton_for",
     "N_JOINTS",
     "N_DIMS",
     # driver (lazy — pulls in architectures / torch):

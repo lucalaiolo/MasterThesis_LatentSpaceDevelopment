@@ -98,3 +98,113 @@ COCO18_BONES: list[tuple[int, int]] = [
 def coco18_limbs() -> dict[str, list[int]]:
     """Return a fresh copy of the limb->indices map (safe to mutate)."""
     return {name: list(idx) for name, idx in COCO18_LIMBS.items()}
+
+
+# ===========================================================================
+# BODY-15 layout (the current preprocessing export).
+# ===========================================================================
+# The newer export drops the four face joints (eyes / ears) and *inserts a
+# MidHip* at index 8, shifting the whole lower body down by one relative to
+# COCO-18. It is the OpenPose BODY-25 torso+limbs subset:
+#
+#     0  Nose        5  LShoulder   10 RKnee
+#     1  Neck        6  LElbow      11 RAnkle
+#     2  RShoulder   7  LWrist      12 LHip
+#     3  RElbow      8  MidHip      13 LKnee
+#     4  RWrist      9  RHip        14 LAnkle
+#
+# ``part_idx`` in the CSV matches these indices exactly.
+BODY15_KEYPOINT_NAMES: list[str] = [
+    "Nose",       # 0
+    "Neck",       # 1
+    "RShoulder",  # 2
+    "RElbow",     # 3
+    "RWrist",     # 4
+    "LShoulder",  # 5
+    "LElbow",     # 6
+    "LWrist",     # 7
+    "MidHip",     # 8
+    "RHip",       # 9
+    "RKnee",      # 10
+    "RAnkle",     # 11
+    "LHip",       # 12
+    "LKnee",      # 13
+    "LAnkle",     # 14
+]
+
+BODY15_NAME_TO_IDX: dict[str, int] = {
+    name: i for i, name in enumerate(BODY15_KEYPOINT_NAMES)
+}
+
+# Neck is still the most reliable body centre (and still index 1); the MidHip
+# now gives a *true* torso length (Neck -> MidHip) rather than the RHip proxy
+# COCO-18 had to use.
+BODY15_ROOT_JOINT: int = BODY15_NAME_TO_IDX["Neck"]        # 1
+BODY15_TORSO_JOINTS: tuple[int, int] = (
+    BODY15_NAME_TO_IDX["Neck"], BODY15_NAME_TO_IDX["MidHip"],  # (1, 8)
+)
+
+BODY15_LIMBS: dict[str, list[int]] = {
+    "right_arm": [2, 3, 4],
+    "left_arm":  [5, 6, 7],
+    "right_leg": [9, 10, 11],
+    "left_leg":  [12, 13, 14],
+    "head":      [0],
+}
+
+BODY15_LEFT_RIGHT: list[tuple[int, int]] = [
+    (5, 2),    # LShoulder <-> RShoulder
+    (6, 3),    # LElbow    <-> RElbow
+    (7, 4),    # LWrist    <-> RWrist
+    (12, 9),   # LHip      <-> RHip
+    (13, 10),  # LKnee     <-> RKnee
+    (14, 11),  # LAnkle    <-> RAnkle
+]
+
+BODY15_BONES: list[tuple[int, int]] = [
+    (1, 2), (1, 5),               # neck -> shoulders
+    (2, 3), (3, 4),               # right arm
+    (5, 6), (6, 7),               # left arm
+    (1, 8),                       # neck -> mid-hip (spine)
+    (8, 9), (9, 10), (10, 11),    # mid-hip -> right leg
+    (8, 12), (12, 13), (13, 14),  # mid-hip -> left leg
+    (1, 0),                       # neck -> nose
+]
+
+
+def body15_limbs() -> dict[str, list[int]]:
+    """Return a fresh copy of the BODY-15 limb->indices map (safe to mutate)."""
+    return {name: list(idx) for name, idx in BODY15_LIMBS.items()}
+
+
+def skeleton_for(n_joints: int) -> dict:
+    """Resolve the skeleton constants for a given joint count.
+
+    Returns a dict with ``names, name_to_idx, root_joint, torso_joints, limbs,
+    left_right, bones`` for the 15- or 18-joint layout. Anything else raises,
+    so a mismatched export fails loudly instead of silently mis-wiring the
+    limbs and bones.
+    """
+    if n_joints == 15:
+        return {
+            "names": list(BODY15_KEYPOINT_NAMES),
+            "name_to_idx": dict(BODY15_NAME_TO_IDX),
+            "root_joint": BODY15_ROOT_JOINT,
+            "torso_joints": BODY15_TORSO_JOINTS,
+            "limbs": body15_limbs(),
+            "left_right": list(BODY15_LEFT_RIGHT),
+            "bones": list(BODY15_BONES),
+        }
+    if n_joints == 18:
+        return {
+            "names": list(COCO18_KEYPOINT_NAMES),
+            "name_to_idx": dict(COCO18_NAME_TO_IDX),
+            "root_joint": ROOT_JOINT,
+            "torso_joints": TORSO_JOINTS,
+            "limbs": coco18_limbs(),
+            "left_right": list(COCO18_LEFT_RIGHT),
+            "bones": list(COCO18_BONES),
+        }
+    raise ValueError(
+        f"no skeleton defined for J={n_joints}; expected 15 (BODY-15) or "
+        f"18 (COCO-18). Add one to youtube_motion/skeleton.py.")

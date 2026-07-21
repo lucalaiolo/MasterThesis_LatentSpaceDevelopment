@@ -92,6 +92,22 @@ class TemporalTransformerVAE(nn.Module):
         """Number of temporal latent windows (``T / downsample``)."""
         return self.n_win
 
+    # ---- Window layout (transformer order: latent is (B, n_win, d_z)) ----
+    def window_latents(self, z):
+        """Reshape a flattened latent ``(B, d_z*n_win)`` to ``(B, n_win, d_z)``.
+
+        The frame-token head lays the latent out window-major — ``mu`` is
+        ``(B, n_win, d_z)`` before flattening — so recovering the window
+        sequence is a plain reshape (no transpose, unlike the conv model).
+        """
+        B = z.shape[0]
+        return z.reshape(B, self.n_win, self.d_z)
+
+    def flatten_windows(self, w):
+        """Inverse of :meth:`window_latents`: ``(B, n_win, d_z) -> (B, d_z*n_win)``."""
+        B = w.shape[0]
+        return w.reshape(B, -1)
+
     # ---- Encoder ---------------------------------------------------------
     def encode(self, X, M, c=None):
         """Map (clip, mask) to per-window (mu, logvar), flattened.

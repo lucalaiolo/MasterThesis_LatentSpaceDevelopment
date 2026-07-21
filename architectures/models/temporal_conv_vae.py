@@ -104,6 +104,28 @@ class TemporalConvVAE(nn.Module):
         """Number of temporal latent windows (``T / downsample``)."""
         return self.T_bottleneck
 
+    # ---- Window layout (conv order: latent is (B, d_z, n_win)) -----------
+    def window_latents(self, z):
+        """Reshape a flattened latent ``(B, d_z*n_win)`` to ``(B, n_win, d_z)``.
+
+        The conv head lays the latent out channel-major — ``mu`` is
+        ``(B, d_z, n_win)`` before flattening — so recovering the window
+        sequence transposes the two axes. Used by the stitcher and by
+        per-window (temporal) dynamics.
+        """
+        B = z.shape[0]
+        return z.reshape(B, self.d_z, self.T_bottleneck).transpose(1, 2)
+
+    def flatten_windows(self, w):
+        """Inverse of :meth:`window_latents`: ``(B, n_win, d_z) -> (B, d_z*n_win)``.
+
+        Lets callers build a latent from an explicit window sequence (e.g. a
+        constant-state block for decoding an HMM state's appearance) in the
+        exact order ``decode_full`` expects.
+        """
+        B = w.shape[0]
+        return w.transpose(1, 2).reshape(B, -1)
+
     # ---- Encoder ---------------------------------------------------------
     def encode(self, X, M, c=None):
         """Map (clip, mask) to per-window (mu, logvar), flattened.

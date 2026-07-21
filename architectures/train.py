@@ -57,7 +57,8 @@ def train(config: TrainingConfig,
           limbs: dict[str, list[int]] | None = None,
           stride: int | None = None,
           cohort_per_video: np.ndarray | list[int] | None = None,
-          init_state: dict | None = None) -> dict:
+          init_state: dict | None = None,
+          val_fraction: float | None = None) -> dict:
     """Run a full training loop.
 
     Args:
@@ -65,6 +66,12 @@ def train(config: TrainingConfig,
         videos: list of videos, each shape (F_v, J, 3).
         limbs: joint-index lists per limb name, for the limb policy.
         stride: hop between clip starts. Defaults to `clip_length // 2`.
+        val_fraction: fraction of *videos* held out for the monitoring /
+            checkpoint-selection split. ``None`` (default) uses the standard
+            0.15 video-wise hold-out. ``0.0`` trains on **all** clips — no
+            validation curve and no val-picked ``best.pt`` (the returned model
+            is the final epoch and a ``final.pt`` is written). Use ``0.0`` for a
+            committed full-data pretrain after the config is already selected.
         cohort_per_video: optional length-``len(videos)`` array of integer
             conditioning ids (e.g. cohort index, [CARE-PD §6]). Required
             when ``config.n_cond > 0``; the per-video id is broadcast to
@@ -102,8 +109,18 @@ def train(config: TrainingConfig,
 
     # ---- Data ---------------------------------------------------------
     clips, video_id, time_index = build_clips(videos, config.clip_length, stride)
-    train_mask, val_mask = train_val_split(clips, video_id)
-    print(f"[data] {len(clips)} clips, {train_mask.sum()} train, {val_mask.sum()} val")
+    if val_fraction is not None and val_fraction == 0.0:
+        # Committed full-data run: every clip trains, nothing held out.
+        train_mask = np.ones(len(clips), dtype=bool)
+        val_mask = np.zeros(len(clips), dtype=bool)
+    elif val_fraction is None:
+        train_mask, val_mask = train_val_split(clips, video_id)
+    else:
+        train_mask, val_mask = train_val_split(clips, video_id,
+                                               val_fraction=val_fraction)
+    has_val = bool(val_mask.any())
+    print(f"[data] {len(clips)} clips, {train_mask.sum()} train, {val_mask.sum()} val"
+          + ("  (training on ALL data; no val split)" if not has_val else ""))
 
     # Broadcast the per-video conditioning id to a per-clip id.
     clip_cohort = None
@@ -121,10 +138,11 @@ def train(config: TrainingConfig,
         clips[train_mask], policy, config.batch_size, shuffle=True,
         seed=config.seed,
         cohort=None if clip_cohort is None else clip_cohort[train_mask])
-    val_loader = make_loader(
+    val_loader = (make_loader(
         clips[val_mask], policy, config.batch_size, shuffle=False,
         seed=config.seed + 1,
         cohort=None if clip_cohort is None else clip_cohort[val_mask])
+        if has_val else None)
 
     # ---- Model, mixture, optimiser ------------------------------------
     device = torch.device(config.device if torch.cuda.is_available()
@@ -226,25 +244,31 @@ def train(config: TrainingConfig,
                                         n_steps=config.gm_em_steps)
             history["gm_occupancy"].append([round(float(r), 5) for r in rho])
 
-        model.eval()
-        with torch.no_grad():
-            val_stats, _ = _run_epoch(model, val_loader, config, epoch,
-                                      kl_state, None, device, train=False,
-                                      mixture=mixture, adversary=adversary)
+        if has_val:
+            model.eval()
+            with torch.no_grad():
+                val_stats, _ = _run_epoch(model, val_loader, config, epoch,
+                                          kl_state, None, device, train=False,
+                                          mixture=mixture, adversary=adversary)
+        else:
+            val_stats = {}                       # no held-out data this run
 
         history["train"].append(train_stats)
         history["val"].append(val_stats)
 
         # Pick best.pt on a KL-schedule-independent score so annealing does
-        # not lock the checkpoint onto the untrained epoch-0 model.
-        val_score = _val_selection_score(config, val_stats)
-        saved_best = val_score < best_val
-        if saved_best:
-            best_val = val_score
-            best_epoch = epoch
-            best_ckpt = out / "best.pt"
-            _save_ckpt(best_ckpt, model, mixture, config, epoch, adversary)
-            last_ckpt = best_ckpt
+        # not lock the checkpoint onto the untrained epoch-0 model. With no val
+        # split there is nothing to select on — the final epoch is the model.
+        saved_best = False
+        if has_val:
+            val_score = _val_selection_score(config, val_stats)
+            saved_best = val_score < best_val
+            if saved_best:
+                best_val = val_score
+                best_epoch = epoch
+                best_ckpt = out / "best.pt"
+                _save_ckpt(best_ckpt, model, mixture, config, epoch, adversary)
+                last_ckpt = best_ckpt
 
         dt = time.time() - t0
         extra = ""
@@ -258,13 +282,16 @@ def train(config: TrainingConfig,
             extra += (f" advAcc={train_stats['adv_acc']:.2f}"
                       f" (chance {1.0 / adversary.net[-1].out_features:.2f})"
                       f" lam={_site_adv_lambda(config, epoch):.2f}")
+        # Train/val pairs in the log, or train-only when there is no val split.
+        def _tv(key):
+            t = train_stats[key]
+            return f"{t:.4f}/{val_stats[key]:.4f}" if has_val else f"{t:.4f}"
         if getattr(config, "lambda_velocity", 0.0) > 0:
-            extra += (f" vel={train_stats['rec_vel']:.4f}/"
-                      f"{val_stats['rec_vel']:.4f}")
+            extra += f" vel={_tv('rec_vel')}"
         print(f"[epoch {epoch:3d}] "
               f"beta={train_stats['beta']:.2e} "
-              f"loss={train_stats['loss']:.4f}/{val_stats['loss']:.4f} "
-              f"rec={train_stats['rec_full']:.4f}/{val_stats['rec_full']:.4f}"
+              f"loss={_tv('loss')} "
+              f"rec={_tv('rec_full')}"
               f"{extra}  ({dt:.1f} s)"
               f"{'  *best' if saved_best else ''}")
 
@@ -280,6 +307,12 @@ def train(config: TrainingConfig,
         metric = getattr(config, "checkpoint_metric", "rec_full")
         print(f"[ckpt] best.pt = epoch {best_epoch} "
               f"(val {metric}={best_val:.4f}) -> {best_ckpt}")
+    elif not has_val:
+        # No val split: there is no best.pt, so persist the final-epoch model.
+        best_ckpt = out / "final.pt"
+        _save_ckpt(best_ckpt, model, mixture, config, config.n_epochs - 1, adversary)
+        last_ckpt = best_ckpt
+        print(f"[ckpt] final.pt = last epoch -> {best_ckpt}")
 
     # Best-effort summary plots. Never let a plotting problem sink a run that
     # already trained and checkpointed: skip on a missing matplotlib, and
@@ -288,7 +321,8 @@ def train(config: TrainingConfig,
         from .visualize import plot_training_summary
         written = plot_training_summary(
             history, out_dir=out / "plots", config=config,
-            model=model, loader=val_loader, device=str(device),
+            model=model, loader=(val_loader if has_val else train_loader),
+            device=str(device),
         )
         print(f"[plots] wrote {len(written)} figure(s) to {out / 'plots'}")
     except ImportError as e:

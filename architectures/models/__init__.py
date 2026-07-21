@@ -23,6 +23,12 @@ def build_model(config):
     inpainting = config.recipe == 3
     n_dims = getattr(config, "n_dims", 3)
     if config.architecture == "temporal_transformer":
+        # The per-window latent is identical for both attention patterns; only
+        # the encoder/decoder trunk differs. "temporal" (frame tokens) is the
+        # default; "factorized" uses divided space-time attention.
+        attention = getattr(config, "transformer_attention", "temporal")
+        if attention == "anchored":            # legacy alias -> factorized
+            attention = "factorized"
         return TemporalTransformerVAE(
             T=config.clip_length,
             J=config.n_joints,
@@ -38,6 +44,7 @@ def build_model(config):
             cond_dropout=config.cond_dropout,
             n_dims=n_dims,
             downsample=getattr(config, "temporal_downsample", 4),
+            attention=attention,
         )
     if config.architecture in ("conv", "temporal_conv"):
         cls = TemporalConvVAE if config.architecture == "temporal_conv" else ConvVAE

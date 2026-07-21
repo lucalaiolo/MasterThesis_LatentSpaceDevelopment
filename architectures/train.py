@@ -56,7 +56,8 @@ def train(config: TrainingConfig,
           videos: list[np.ndarray],
           limbs: dict[str, list[int]] | None = None,
           stride: int | None = None,
-          cohort_per_video: np.ndarray | list[int] | None = None) -> dict:
+          cohort_per_video: np.ndarray | list[int] | None = None,
+          init_state: dict | None = None) -> dict:
     """Run a full training loop.
 
     Args:
@@ -68,6 +69,11 @@ def train(config: TrainingConfig,
             conditioning ids (e.g. cohort index, [CARE-PD §6]). Required
             when ``config.n_cond > 0``; the per-video id is broadcast to
             every clip cut from that video and fed to the model as ``c``.
+        init_state: optional model ``state_dict`` to warm-start from before the
+            loop (fine-tuning). Must match the config's architecture / J / D.
+            Loaded with ``strict=True`` so a shape mismatch fails loudly rather
+            than silently training from scratch. Pair with a lowered
+            ``learning_rate`` to fine-tune a pretrained checkpoint on new data.
     Returns:
         Dict with the trained model, the loss history, the fitted mixture
         prior (or None), and the path of the last checkpoint written.
@@ -124,6 +130,11 @@ def train(config: TrainingConfig,
     device = torch.device(config.device if torch.cuda.is_available()
                           or config.device == "cpu" else "cpu")
     model = build_model(config).to(device)
+    if init_state is not None:
+        # Warm-start (fine-tuning): load the pretrained weights before the
+        # optimiser is built, so its state matches the loaded parameters.
+        model.load_state_dict(init_state)
+        print("[model] warm-started from a pretrained state_dict (fine-tuning)")
     n_params = sum(p.numel() for p in model.parameters())
     kind = _model_kind(config)
     print(f"[model] {kind} ({config.architecture}), {n_params:,} parameters")

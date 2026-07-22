@@ -15,14 +15,14 @@ __all__ = [
     "posterior_geometry", "decoder_geometry", "encoder_geometry",
     "features", "masking", "dynamics", "generation", "information",
     "symmetry", "disentanglement", "two_sample", "screening", "honesty",
-    "hmm_pipeline", "hmm_report",
+    "hmm_pipeline", "hmm_report", "arhmm",
 ]
 
 
 _LAZY = {"posterior_geometry", "decoder_geometry", "encoder_geometry",
          "features", "masking", "dynamics", "generation", "information",
          "symmetry", "disentanglement", "two_sample", "screening", "honesty",
-         "hmm_pipeline", "hmm_report"}
+         "hmm_pipeline", "hmm_report", "arhmm"}
 
 
 def __getattr__(name):

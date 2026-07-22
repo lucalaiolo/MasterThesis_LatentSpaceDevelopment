@@ -289,6 +289,67 @@ def plot_clinical(panels, y, *, save=None):
 
 
 # ---------------------------------------------------------------------------
+# persist / restore the fitted HMM (joblib bundle)
+# ---------------------------------------------------------------------------
+def save_hmm(path, res, Z, lengths, vidid, *, stream=None, band=None, fps=None,
+             f_win=None, clip_len=None, n_win=None, compress=3):
+    """Dump the fitted HMM + stitch outputs so nothing has to re-run.
+
+    Matches the established bundle layout: the whole ``res`` (hmmlearn model +
+    states / means / covars / occupancy / dwell / ...), the stitched trajectory
+    ``Z`` / ``lengths`` / ``vidid`` (tiny at ``d=8``, so you skip the
+    encode-stitch on reload too), a version-proof ``model_params`` backup to
+    rebuild the emissions without a refit, and a ``meta`` block.
+    """
+    import os, joblib, hmmlearn
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    m = res["model"]
+    joblib.dump({
+        "res": res,
+        "Z": Z, "lengths": lengths, "vidid": vidid,
+        "model_params": {
+            "startprob": m.startprob_, "transmat": m.transmat_,
+            "means": m.means_, "covars": m.covars_,
+            "covariance_type": m.covariance_type},
+        "meta": {"k": res["k"], "hmmlearn": hmmlearn.__version__,
+                 "stream": stream, "band": band, "fps": fps, "f_win": f_win,
+                 "clip_len": clip_len, "n_win": n_win},
+    }, path, compress=compress)
+    print(f"[saved] {path}  ({os.path.getsize(path)/1e6:.1f} MB)  K={res['k']}")
+    return path
+
+
+def load_hmm(path):
+    """Load a :func:`save_hmm` bundle. ``d['res']['model']`` is ready to use."""
+    import joblib
+    return joblib.load(path)
+
+
+def rebuild_hmm(model_params):
+    """Reconstruct a GaussianHMM from ``model_params`` without a refit.
+
+    The version-proof fallback if ``res['model']`` ever fails to unpickle across
+    hmmlearn versions.
+    """
+    from hmmlearn.hmm import GaussianHMM
+    mp = model_params
+    ct = mp["covariance_type"]
+    m = GaussianHMM(n_components=len(mp["startprob"]), covariance_type=ct)
+    m.startprob_ = np.asarray(mp["startprob"])
+    m.transmat_ = np.asarray(mp["transmat"])
+    m.means_ = np.asarray(mp["means"])
+    # The covars_ getter always returns per-state (K, d, d) / (K, d), but the
+    # setter wants the native shape for the covariance type.
+    cov = np.asarray(mp["covars"])
+    if ct == "tied" and cov.ndim == 3:
+        cov = cov[0]                       # (d, d), shared across states
+    elif ct == "spherical" and cov.ndim == 2:
+        cov = cov[:, 0]                    # (K,)
+    m.covars_ = cov
+    return m
+
+
+# ---------------------------------------------------------------------------
 # the one call
 # ---------------------------------------------------------------------------
 def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
@@ -296,7 +357,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    band=(0.5, 2.0), selection="cv", n_splits=5, n_restarts=5,
                    n_iter=200, seed=0, top_frac=0.10,
                    video_names=None, labels=None, positive_ids=None,
-                   out_dir=None, show=True) -> dict:
+                   out_dir=None, save_hmm_to=None, show=True) -> dict:
     """Fit the HMM and render every figure in one call.
 
     Args:
@@ -313,6 +374,9 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             ``positive_ids`` to derive labels; omit all three to skip the
             clinical test.
         out_dir: if set, every figure is saved there as PNG.
+        save_hmm_to: if set, the fitted HMM + stitch outputs are dumped there as
+            a joblib bundle (see :func:`save_hmm`) so a reload skips both the
+            encode-stitch and the refit.
         show: call ``plt.show()`` on each figure (notebook display).
 
     Returns:
@@ -355,6 +419,11 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     feats = np.concatenate([occ, np.nan_to_num(dwell)], axis=1)
     band_states = lab["in_band_states"]
     print(f"[pheno]  feature matrix {feats.shape} (occupancy K + dwell K)")
+
+    # optional: persist the fitted HMM + stitch outputs (joblib bundle)
+    if save_hmm_to:
+        save_hmm(save_hmm_to, res, Z, lengths, vidid, stream=stream, band=band,
+                 fps=fps, f_win=f_win, clip_len=clip_len, n_win=n_win)
 
     # 4. figures
     figs["transition"] = plot_transition(res, save=_save("transition"))

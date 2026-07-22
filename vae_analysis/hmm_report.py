@@ -355,7 +355,7 @@ def rebuild_hmm(model_params):
 def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    stream="pose", n_win=None, k_range=range(2, 9), fps=25,
                    band=(0.5, 2.0), selection="cv", n_splits=5, n_restarts=5,
-                   n_iter=200, seed=0, top_frac=0.10,
+                   n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
                    video_names=None, labels=None, positive_ids=None,
                    out_dir=None, save_hmm_to=None, show=True) -> dict:
     """Fit the HMM and render every figure in one call.
@@ -407,7 +407,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     # 2. fit HMM + frequency labels
     res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
                     n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter, seed=seed,
-                    verbose=True)
+                    n_jobs=n_jobs, verbose=True)
     lab = H.label_state_frequencies(res, band=band)
     K = res["k"]
     print(f"[hmm]    K={K} cov={res['regularisation']['final_covariance_type']} "

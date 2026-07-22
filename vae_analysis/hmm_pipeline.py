@@ -384,7 +384,8 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
             min_covar: float = 1e-3, n_restarts: int = 5, n_iter: int = 200,
             selection: str = "cv", n_splits: int = 5, val_fraction: float = 0.2,
             seed: int = 0, cond_ceiling: float = 1e8,
-            occupancy_floor_factor: float = 10.0) -> dict:
+            occupancy_floor_factor: float = 10.0, verbose: bool = False,
+            n_jobs: int = 1) -> dict:
     """Fit a Gaussian HMM over the stitched window trajectory.
 
     Full covariance is the a-priori family (Proposition 2.3 — affine-invariant,
@@ -451,36 +452,61 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
     splits = make_splits()
 
     # ---- select K -----------------------------------------------------------
-    scores, bics = {}, {}
-    for k in ks:
-        # BIC on a full-data fit (reported alongside).
+    import time as _time
+    n_fits_per_k = n_restarts * (1 + (len(splits) if selection != "bic" else 0))
+    if verbose:
+        print(f"[fit_hmm] M={M} d={d} | K in {list(ks)} | selection={selection} "
+              f"| ~{n_fits_per_k} fits/K, {n_fits_per_k * len(ks)} total | "
+              f"n_jobs={n_jobs}", flush=True)
+
+    def _eval_k(k):
+        """Score one K: full-data BIC + (for cv/loo) the held-out fold LL."""
+        _t0 = _time.time()
         full, ll_full = _best_of_restarts(Z, lengths, k, covariance_type,
                                           min_covar, n_iter, n_restarts, seed)
-        bics[k] = (-2 * ll_full + hmm_n_params(k, d, covariance_type) * np.log(M)
-                   if full is not None else np.inf)
+        bic = (-2 * ll_full + hmm_n_params(k, d, covariance_type) * np.log(M)
+               if full is not None else np.inf)
         if selection == "bic":
-            scores[k] = -bics[k]                     # higher is better
-            continue
-        # held-out mean LL per window over video-wise splits
-        fold_scores = []
-        for val_videos in splits:
-            val_set = set(val_videos.tolist())
-            train_videos = np.array([v for v in range(n_videos) if v not in val_set])
-            if len(train_videos) < 1 or len(val_videos) < 1:
-                continue
-            Ztr, ltr = _subset(Z, lengths, train_videos)
-            Zva, lva = _subset(Z, lengths, val_videos)
-            model, _ = _best_of_restarts(Ztr, ltr, k, covariance_type,
-                                        min_covar, n_iter, n_restarts, seed)
-            if model is None:
-                continue
-            try:
-                ll = model.score(Zva, lva)
-            except Exception:  # noqa: BLE001
-                continue
-            if np.isfinite(ll):
-                fold_scores.append(ll / len(Zva))    # per-window, comparable across folds
-        scores[k] = float(np.mean(fold_scores)) if fold_scores else -np.inf
+            score = -bic
+        else:
+            fold_scores = []
+            for val_videos in splits:
+                val_set = set(val_videos.tolist())
+                train_videos = np.array([v for v in range(n_videos) if v not in val_set])
+                if len(train_videos) < 1 or len(val_videos) < 1:
+                    continue
+                Ztr, ltr = _subset(Z, lengths, train_videos)
+                Zva, lva = _subset(Z, lengths, val_videos)
+                model, _ = _best_of_restarts(Ztr, ltr, k, covariance_type,
+                                            min_covar, n_iter, n_restarts, seed)
+                if model is None:
+                    continue
+                try:
+                    ll = model.score(Zva, lva)
+                except Exception:  # noqa: BLE001
+                    continue
+                if np.isfinite(ll):
+                    fold_scores.append(ll / len(Zva))
+            score = float(np.mean(fold_scores)) if fold_scores else -np.inf
+        if verbose:
+            tag = (f"cv_ll/win={score:.3f} bic={bic:.0f}" if selection != "bic"
+                   else f"bic={bic:.0f}")
+            print(f"[fit_hmm]   K={k}: {tag}  ({_time.time()-_t0:.1f}s)", flush=True)
+        return k, score, bic
+
+    # Fits across K are independent; parallelise them when n_jobs != 1. Each
+    # hmmlearn fit is single-threaded, so process parallelism is the real win.
+    if n_jobs == 1:
+        results = [_eval_k(k) for k in ks]
+    else:
+        try:
+            from joblib import Parallel, delayed
+            results = Parallel(n_jobs=n_jobs, prefer="processes")(
+                delayed(_eval_k)(k) for k in ks)
+        except ImportError:
+            results = [_eval_k(k) for k in ks]
+    scores = {k: sc for k, sc, _ in results}
+    bics = {k: bic for k, _, bic in results}
     if not scores or all(v == -np.inf for v in scores.values()):
         raise ValueError("No HMM converged for any candidate K.")
     k_best = max(scores, key=scores.get)

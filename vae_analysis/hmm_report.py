@@ -406,7 +406,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
 
     # 2. fit HMM + frequency labels
     res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
-                    n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter, seed=seed)
+                    n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter, seed=seed,
+                    verbose=True)
     lab = H.label_state_frequencies(res, band=band)
     K = res["k"]
     print(f"[hmm]    K={K} cov={res['regularisation']['final_covariance_type']} "

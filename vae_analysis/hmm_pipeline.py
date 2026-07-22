@@ -348,7 +348,7 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
             min_covar: float = 1e-3, n_restarts: int = 5, n_iter: int = 200,
             selection: str = "cv", n_splits: int = 5, val_fraction: float = 0.2,
             seed: int = 0, cond_ceiling: float = 1e8,
-            occupancy_floor_factor: float = 10.0) -> dict:
+            occupancy_floor_factor: float = 10.0, verbose: bool = False) -> dict:
     """Fit a Gaussian HMM over the stitched window trajectory.
 
     Full covariance is the a-priori family (Proposition 2.3 — affine-invariant,
@@ -415,8 +415,14 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
     splits = make_splits()
 
     # ---- select K -----------------------------------------------------------
+    import time as _time
+    n_fits_per_k = n_restarts * (1 + (len(splits) if selection != "bic" else 0))
+    if verbose:
+        print(f"[fit_hmm] M={M} d={d} | K in {list(ks)} | selection={selection} "
+              f"| ~{n_fits_per_k} fits/K, {n_fits_per_k * len(ks)} total", flush=True)
     scores, bics = {}, {}
     for k in ks:
+        _t0 = _time.time()
         # BIC on a full-data fit (reported alongside).
         full, ll_full = _best_of_restarts(Z, lengths, k, covariance_type,
                                           min_covar, n_iter, n_restarts, seed)
@@ -424,6 +430,9 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
                    if full is not None else np.inf)
         if selection == "bic":
             scores[k] = -bics[k]                     # higher is better
+            if verbose:
+                print(f"[fit_hmm]   K={k}: bic={bics[k]:.0f}  ({_time.time()-_t0:.1f}s)",
+                      flush=True)
             continue
         # held-out mean LL per window over video-wise splits
         fold_scores = []
@@ -445,6 +454,9 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
             if np.isfinite(ll):
                 fold_scores.append(ll / len(Zva))    # per-window, comparable across folds
         scores[k] = float(np.mean(fold_scores)) if fold_scores else -np.inf
+        if verbose:
+            print(f"[fit_hmm]   K={k}: cv_ll/win={scores[k]:.3f} bic={bics[k]:.0f}  "
+                  f"({_time.time()-_t0:.1f}s)", flush=True)
     if not scores or all(v == -np.inf for v in scores.values()):
         raise ValueError("No HMM converged for any candidate K.")
     k_best = max(scores, key=scores.get)

@@ -758,3 +758,107 @@ def cluster_phenotypes(features: np.ndarray, *, k_range=range(2, 7),
         out["ari"] = float(adjusted_rand_score(labels, best["labels"]))
         out["ami"] = float(adjusted_mutual_info_score(labels, best["labels"]))
     return out
+
+
+# ---------------------------------------------------------------------------
+# 6. State movement dynamics — high-velocity frames per body group per state
+#    (the "what does each state mean, kinematically" figure)
+# ---------------------------------------------------------------------------
+def body_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
+    """Collapse the skeleton's limb map into head / arms / legs joint groups.
+
+    Merges left+right arms and left+right legs; head is whatever the skeleton
+    labels ``head``. Works for BODY-15 / COCO-18 limb maps.
+    """
+    def _merge(*names):
+        out = []
+        for n in names:
+            out += list(limbs.get(n, []))
+        return sorted(set(out))
+    return {"head": _merge("head"),
+            "arms": _merge("right_arm", "left_arm"),
+            "legs": _merge("right_leg", "left_leg")}
+
+
+def _kept_window_frame_spans(F: int, clip_len: int, stride: int, n_win: int,
+                             keep: tuple[int, int] | None) -> list[tuple[int, int]]:
+    """Frame span (start, end) of every kept window, in the trajectory's order.
+
+    Mirrors :func:`encode_window_sequence`'s crop/keep logic exactly (clip-major,
+    then the kept window range within each clip), so the spans line up 1:1 with
+    the stitched trajectory and hence with ``res['states']``.
+    """
+    l = clip_len // n_win
+    step_win = stride // l
+    if keep is None:
+        lo = (n_win - step_win) // 2
+        keep = (lo, lo + step_win)
+    lo, hi = keep
+    spans = []
+    for s in _clip_starts(F, clip_len, stride):
+        for w in range(lo, hi):
+            spans.append((s + w * l, s + (w + 1) * l))
+    return spans
+
+
+def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.ndarray,
+                            *, groups: dict[str, list[int]], clip_len: int,
+                            stride: int, n_win: int, keep: tuple[int, int] | None = None,
+                            top_frac: float = 0.10) -> dict:
+    """Per-state % of high-velocity frames for each body-point group, per video.
+
+    Reproduces the "state movement dynamics" figure (kinematic meaning of each
+    HMM state). For each video and body point, the frames in its top
+    ``top_frac`` by speed are the "high-velocity" frames. Each Viterbi window
+    state is mapped to its ``l`` frames; then for each ``(state, group)`` the
+    metric is **the percentage of that state's frames that are high-velocity,
+    averaged over the group's body points** — one value per video.
+
+    Requires the **pose** stream (window state ~ pose window). ``videos`` must be
+    the same list passed to :func:`stitch_dataset`; videos too short for one clip
+    are skipped identically here so the blocks line up with ``lengths``.
+
+    Returns:
+        Dict ``{state: {group: np.ndarray of per-video percentages}}`` (NaN for a
+        video that never visits that state), plus ``"k"`` and ``"groups"``.
+    """
+    states = np.asarray(res["states"])
+    K = res["k"]
+    kept = [v for v in videos
+            if len(_clip_starts(len(v), clip_len, stride)) > 0]
+    if len(kept) != len(lengths):
+        raise ValueError(
+            f"{len(kept)} stitchable videos but {len(lengths)} trajectory "
+            f"blocks — pass the same videos / clip_len / stride as stitch_dataset.")
+
+    out = {s: {g: [] for g in groups} for s in range(K)}
+    offset = 0
+    for video, L in zip(kept, lengths):
+        st = states[offset:offset + L]
+        offset += L
+        spans = _kept_window_frame_spans(len(video), clip_len, stride, n_win, keep)
+        if len(spans) != L:
+            raise ValueError(f"span/state length mismatch ({len(spans)} vs {L}).")
+        # per-frame, per-joint speed; high-velocity = top `top_frac` per joint.
+        speed = np.linalg.norm(np.diff(np.asarray(video, float), axis=0), axis=-1)
+        speed = np.vstack([speed, speed[-1:]])           # pad to F frames
+        thr = np.quantile(speed, 1.0 - top_frac, axis=0)  # (J,)
+        hv = speed >= thr[None, :]                        # (F, J) bool
+        F = len(video)
+        for s in range(K):
+            frames_s = []
+            for (a, b), ws in zip(spans, st):
+                if ws == s:
+                    frames_s.extend(range(a, min(b, F)))
+            for g, joints in groups.items():
+                if frames_s:
+                    pct = 100.0 * hv[np.ix_(np.asarray(frames_s), joints)].mean()
+                else:
+                    pct = np.nan
+                out[s][g].append(pct)
+    for s in range(K):
+        for g in groups:
+            out[s][g] = np.asarray(out[s][g], float)
+    out["k"] = K
+    out["groups"] = list(groups)
+    return out

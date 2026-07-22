@@ -117,7 +117,12 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
             list, so variable lengths are native — no boundary stitching).
         k_range: candidate state counts. A single value (e.g. ``range(9, 10)``)
             forces K.
-        lags: AR order p (1 = depends on the previous window only).
+        lags: AR order p — an ``int`` (fixed) or an iterable such as ``[1, 2, 3]``
+            to sweep. When a list is given, ``(K, lags)`` are selected **jointly**
+            by the same held-out criterion (predictive LL, so a higher-order
+            model only wins if it generalises). Each extra lag adds ``D`` columns
+            to every state's dynamics matrix, so higher orders need more windows
+            per state and cost more per fit.
         f_win: window sampling rate (Hz), for dwell seconds / the frequency map.
         selection: ``"cv"`` (mean held-out LL/window over ``n_splits`` video-wise
             splits) or ``"none"`` (fit each K on all data, pick best train LL).
@@ -135,10 +140,12 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
     ks = [k for k in k_range if 2 <= k <= max(2, min(n_videos, len(Z) // 5))]
     if not ks:
         raise ValueError(f"no candidate K in {list(k_range)} fits the data budget.")
+    lag_list = [int(lags)] if np.isscalar(lags) else [int(p) for p in lags]
+    candidates = [(k, p) for k in ks for p in lag_list]
 
     if verbose:
-        print(f"[arhmm] M={len(Z)} d={D} lags={lags} | K in {ks} | "
-              f"selection={selection}", flush=True)
+        print(f"[arhmm] M={len(Z)} d={D} | K in {ks} | lags in {lag_list} | "
+              f"selection={selection} | {len(candidates)} candidates", flush=True)
 
     def video_splits():
         out = []
@@ -149,14 +156,14 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
         return out
 
     scores = {}
-    for k in ks:
+    for k, p in candidates:
         t0 = _time.time()
         if selection == "cv":
             fold = []
             for val_set in video_splits():
                 tr = [datas_all[i] for i in range(n_videos) if i not in val_set]
                 va = [datas_all[i] for i in range(n_videos) if i in val_set]
-                m, _ = _best_of_restarts(tr, k, D, lags, n_iters, tol, n_restarts, seed)
+                m, _ = _best_of_restarts(tr, k, D, p, n_iters, tol, n_restarts, seed)
                 if m is None:
                     continue
                 try:
@@ -164,28 +171,30 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
                     fold.append(ll / max(nva, 1))
                 except Exception:  # noqa: BLE001
                     continue
-            scores[k] = float(np.mean(fold)) if fold else -np.inf
+            scores[(k, p)] = float(np.mean(fold)) if fold else -np.inf
         else:
-            _, ll = _best_of_restarts(datas_all, k, D, lags, n_iters, tol,
+            _, ll = _best_of_restarts(datas_all, k, D, p, n_iters, tol,
                                       n_restarts, seed)
-            scores[k] = ll
+            scores[(k, p)] = ll
         if verbose:
-            print(f"[arhmm]   K={k}: score={scores[k]:.3f}  ({_time.time()-t0:.1f}s)",
-                  flush=True)
+            print(f"[arhmm]   K={k} lags={p}: score={scores[(k, p)]:.3f}  "
+                  f"({_time.time()-t0:.1f}s)", flush=True)
 
     if not scores or all(v == -np.inf for v in scores.values()):
-        raise ValueError("no AR-HMM converged for any candidate K.")
-    k_best = max(scores, key=scores.get)
+        raise ValueError("no AR-HMM converged for any candidate (K, lags).")
+    k_best, lag_best = max(scores, key=scores.get)
 
-    # final fit on ALL data at K*
-    model, _ = _best_of_restarts(datas_all, k_best, D, lags, n_iters, tol,
+    # final fit on ALL data at the chosen (K*, lags*)
+    model, _ = _best_of_restarts(datas_all, k_best, D, lag_best, n_iters, tol,
                                  max(n_restarts, 2), seed)
     if model is None:
-        raise ValueError("final AR-HMM fit failed at K*.")
+        raise ValueError("final AR-HMM fit failed at (K*, lags*).")
     res = _res_from_model(model, datas_all, lengths, k_best, f_win)
     res["selection"] = selection
-    res["selection_scores"] = scores
+    res["selection_scores"] = scores        # keyed by (K, lags)
+    res["lags"] = lag_best
     if verbose:
-        print(f"[arhmm] K*={k_best} occ={np.round(res['occupancy'], 2)} "
+        print(f"[arhmm] K*={k_best} lags*={lag_best} "
+              f"occ={np.round(res['occupancy'], 2)} "
               f"dwell_s={np.round(res['dwell_seconds'], 2)}", flush=True)
     return res

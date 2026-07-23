@@ -57,6 +57,11 @@ def _runs(seq, K):
     return runs
 
 
+# Captures the last exception text so an all-``-inf`` sweep can explain itself
+# instead of silently reporting no score (the errors are otherwise swallowed).
+_ERRBOX = {"msg": None}
+
+
 def _fit_one(datas, K, D, lags, n_iters, tol, seed):
     """One ssm AR-HMM EM fit; returns (model, train_loglik) or (None, -inf)."""
     import ssm
@@ -66,10 +71,14 @@ def _fit_one(datas, K, D, lags, n_iters, tol, seed):
                         observation_kwargs=dict(lags=lags))
         lls = model.fit(datas, method="em", num_iters=n_iters, tolerance=tol,
                         verbose=0)
-    except Exception:  # noqa: BLE001 — degenerate init; caller retries/skips
+    except Exception as e:  # noqa: BLE001 — degenerate init; caller retries/skips
+        _ERRBOX["msg"] = f"{type(e).__name__}: {e}"
         return None, -np.inf
     ll = float(lls[-1])
-    return (model, ll) if np.isfinite(ll) else (None, -np.inf)
+    if not np.isfinite(ll):
+        _ERRBOX["msg"] = f"train log-likelihood was {ll} (non-finite)"
+        return None, -np.inf
+    return model, ll
 
 
 def _best_of_restarts(datas, K, D, lags, n_iters, tol, n_restarts, seed):
@@ -143,6 +152,22 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
     lag_list = [int(lags)] if np.isscalar(lags) else [int(p) for p in lags]
     candidates = [(k, p) for k in ks for p in lag_list]
 
+    # ---- fail loud on the two things that turn every fit into -inf ----------
+    if not np.isfinite(Z).all():
+        bad = int((~np.isfinite(Z)).any(axis=1).sum())
+        raise ValueError(
+            f"Z has non-finite values ({bad} rows with NaN/Inf). The AR-HMM "
+            f"cannot fit — check the stitched latent / encoder output before "
+            f"fitting (a static HMM may tolerate what ssm does not).")
+    lag_max = max(lag_list)
+    short = [i for i, dd in enumerate(datas_all) if len(dd) <= lag_max]
+    if short:
+        raise ValueError(
+            f"{len(short)} video(s) have <= {lag_max} windows — too short for AR "
+            f"lags={lag_max} (each sequence needs > lags points). Lower `lags`, "
+            f"or drop the short recordings.")
+    _ERRBOX["msg"] = None
+
     if verbose:
         print(f"[arhmm] M={len(Z)} d={D} | K in {ks} | lags in {lag_list} | "
               f"selection={selection} | {len(candidates)} candidates", flush=True)
@@ -168,9 +193,12 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
                     continue
                 try:
                     ll = m.log_likelihood(va); nva = sum(len(v) for v in va)
-                    fold.append(ll / max(nva, 1))
-                except Exception:  # noqa: BLE001
-                    continue
+                    if np.isfinite(ll):
+                        fold.append(ll / max(nva, 1))
+                    else:
+                        _ERRBOX["msg"] = f"held-out log-likelihood was {ll}"
+                except Exception as e:  # noqa: BLE001
+                    _ERRBOX["msg"] = f"log_likelihood raised {type(e).__name__}: {e}"
             scores[(k, p)] = float(np.mean(fold)) if fold else -np.inf
         else:
             _, ll = _best_of_restarts(datas_all, k, D, p, n_iters, tol,
@@ -181,7 +209,15 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
                   f"({_time.time()-t0:.1f}s)", flush=True)
 
     if not scores or all(v == -np.inf for v in scores.values()):
-        raise ValueError("no AR-HMM converged for any candidate (K, lags).")
+        why = _ERRBOX["msg"] or "unknown (no exception captured)"
+        raise ValueError(
+            f"AR-HMM scored -inf for every (K, lags): the fits ran but produced "
+            f"no finite score. Underlying cause: {why}. "
+            f"Most common: an incompatible `ssm` install — verify "
+            f"ssm.__file__ points at the git build and its primitives import "
+            f"logsumexp from autograd.scipy.special (not scipy.misc); reinstall "
+            f"from git and RESTART the runtime. Otherwise check Z for degenerate "
+            f"(near-constant) dimensions.")
     k_best, lag_best = max(scores, key=scores.get)
 
     # final fit on ALL data at the chosen (K*, lags*)

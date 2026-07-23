@@ -229,6 +229,46 @@ def plot_movement_dynamics(videos, res, lengths, bones, *, clip_len, stride,
     return fig
 
 
+def plot_velocity_boxplot(dyn, *, group_colors, group_hatch=None,
+                          title="state movement dynamics", save=None):
+    """Fig-3b: grouped boxplots of % high-velocity frames per body group / state.
+
+    ``dyn`` is the output of :func:`hmm_pipeline.state_movement_dynamics`; one dot
+    per video, box = median + IQR. ``group_colors`` (and optional ``group_hatch``)
+    map each group name to its style — e.g. head/arms/legs, or the lateral
+    left_arm/right_arm/left_leg/right_leg for a left-vs-right asymmetry read.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+    K = dyn["k"]; gnames = dyn["groups"]; group_hatch = group_hatch or {}
+    fig, ax = plt.subplots(figsize=(1.7 * K + 2, 4.4))
+    width = 0.82 / len(gnames); rng = np.random.default_rng(0)
+    for gi, g in enumerate(gnames):
+        col = group_colors.get(g, "0.6"); hatch = group_hatch.get(g, "")
+        positions, data = [], []
+        for s in range(K):
+            vals = dyn[s][g]; vals = vals[~np.isnan(vals)]
+            pos = s + (gi - (len(gnames) - 1) / 2) * width
+            positions.append(pos); data.append(vals)
+            ax.scatter(pos + rng.uniform(-width * 0.26, width * 0.26, len(vals)),
+                       vals, s=13, color=col, edgecolor="none", alpha=0.5, zorder=3)
+        bp = ax.boxplot(data, positions=positions, widths=width * 0.85,
+                        patch_artist=True, showfliers=False,
+                        medianprops=dict(color="black"), zorder=2)
+        for box in bp["boxes"]:
+            box.set(facecolor=col, alpha=0.45, edgecolor="grey", hatch=hatch)
+    handles = [Patch(facecolor=group_colors.get(g, "0.6"), alpha=.6,
+                     hatch=group_hatch.get(g, ""), label=g) for g in gnames]
+    ax.legend(handles=handles, frameon=False, loc="upper left",
+              ncol=min(len(gnames), 4), fontsize=8)
+    ax.set_xticks(range(K)); ax.set_xticklabels([f"state {s}" for s in range(K)])
+    ax.set_ylabel("% high velocity frames"); ax.set_ylim(bottom=0)
+    ax.set_title(title); ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    if save: fig.savefig(save, dpi=200, bbox_inches="tight")
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # clinical test (labels enter here only)
 # ---------------------------------------------------------------------------
@@ -366,7 +406,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    stream="pose", n_win=None, k_range=range(2, 9), fps=25,
                    band=(0.5, 2.0), selection="cv", n_splits=5, n_restarts=5,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
-                   model="hmm", lags=1,
+                   model="hmm", lags=1, velocity_grouping="regions",
                    video_names=None, labels=None, positive_ids=None,
                    out_dir=None, save_hmm_to=None, show=True) -> dict:
     """Fit the HMM and render every figure in one call.
@@ -392,6 +432,10 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             for the AR path, and ``n_jobs`` does not apply to it.
         lags: AR order for ``model="arhmm"`` — an int or a list to sweep
             (jointly selected with K). Ignored for ``model="hmm"``.
+        velocity_grouping: body grouping for the Fig-3b velocity boxplot —
+            ``"regions"`` (head/arms/legs, default), ``"lateral"`` (left_arm/
+            right_arm/left_leg/right_leg, for left-vs-right asymmetry), or
+            ``"side"`` (whole left vs whole right).
         out_dir: if set, every figure is saved there as PNG.
         save_hmm_to: if set, the fitted model + stitch outputs are dumped there as
             a joblib bundle (see :func:`save_hmm`) so a reload skips both the
@@ -468,6 +512,32 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     figs["movement_dynamics"] = plot_movement_dynamics(
         videos, res, lengths, bones, clip_len=clip_len, stride=stride, n_win=n_win,
         stream=stream, lab=lab, save=_save("movement_dynamics"))
+
+    # velocity boxplot (Fig-3b): % high-velocity frames per body group per state
+    try:
+        if velocity_grouping == "lateral":
+            vgroups = H.lateral_groups(limbs)
+            vcolors = {"left_arm": "#3B7DD8", "right_arm": "#D8503B",
+                       "left_leg": "#3B7DD8", "right_leg": "#D8503B"}
+            vhatch = {"left_leg": "//", "right_leg": "//"}
+            vtitle = "state movement dynamics — left vs right (arm / leg)"
+        elif velocity_grouping == "side":
+            vgroups = H.side_groups(limbs)
+            vcolors = {"left": "#3B7DD8", "right": "#D8503B"}; vhatch = None
+            vtitle = "state movement dynamics — left vs right"
+        else:  # "regions"
+            vgroups = H.body_groups(limbs)
+            vcolors = {"head": "#E8998D", "arms": "#EAD7A0", "legs": "#8FBF9F"}
+            vhatch = None
+            vtitle = "state movement dynamics — head / arms / legs"
+        dyn = H.state_movement_dynamics(videos, res, lengths, groups=vgroups,
+                                        clip_len=clip_len, stride=stride,
+                                        n_win=n_win, top_frac=top_frac)
+        figs["velocity_boxplot"] = plot_velocity_boxplot(
+            dyn, group_colors=vcolors, group_hatch=vhatch, title=vtitle,
+            save=_save("velocity_boxplot"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[plots] velocity_boxplot skipped: {e}")
 
     # 5. clinical test (labels enter here only)
     clinical = None

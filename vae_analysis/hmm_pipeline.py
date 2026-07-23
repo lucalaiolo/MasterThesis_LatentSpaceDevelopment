@@ -770,6 +770,30 @@ def body_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
             "legs": _merge("right_leg", "left_leg")}
 
 
+def lateral_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
+    """Four lateralized limb groups: left_arm, right_arm, left_leg, right_leg.
+
+    For reading left/right movement **asymmetry** per state (fidgety movements
+    are roughly symmetric, so a consistent left-right gap is worth flagging).
+    """
+    out = {}
+    for name in ("left_arm", "right_arm", "left_leg", "right_leg"):
+        if limbs.get(name):
+            out[name] = sorted(set(limbs[name]))
+    return out
+
+
+def side_groups(limbs: dict[str, list[int]], include_head: bool = False
+                ) -> dict[str, list[int]]:
+    """Whole-side groups: all left limbs vs all right limbs (optional head)."""
+    L = sorted(set(list(limbs.get("left_arm", [])) + list(limbs.get("left_leg", []))))
+    R = sorted(set(list(limbs.get("right_arm", [])) + list(limbs.get("right_leg", []))))
+    out = {"left": L, "right": R}
+    if include_head and limbs.get("head"):
+        out["head"] = sorted(set(limbs["head"]))
+    return out
+
+
 def _kept_window_frame_spans(F: int, clip_len: int, stride: int, n_win: int,
                              keep: tuple[int, int] | None) -> list[tuple[int, int]]:
     """Frame span (start, end) of every kept window, in the trajectory's order.

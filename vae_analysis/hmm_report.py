@@ -304,16 +304,26 @@ def save_hmm(path, res, Z, lengths, vidid, *, stream=None, band=None, fps=None,
     import os, joblib, hmmlearn
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     m = res["model"]
+    try:                                       # hmmlearn GaussianHMM
+        model_params = {
+            "startprob": m.startprob_, "transmat": m.transmat_,
+            "means": m.means_, "covars": m.covars_,
+            "covariance_type": m.covariance_type}
+    except AttributeError:                     # ssm AR-HMM (no hmmlearn attrs)
+        model_params = {
+            "transmat": np.asarray(res["transition"]),
+            "ar_As": res.get("ar_As"), "ar_bs": res.get("ar_bs"),
+            "ar_Sigmas": res.get("ar_Sigmas"),
+            "covariance_type": res.get("regularisation", {}).get(
+                "final_covariance_type", "ar")}
     joblib.dump({
         "res": res,
         "Z": Z, "lengths": lengths, "vidid": vidid,
-        "model_params": {
-            "startprob": m.startprob_, "transmat": m.transmat_,
-            "means": m.means_, "covars": m.covars_,
-            "covariance_type": m.covariance_type},
+        "model_params": model_params,
         "meta": {"k": res["k"], "hmmlearn": hmmlearn.__version__,
                  "stream": stream, "band": band, "fps": fps, "f_win": f_win,
-                 "clip_len": clip_len, "n_win": n_win},
+                 "clip_len": clip_len, "n_win": n_win,
+                 "lags": res.get("lags")},
     }, path, compress=compress)
     print(f"[saved] {path}  ({os.path.getsize(path)/1e6:.1f} MB)  K={res['k']}")
     return path
@@ -356,6 +366,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    stream="pose", n_win=None, k_range=range(2, 9), fps=25,
                    band=(0.5, 2.0), selection="cv", n_splits=5, n_restarts=5,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
+                   model="hmm", lags=1,
                    video_names=None, labels=None, positive_ids=None,
                    out_dir=None, save_hmm_to=None, show=True) -> dict:
     """Fit the HMM and render every figure in one call.
@@ -373,10 +384,18 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             array (aligned to kept-video order) or ``video_names`` + a set of
             ``positive_ids`` to derive labels; omit all three to skip the
             clinical test.
+        model: ``"hmm"`` (static-Gaussian HMM via hmmlearn, default) or
+            ``"arhmm"`` (autoregressive HMM via ssm — each state a linear
+            dynamical regime). Everything downstream is identical; the AR path
+            skips the decoded state-appearance figure (AR states have no single
+            pose) and uses ``lags``. ``selection`` is mapped to ``"cv"``/``"none"``
+            for the AR path, and ``n_jobs`` does not apply to it.
+        lags: AR order for ``model="arhmm"`` — an int or a list to sweep
+            (jointly selected with K). Ignored for ``model="hmm"``.
         out_dir: if set, every figure is saved there as PNG.
-        save_hmm_to: if set, the fitted HMM + stitch outputs are dumped there as
+        save_hmm_to: if set, the fitted model + stitch outputs are dumped there as
             a joblib bundle (see :func:`save_hmm`) so a reload skips both the
-            encode-stitch and the refit.
+            encode-stitch and the refit. Works for both model types.
         show: call ``plt.show()`` on each figure (notebook display).
 
     Returns:
@@ -404,13 +423,22 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
           f"passed={seam['passed']}")
 
-    # 2. fit HMM + frequency labels
-    res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
-                    n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter, seed=seed,
-                    n_jobs=n_jobs, verbose=True)
+    # 2. fit the state model (static HMM or autoregressive HMM) + freq labels
+    if model == "arhmm":
+        from . import arhmm as _arhmm
+        ar_sel = "cv" if selection == "cv" else "none"
+        res = _arhmm.fit_arhmm(Z, lengths, k_range=k_range, lags=lags, f_win=f_win,
+                               selection=ar_sel, n_splits=n_splits,
+                               n_restarts=n_restarts, n_iters=n_iter, seed=seed,
+                               verbose=True)
+    else:
+        res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
+                        n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter,
+                        seed=seed, n_jobs=n_jobs, verbose=True)
     lab = H.label_state_frequencies(res, band=band)
     K = res["k"]
-    print(f"[hmm]    K={K} cov={res['regularisation']['final_covariance_type']} "
+    print(f"[{model}]  K={K} "
+          f"cov={res.get('regularisation', {}).get('final_covariance_type', '?')} "
           f"occ={np.round(res['occupancy'], 2)}")
     print(f"[freq]   implied Hz={np.round(lab['implied_hz'], 2)} "
           f"band states={lab['in_band_states']}")
@@ -429,7 +457,9 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     # 4. figures
     figs["transition"] = plot_transition(res, save=_save("transition"))
     figs["occupancy_dwell"] = plot_occupancy_dwell(occ, dwell, save=_save("occupancy_dwell"))
-    if stream == "pose":
+    # Decoded state appearance needs a per-state mean pose — pose stream, static
+    # HMM only. AR states are dynamics (no single pose), delta states are changes.
+    if stream == "pose" and model != "arhmm":
         try:
             figs["state_appearance"] = plot_state_appearances(
                 adapter, res, lab, bones, save=_save("state_appearance"))

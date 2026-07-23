@@ -887,8 +887,12 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
         st = states[offset:offset + L]
         offset += L
         spans = _kept_window_frame_spans(len(video), clip_len, stride, n_win, keep)
-        if len(spans) != L:
-            raise ValueError(f"span/state length mismatch ({len(spans)} vs {L}).")
+        # A pose stream has one state per window (len(spans) == L); the delta
+        # stream has one fewer (Δz between consecutive windows, L == n_win-1), so
+        # map each state to the first L window spans (the "from" window).
+        if len(spans) < L:
+            raise ValueError(f"fewer frame spans ({len(spans)}) than states ({L}).")
+        spans = spans[:L]
         # per-frame, per-joint speed; high-velocity = top `top_frac` per joint.
         speed = np.linalg.norm(np.diff(np.asarray(video, float), axis=0), axis=-1)
         speed = np.vstack([speed, speed[-1:]])           # pad to F frames

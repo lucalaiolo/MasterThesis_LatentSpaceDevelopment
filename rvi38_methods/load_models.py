@@ -186,16 +186,17 @@ def describe(d, indent: int = 0, maxdepth: int = 3) -> None:
         print(f"{pad}{type(d).__name__}")
         return
     for k, v in d.items():
+        key = str(k)                    # keys may be tuples, e.g. (K, n_lags)
         if isinstance(v, dict) and indent < maxdepth:
-            print(f"{pad}{k}:  dict({len(v)})")
+            print(f"{pad}{key}:  dict({len(v)})")
             describe(v, indent + 1, maxdepth)
         elif isinstance(v, np.ndarray):
             extra = f"  = {np.round(v, 4)}" if v.size <= 12 and v.ndim <= 1 else ""
-            print(f"{pad}{k:26s} ndarray {str(v.shape):16s} "
+            print(f"{pad}{key:26s} ndarray {str(v.shape):16s} "
                   f"{str(v.dtype):8s}{extra}")
         elif isinstance(v, (list, tuple)):
-            print(f"{pad}{k:26s} {type(v).__name__}({len(v)})")
+            print(f"{pad}{key:26s} {type(v).__name__}({len(v)})")
         elif isinstance(v, (int, float, str, bool, type(None))):
-            print(f"{pad}{k:26s} {type(v).__name__:8s} = {v}")
+            print(f"{pad}{key:26s} {type(v).__name__:8s} = {v}")
         else:
-            print(f"{pad}{k:26s} {type(v).__name__}")
+            print(f"{pad}{key:26s} {type(v).__name__}")

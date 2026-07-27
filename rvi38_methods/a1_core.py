@@ -383,39 +383,6 @@ def phi_excess(states, vidid, S, n_sub: int, n_perm: int = 2000, seed: int = 0,
     return acc
 
 
-def phi_z(states, vidid, S, n_sub: int, n_perm: int = 2000, seed: int = 0):
-    """The §7.4 z-score form, computed **only** to demonstrate its duration bias."""
-    rng = np.random.default_rng(seed)
-    z = np.full(n_sub, np.nan)
-    for i in range(n_sub):
-        seq = visit_sequence(states[vidid == i])
-        if len(seq) <= 2:
-            continue
-        obs = float(S[seq[:-1], seq[1:]].mean())
-        perms = rng.permuted(np.broadcast_to(seq, (n_perm, len(seq))).copy(),
-                             axis=1)
-        null = S[perms[:, :-1], perms[:, 1:]].mean(axis=1)
-        sd = null.std(ddof=1)
-        z[i] = (obs - null.mean()) / sd if sd > 0 else np.nan
-    return z
-
-
-def correlogram(states, vidid, S, n_sub: int, lags=range(1, 11),
-                n_perm: int = 400, seed: int = 0):
-    """§7.6 fluency correlogram: excess similarity at lags 1..10.
-
-    Over-segmentation of one movement into several similar states predicts a
-    lag-one spike then collapse; genuine sequencing predicts smooth decay.
-    """
-    lags = list(lags)
-    E = np.full((n_sub, len(lags)), np.nan)
-    for c, h in enumerate(lags):
-        r = phi_excess(states, vidid, S, n_sub, n_perm=n_perm, seed=seed + h,
-                       lag=h)
-        E[:, c] = r["excess"]
-    return np.array(lags), E
-
-
 def dwell_stratified(states, vidid, S, n_sub: int,
                      bins=((1, 1), (2, 2), (3, 4), (5, 8), (9, 10 ** 9)),
                      n_perm: int = 200, seed: int = 0, min_transitions: int = 5):

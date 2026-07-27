@@ -52,7 +52,7 @@ def exact_ranksum_null(ranks: np.ndarray, n1: int):
 
 
 def mannwhitney(x, y, exact: bool | None = None, n_perm: int = 200_000,
-                seed: int = 0) -> dict:
+                seed: int = 0, boot: int = 10_000) -> dict:
     """Permutation Mann-Whitney with AUC and rank-biserial effect size.
 
     Ranks are computed once on the pooled sample and only the labels are
@@ -89,8 +89,13 @@ def mannwhitney(x, y, exact: bool | None = None, n_perm: int = 200_000,
         method = f"Monte Carlo ({n_perm:,} draws)"
 
     lo, hi = hanley_mcneil_ci(auc, n1, n2)
+    bs = bootstrap_auc_ci(x, y, n_boot=boot, seed=seed) if boot else {
+        "lo": np.nan, "hi": np.nan}
     return {"auc": float(auc), "rank_biserial": float(2 * auc - 1), "p": p,
-            "n1": n1, "n2": n2, "method": method, "auc_lo": lo, "auc_hi": hi,
+            "n1": n1, "n2": n2, "method": method,
+            "auc_lo": lo, "auc_hi": hi,                       # Hanley-McNeil
+            "auc_lo_boot": bs["lo"], "auc_hi_boot": bs["hi"],  # stratified boot
+            "hm_clipped": bool(hi >= 1.0 - 1e-9 or lo <= 1e-9),
             "U": float(auc * n1 * n2)}
 
 
@@ -107,6 +112,32 @@ def hanley_mcneil_ci(auc, n1, n2, alpha=0.05):
     se = hanley_mcneil_se(auc, n1, n2)
     z = stats.norm.ppf(1 - alpha / 2)
     return float(np.clip(auc - z * se, 0, 1)), float(np.clip(auc + z * se, 0, 1))
+
+
+def bootstrap_auc_ci(x, y, n_boot: int = 10_000, alpha: float = 0.05,
+                     seed: int = 0) -> dict:
+    """Percentile CI on the AUC by resampling subjects within each group.
+
+    The Hanley-McNeil interval is a normal approximation and is unreliable at
+    n1 = 6, where it routinely runs past 1 and has to be clipped. Resampling the
+    two groups separately keeps the 6/32 allocation fixed and gives an interval
+    that cannot leave [0, 1] by construction. Both are reported (§10.2).
+    """
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    x, y = x[np.isfinite(x)], y[np.isfinite(y)]
+    n1, n2 = len(x), len(y)
+    if n1 < 2 or n2 < 2:
+        return {"lo": np.nan, "hi": np.nan, "n_boot": 0}
+    rng = np.random.default_rng(seed)
+    out = np.empty(n_boot)
+    for b in range(n_boot):
+        xb = x[rng.integers(0, n1, n1)]
+        yb = y[rng.integers(0, n2, n2)]
+        r = stats.rankdata(np.concatenate([xb, yb]))
+        out[b] = _auc_from_ranksum(r[:n1].sum(), n1, n2)
+    lo, hi = np.percentile(out, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return {"lo": float(lo), "hi": float(hi), "n_boot": n_boot,
+            "se": float(out.std(ddof=1))}
 
 
 def min_detectable_effect(n1: int, n2: int, alpha: float = 0.05,
@@ -313,49 +344,6 @@ def bca_ci(v, fn=np.median, n_boot: int = 10_000, alpha: float = 0.05,
         out.append(float(np.percentile(boot, 100 * stats.norm.cdf(adj))))
     return {"estimate": theta, "lo": out[0], "hi": out[1], "n": n,
             "z0": float(z0), "acceleration": float(acc)}
-
-
-# ---------------------------------------------------------------------------
-# §10.5 matrix association
-# ---------------------------------------------------------------------------
-def mantel(A: np.ndarray, B: np.ndarray, n_perm: int = 20_000,
-           seed: int = 0) -> dict:
-    """§10.5 Mantel test: correlation of off-diagonal entries, states permuted
-    jointly on rows and columns."""
-    A, B = np.asarray(A, float), np.asarray(B, float)
-    K = len(A)
-    off = ~np.eye(K, dtype=bool)
-    ok = np.isfinite(A) & np.isfinite(B) & off
-    r_obs = float(np.corrcoef(A[ok], B[ok])[0, 1])
-    rng = np.random.default_rng(seed)
-    cnt = 0
-    for _ in range(n_perm):
-        p = rng.permutation(K)
-        Bp = B[np.ix_(p, p)]
-        m = np.isfinite(A) & np.isfinite(Bp) & off
-        r = np.corrcoef(A[m], Bp[m])[0, 1]
-        cnt += abs(r) >= abs(r_obs) - 1e-12
-    return {"r": r_obs, "p": float((1 + cnt) / (n_perm + 1)), "n_perm": n_perm}
-
-
-def partial_mantel(A, B, C, n_perm: int = 20_000, seed: int = 0) -> dict:
-    """Mantel statistic on matrices residualised against a third (§10.5)."""
-    def resid(M, Cm, mask):
-        X = np.column_stack([np.ones(mask.sum()), Cm[mask]])
-        b, *_ = np.linalg.lstsq(X, M[mask], rcond=None)
-        return M[mask] - X @ b
-    A, B, C = map(lambda M: np.asarray(M, float), (A, B, C))
-    K = len(A)
-    off = ~np.eye(K, dtype=bool)
-    ra, rb = resid(A, C, off), resid(B, C, off)
-    r_obs = float(np.corrcoef(ra, rb)[0, 1])
-    rng = np.random.default_rng(seed)
-    cnt = 0
-    for _ in range(n_perm):
-        p = rng.permutation(K)
-        rbp = resid(B[np.ix_(p, p)], C, off)
-        cnt += abs(np.corrcoef(ra, rbp)[0, 1]) >= abs(r_obs) - 1e-12
-    return {"r": r_obs, "p": float((1 + cnt) / (n_perm + 1))}
 
 
 # ---------------------------------------------------------------------------

@@ -135,20 +135,12 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
               f"{out['tercile']['top_over_bottom']:.2f}x more likely than "
               f"dissimilar ones")
 
-    # §7.6 over-segmentation controls and the §7.4 estimator demonstration are
-    # diagnostics, not endpoints: they are skipped under --controls core.
-    if cfg["controls"] == "full":
-        lags, E = A.correlogram(st, vid, S, n_sub, range(1, 11),
-                                n_perm=cfg["n_corr"])
-        out["correlogram"] = {"lags": lags, "excess": E}
-        out["dwell_strat"] = A.dwell_stratified(st, vid, S, n_sub,
-                                                n_perm=cfg["n_dwell"])
-        out["phi_z"] = A.phi_z(st, vid, S, n_sub, n_perm=cfg["n_phi"], seed=0)
-    else:
-        out["correlogram"] = {"lags": np.array([]),
-                              "excess": np.full((n_sub, 0), np.nan)}
-        out["dwell_strat"] = []
-        out["phi_z"] = np.full(n_sub, np.nan)
+    # Dwell stratification is the over-segmentation control: it asks whether the
+    # effect is confined to the shortest dwells, which is what fragmenting one
+    # movement into several similar states would produce.
+    out["dwell_strat"] = (A.dwell_stratified(st, vid, S, n_sub,
+                                             n_perm=cfg["n_dwell"])
+                          if cfg["controls"] == "full" else [])
 
     # ---- §8 metastable decomposition ----
     Afull = model["transition"]
@@ -221,15 +213,8 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
               f"{np.mean(aris):.3f}, 95% [{out['stability']['lo']:.3f}, "
               f"{out['stability']['hi']:.3f}]")
 
-        # §10.5 Mantel is corroborative, not primary (the document says so):
-        # skipped under --controls core.
-        Cg = A.group_jump_counts(st, vid, n_sub, K)
-        out["group_jump_empirical"] = G.row_normalise(Cg)
-        if cfg["controls"] == "full":
-            out["mantel"] = ST.mantel(S, out["group_jump_empirical"],
-                                      n_perm=cfg["n_mantel"])
-            print(f"  §10.5 Mantel S vs group jump chain: r = "
-                  f"{out['mantel']['r']:+.3f}, p = {out['mantel']['p']:.3g}")
+        out["group_jump_empirical"] = G.row_normalise(
+            A.group_jump_counts(st, vid, n_sub, K))
 
     # ---- §9 mixing structure ----
     out["degenerate"] = G.degenerate_centralities(Afull)
@@ -309,15 +294,14 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
                          max_win=cfg["truncate"])["excess"]
     out["duration"] = {
         "phi_vs_logL": ST.duration_control(phi, logL),
-        "phi_z_vs_logL": ST.duration_control(res["phi_z"], logL),
         "kemeny_vs_logL": ST.duration_control(kem, logL),
         "phi_truncation": ST.ordering_stability(phi, trunc),
         "truncate_to": cfg["truncate"]}
     du = out["duration"]
-    print(f"  §7.4 duration bias: excess form rho(Phi, logL) = "
-          f"{du['phi_vs_logL']['rho']:+.3f} (p {du['phi_vs_logL']['p']:.3f}) "
-          f"vs z-score form {du['phi_z_vs_logL']['rho']:+.3f} "
-          f"(p {du['phi_z_vs_logL']['p']:.3f})")
+    print(f"  §2.3 duration: rho(Phi, logL) = {du['phi_vs_logL']['rho']:+.3f} "
+          f"(p {du['phi_vs_logL']['p']:.3f}); rho(Kemeny, logL) = "
+          f"{du['kemeny_vs_logL']['rho']:+.3f} "
+          f"(p {du['kemeny_vs_logL']['p']:.3f})")
     print(f"  §2.3 truncation to {cfg['truncate']} windows: ordering rho = "
           f"{du['phi_truncation']['rho']:+.3f}")
 
@@ -586,6 +570,64 @@ def main(argv=None):
               f"{results['replication']['ari_primary']:.3f} vs {other} "
               f"{results['replication']['ari_other']:.3f}")
 
+    # ---- plain-language summary of every test that was run ----
+    section("Statistical tests performed")
+    cl = results["clinical"]
+    r_res = results[primary]
+    w = r_res["phi_wilcoxon"]
+    ag = r_res.get("agreement")
+    sh = cl["phi_split_half"]
+    rows = [
+        ("Is fluency above zero within each infant?",
+         "Wilcoxon signed-rank on Phi, one-sided", w["p"],
+         f"{w['n_positive']}/{w['n']} infants positive"),
+        ("Does fluency reproduce across the recording?",
+         "Spearman on contiguous halves, Spearman-Brown corrected",
+         sh.get("p_half"), f"r_SB = {sh['r_sb']:.3f}"),
+        ("Do abnormal infants differ in fluency?",
+         "Mann-Whitney, exact enumeration of all label assignments",
+         cl["phi_test"]["p"], f"AUC = {cl['phi_test']['auc']:.3f}"),
+        ("Do abnormal infants differ in mixing time?",
+         "Mann-Whitney, exact enumeration of all label assignments",
+         cl["kemeny_test"]["p"], f"AUC = {cl['kemeny_test']['auc']:.3f}"),
+        ("Fluency, after correcting for testing two endpoints",
+         "maxT over the pair, resampled jointly",
+         cl["maxt"]["phi"]["p_maxT"], f"Holm {cl['holm']['phi']:.3g}"),
+        ("Mixing time, after correcting for testing two endpoints",
+         "maxT over the pair, resampled jointly",
+         cl["maxt"]["kemeny"]["p_maxT"], f"Holm {cl['holm']['kemeny']:.3g}"),
+    ]
+    if ag:
+        rows.append(("Do the dynamical and kinematic groupings agree?",
+                     "adjusted Rand index against a label-permutation null",
+                     ag["p_ari"], f"ARI = {ag['ari']:.3f}, AMI = {ag['ami']:.3f}"))
+    for nm, meth in (("phi", "Fluency"), ("kemeny", "Mixing time")):
+        if nm in cl.get("adjusted", {}):
+            rows.append((f"{meth}, with recording length partialled out",
+                         "Freedman-Lane residual permutation",
+                         cl["adjusted"][nm]["p"],
+                         f"AUC = {cl['adjusted'][nm]['auc']:.3f}"))
+    for q, meth, pv, extra in rows:
+        pstr = "n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}"
+        print(f"  {q}\n      {meth}\n      p = {pstr}   ({extra})")
+    print(f"\n  Effect sizes are AUC (= probability a random abnormal infant "
+          f"exceeds a random normal one).")
+    print(f"  AUC intervals are reported two ways: the Hanley-McNeil normal "
+          f"approximation, and\n  a percentile bootstrap resampling each group "
+          f"separately ({cl['phi_test'].get('n1', 0)} and "
+          f"{cl['phi_test'].get('n2', 0)} infants). The normal approximation "
+          f"is\n  unreliable at this sample size and is clipped at 0 and 1; "
+          f"prefer the bootstrap.")
+    for nm, key in (("Fluency", "phi_test"), ("Kemeny", "kemeny_test")):
+        r = cl[key]
+        print(f"     {nm:8s} AUC {r['auc']:.3f}  normal-approx "
+              f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}]"
+              f"{'  (CLIPPED)' if r.get('hm_clipped') else ''}"
+              f"   bootstrap [{r.get('auc_lo_boot', float('nan')):.3f}, "
+              f"{r.get('auc_hi_boot', float('nan')):.3f}]")
+    print(f"  Smallest AUC this study could detect at 80% power: "
+          f"{cl['mde']['auc']:.3f}")
+
     # ---- outputs ----
     section("Outputs")
     import pandas as pd
@@ -596,7 +638,7 @@ def main(argv=None):
         + (m["lengths"] if "lengths" in m else np.bincount(m["vidid"])),
         "n_visits": res["phi"]["n_visits"],
         "phi_excess": res["phi"]["excess"], "phi_observed": res["phi"]["observed"],
-        "phi_z": res["phi_z"], "kemeny_jumps": res["kemeny_per_subject"],
+        "kemeny_jumps": res["kemeny_per_subject"],
         "kemeny_lo": res["kemeny_lo"], "kemeny_hi": res["kemeny_hi"],
         "occupancy_entropy": cl["occupancy_entropy"],
         "mean_dwell_windows": cl["mean_dwell"]})

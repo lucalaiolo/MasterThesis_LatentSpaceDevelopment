@@ -171,44 +171,71 @@ def state_profiles(states, vidid, vids, spd, pose, geom: Geometry = GEOM,
     return a, n
 
 
-def state_labels(a: np.ndarray, free=FREE) -> list[str]:
-    """Readable state names from the §5.3 interpretation table.
+GROUPS = {
+    "head": ["Nose"],
+    "R arm": ["RShoulder", "RElbow", "RWrist"],
+    "L arm": ["LShoulder", "LElbow", "LWrist"],
+    "R leg": ["RHip", "RKnee", "RAnkle"],
+    "L leg": ["LHip", "LKnee", "LAnkle"],
+}
 
-    A naming aid for figures only: no inference depends on these strings. The
-    profile is standardised per joint across states, so a label reflects which
-    joints move *relative to the other states*, not absolute speed.
+
+def state_descriptors(a: np.ndarray, free=FREE) -> dict:
+    """Vigour and spatial pattern of each state, kept as separate quantities.
+
+    Two independent facts describe a state and must not be conflated:
+
+    * **how much** it moves — the mean RMS speed in units/second, reported
+      relative to the median state so it is comparable across fits;
+    * **which joints** move — the body-group means of the *double-centred* log
+      profile, the same representation §6 correlates. Row-centring removes
+      vigour, so this is pure spatial pattern.
+
+    Collapsing the two into one standardised score is what makes a naming rule
+    misfire: on a skewed speed distribution a moderately fast state can exceed a
+    z-score cutoff meant for the outlier burst.
     """
+    speed = a[:, free].mean(1)
+    rel = speed / max(float(np.median(speed)), 1e-12)
     lg = np.log(np.clip(a[:, free], 1e-12, None))
-    z = (lg - lg.mean(0, keepdims=True)) / (lg.std(0, keepdims=True) + 1e-12)
-    name = {j: JOINTS[j] for j in free}
-    cols = {n: i for i, n in enumerate(name.values())}
-    grp = {
-        "head": ["Nose"],
-        "R arm": ["RShoulder", "RElbow", "RWrist"],
-        "L arm": ["LShoulder", "LElbow", "LWrist"],
-        "R leg": ["RHip", "RKnee", "RAnkle"],
-        "L leg": ["LHip", "LKnee", "LAnkle"],
-    }
-    gz = {g: z[:, [cols[c] for c in cs if c in cols]].mean(1)
-          for g, cs in grp.items()}
+    dc = lg - lg.mean(0, keepdims=True)          # remove per-joint baseline
+    dc = dc - dc.mean(1, keepdims=True)          # remove vigour -> pure pattern
+    cols = {JOINTS[j]: i for i, j in enumerate(free)}
+    gz = {g: dc[:, [cols[c] for c in cs if c in cols]].mean(1)
+          for g, cs in GROUPS.items()}
+    return {"speed": speed, "relative_speed": rel, "group_pattern": gz,
+            "double_centred": dc}
+
+
+def state_labels(a: np.ndarray, free=FREE, pattern_tol: float = 0.35,
+                 bilateral_tol: float = 0.20) -> list[str]:
+    """Readable state names, as ``"<k> <vigour> (<pattern>)"``.
+
+    A naming aid for figures only — no inference depends on these strings — but
+    the vigour tier is taken from **absolute** speed relative to the median
+    state, not from a z-score, so exactly the states that are genuinely slow or
+    genuinely explosive get called so.
+    """
+    d = state_descriptors(a, free)
+    rel, gz = d["relative_speed"], d["group_pattern"]
+    tiers = ((0.5, "quiet"), (0.8, "low"), (1.3, "moderate"), (2.5, "active"))
     out = []
     for k in range(a.shape[0]):
-        vig = z[k].mean()
-        if vig <= -0.7:
-            out.append(f"{k} quiet")
-            continue
-        if vig >= 0.7:
-            out.append(f"{k} whole body")
-            continue
-        legs = (gz["R leg"][k], gz["L leg"][k])
-        arms = (gz["R arm"][k], gz["L arm"][k])
-        if min(legs) > 0.35:
-            out.append(f"{k} legs bilateral")
-        elif min(arms) > 0.35:
-            out.append(f"{k} arms bilateral")
+        vig = next((nm for thr, nm in tiers if rel[k] < thr), "burst")
+        sc = {g: gz[g][k] for g in GROUPS}
+        if max(sc.values()) - min(sc.values()) < pattern_tol:
+            pat = "diffuse"
         else:
-            best = max(gz, key=lambda g: gz[g][k])
-            out.append(f"{k} {best}" + (" mild" if gz[best][k] < 0.6 else ""))
+            arms = (sc["R arm"], sc["L arm"])
+            legs = (sc["R leg"], sc["L leg"])
+            if min(arms) > 0.15 and abs(arms[0] - arms[1]) < bilateral_tol:
+                pat = "arms bilateral"
+            elif min(legs) > 0.15 and abs(legs[0] - legs[1]) < bilateral_tol:
+                pat = "legs bilateral"
+            else:
+                rank = sorted(sc, key=lambda g: -sc[g])
+                pat = rank[0] + (f" + {rank[1]}" if sc[rank[1]] > 0.25 else "")
+        out.append(f"{k} {vig} ({pat})")
     return out
 
 

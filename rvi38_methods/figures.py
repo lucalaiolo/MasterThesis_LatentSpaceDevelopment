@@ -110,16 +110,23 @@ def fig_a1(res, results, outdir, name="A1_fluency"):
     ax = fig.add_subplot(gs[1, 1])
     lags = np.asarray(res["correlogram"]["lags"])
     E = np.asarray(res["correlogram"]["excess"], float)
-    mu = np.nanmean(E, 0)
-    se = np.nanstd(E, 0, ddof=1) / np.sqrt(np.sum(np.isfinite(E), 0))
-    ax.fill_between(lags, mu - 1.96 * se, mu + 1.96 * se, color=BLUE, alpha=.22)
-    ax.plot(lags, mu, "o-", color=BLUE, ms=4, lw=1.3)
-    ax.axhline(0, color="k", lw=.7, ls="--")
-    ax.set_xlabel("lag (state visits)")
-    ax.set_ylabel("excess similarity")
-    shape = ("smooth decay" if len(mu) > 2 and mu[1] > 0.35 * mu[0]
-             else "lag-1 spike then collapse")
-    _title(ax, "e", "Fluency correlogram (§7.6)", shape)
+    if lags.size == 0:
+        ax.text(.5, .5, "skipped\n(--controls core)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=7, color=GREY)
+        _title(ax, "e", "Fluency correlogram (§7.6)", "not run")
+        lags = None
+    if lags is not None:
+        mu = np.nanmean(E, 0)
+        se = np.nanstd(E, 0, ddof=1) / np.sqrt(np.sum(np.isfinite(E), 0))
+        ax.fill_between(lags, mu - 1.96 * se, mu + 1.96 * se, color=BLUE,
+                        alpha=.22)
+        ax.plot(lags, mu, "o-", color=BLUE, ms=4, lw=1.3)
+        ax.axhline(0, color="k", lw=.7, ls="--")
+        ax.set_xlabel("lag (state visits)")
+        ax.set_ylabel("excess similarity")
+        shape = ("smooth decay" if len(mu) > 2 and mu[1] > 0.35 * mu[0]
+                 else "lag-1 spike then collapse")
+        _title(ax, "e", "Fluency correlogram (§7.6)", shape)
 
     # f: dwell stratification
     ax = fig.add_subplot(gs[1, 2])
@@ -390,8 +397,10 @@ def fig_controls(res, results, outdir, name="A0_controls"):
     ax = fig.add_subplot(gs[0, 0])
     ax.scatter(logL, (phi - np.nanmean(phi)) / np.nanstd(phi), s=20, c=BLUE,
                label=f"excess  $\\rho$={du['phi_vs_logL']['rho']:+.2f}")
-    ax.scatter(logL, (phiz - np.nanmean(phiz)) / np.nanstd(phiz), s=20, c=POS,
-               marker="^", label=f"z-score  $\\rho$={du['phi_z_vs_logL']['rho']:+.2f}")
+    if np.isfinite(phiz).any():
+        ax.scatter(logL, (phiz - np.nanmean(phiz)) / np.nanstd(phiz), s=20,
+                   c=POS, marker="^",
+                   label=f"z-score  $\\rho$={du['phi_z_vs_logL']['rho']:+.2f}")
     ax.legend(fontsize=6.5, frameon=False)
     ax.set_xlabel("log number of visits")
     ax.set_ylabel("standardised value")
@@ -452,11 +461,17 @@ def fig_controls(res, results, outdir, name="A0_controls"):
     # e: leave-one-out stability
     ax = fig.add_subplot(gs[1, 1])
     for i, (nm, col) in enumerate((("phi", BLUE), ("kemeny", POS))):
+        if not cl.get("loo", {}).get(nm):
+            continue
         ps = [r["p"] for r in cl["loo"][nm]]
         ax.scatter(np.arange(len(ps)) + .0, ps, s=12, c=col, label=nm)
     ax.axhline(0.05, color="k", ls="--", lw=.8)
     ax.set_yscale("log")
-    ax.legend(fontsize=6.5, frameon=False)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=6.5, frameon=False)
+    else:
+        ax.text(.5, .5, "skipped\n(--controls core)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=7, color=GREY)
     ax.set_xlabel("dropped subject")
     ax.set_ylabel("p after dropping")
     _title(ax, "e", "Leave-one-out stability",

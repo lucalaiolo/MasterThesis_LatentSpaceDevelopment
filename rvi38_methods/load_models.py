@@ -174,11 +174,6 @@ def load_normalised(path: str, name: str | None = None) -> dict:
     return normalise(load(path), name or path)
 
 
-def is_arhmm(model: dict) -> bool:
-    """True when autoregressive parameters were stored (METHODS §3.1)."""
-    return "ar_As" in model
-
-
 def describe(d, indent: int = 0, maxdepth: int = 3) -> None:
     """Print the object graph of a loaded blob, arrays shown by shape/dtype."""
     pad = "  " * indent

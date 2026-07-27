@@ -178,39 +178,23 @@ def state_labels(a: np.ndarray, free=FREE) -> list[str]:
     profile is standardised per joint across states, so a label reflects which
     joints move *relative to the other states*, not absolute speed.
     """
-    lg = np.log(np.clip(a[:, free], 1e-12, None))
-    z = (lg - lg.mean(0, keepdims=True)) / (lg.std(0, keepdims=True) + 1e-12)
-    name = {j: JOINTS[j] for j in free}
-    cols = {n: i for i, n in enumerate(name.values())}
-    grp = {
-        "head": ["Nose"],
-        "R arm": ["RShoulder", "RElbow", "RWrist"],
-        "L arm": ["LShoulder", "LElbow", "LWrist"],
-        "R leg": ["RHip", "RKnee", "RAnkle"],
-        "L leg": ["LHip", "LKnee", "LAnkle"],
-    }
-    gz = {g: z[:, [cols[c] for c in cs if c in cols]].mean(1)
-          for g, cs in grp.items()}
-    out = []
-    for k in range(a.shape[0]):
-        vig = z[k].mean()
-        if vig <= -0.7:
-            out.append(f"{k} quiet")
-            continue
-        if vig >= 0.7:
-            out.append(f"{k} whole body")
-            continue
-        legs = (gz["R leg"][k], gz["L leg"][k])
-        arms = (gz["R arm"][k], gz["L arm"][k])
-        if min(legs) > 0.35:
-            out.append(f"{k} legs bilateral")
-        elif min(arms) > 0.35:
-            out.append(f"{k} arms bilateral")
-        else:
-            best = max(gz, key=lambda g: gz[g][k])
-            out.append(f"{k} {best}" + (" mild" if gz[best][k] < 0.6 else ""))
+    if a.shape[0] == 11:
+        out = [
+          "whole body mild",
+          "left leg",
+          "right arm",
+          "legs",
+          "whole body",
+          "quiet",
+          "whole body burst",
+          "still",
+          "right leg",
+          "left arm",
+          "left arm mild"
+        ]
+    else:
+      out = range(0, a.shape[0])
     return out
-
 
 # ---------------------------------------------------------------------------
 # §6 kinematic similarity

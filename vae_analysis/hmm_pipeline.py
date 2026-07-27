@@ -206,6 +206,42 @@ def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
             "max_ratio": max_ratio, "passed": bool(max_ratio < tol),
             "tol": tol}
 
+# === SOUND seam gate — replaces `assert seam["passed"]` =====================
+def seam_gate(Z, lengths, *, n_win, l, f_win, stride,
+              jump_tol=1.5, comb_tol=3.0, min_harm=2):
+    import numpy as np
+    from scipy.signal import welch
+    step, blocks = stride // l, np.cumsum(np.r_[0, lengths])
+    # (a) boundary-jump: extra step size at clip seams vs interior
+    bnd, itr = [], []
+    for a, b in zip(blocks[:-1], blocks[1:]):
+        seg = Z[a:b]
+        if len(seg) < 2: continue
+        d = np.linalg.norm(np.diff(seg, axis=0), axis=1)
+        m = (np.arange(1, len(seg)) % step == 0)
+        bnd.append(d[m]); itr.append(d[~m])
+    jump = np.concatenate(bnd).mean() / np.concatenate(itr).mean()
+    # (b) local-baseline comb test at the seam harmonics
+    Ps = []
+    for a, b in zip(blocks[:-1], blocks[1:]):
+        seg = Z[a:b]
+        if len(seg) < 4 * n_win: continue
+        f, P = welch(seg, fs=f_win, axis=0, nperseg=4 * n_win); Ps.append(P.mean(1))
+    f_seam = f_win / n_win
+    harm = f_seam * np.arange(1, 6); harm = harm[harm < f_win / 2]
+    locs = []
+    if Ps:
+        Pavg = np.mean(Ps, axis=0)
+        hbins = {int(np.argmin(np.abs(f - h))) for h in harm}
+        for h in harm:
+            b0 = int(np.argmin(np.abs(f - h)))
+            nb = [j for j in range(max(1, b0-3), min(len(f), b0+4))
+                  if j != b0 and j not in hbins]
+            locs.append(Pavg[b0] / (np.median(Pavg[nb]) + 1e-12))
+    locs = np.array(locs) if locs else np.array([np.nan])
+    n_comb = int(np.sum(locs > comb_tol))
+    return {"jump": jump, "local_harmonic": locs, "n_comb_lines": n_comb,
+            "passed": bool(jump < jump_tol and n_comb < min_harm)}
 
 # ---------------------------------------------------------------------------
 # 3. Full-covariance HMM fit  (§2, §5.2; Guardrails 2.2, 2.4, 2.5)
@@ -348,7 +384,8 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
             min_covar: float = 1e-3, n_restarts: int = 5, n_iter: int = 200,
             selection: str = "cv", n_splits: int = 5, val_fraction: float = 0.2,
             seed: int = 0, cond_ceiling: float = 1e8,
-            occupancy_floor_factor: float = 10.0) -> dict:
+            occupancy_floor_factor: float = 10.0, verbose: bool = False,
+            n_jobs: int = 1) -> dict:
     """Fit a Gaussian HMM over the stitched window trajectory.
 
     Full covariance is the a-priori family (Proposition 2.3 — affine-invariant,
@@ -415,36 +452,61 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
     splits = make_splits()
 
     # ---- select K -----------------------------------------------------------
-    scores, bics = {}, {}
-    for k in ks:
-        # BIC on a full-data fit (reported alongside).
+    import time as _time
+    n_fits_per_k = n_restarts * (1 + (len(splits) if selection != "bic" else 0))
+    if verbose:
+        print(f"[fit_hmm] M={M} d={d} | K in {list(ks)} | selection={selection} "
+              f"| ~{n_fits_per_k} fits/K, {n_fits_per_k * len(ks)} total | "
+              f"n_jobs={n_jobs}", flush=True)
+
+    def _eval_k(k):
+        """Score one K: full-data BIC + (for cv/loo) the held-out fold LL."""
+        _t0 = _time.time()
         full, ll_full = _best_of_restarts(Z, lengths, k, covariance_type,
                                           min_covar, n_iter, n_restarts, seed)
-        bics[k] = (-2 * ll_full + hmm_n_params(k, d, covariance_type) * np.log(M)
-                   if full is not None else np.inf)
+        bic = (-2 * ll_full + hmm_n_params(k, d, covariance_type) * np.log(M)
+               if full is not None else np.inf)
         if selection == "bic":
-            scores[k] = -bics[k]                     # higher is better
-            continue
-        # held-out mean LL per window over video-wise splits
-        fold_scores = []
-        for val_videos in splits:
-            val_set = set(val_videos.tolist())
-            train_videos = np.array([v for v in range(n_videos) if v not in val_set])
-            if len(train_videos) < 1 or len(val_videos) < 1:
-                continue
-            Ztr, ltr = _subset(Z, lengths, train_videos)
-            Zva, lva = _subset(Z, lengths, val_videos)
-            model, _ = _best_of_restarts(Ztr, ltr, k, covariance_type,
-                                        min_covar, n_iter, n_restarts, seed)
-            if model is None:
-                continue
-            try:
-                ll = model.score(Zva, lva)
-            except Exception:  # noqa: BLE001
-                continue
-            if np.isfinite(ll):
-                fold_scores.append(ll / len(Zva))    # per-window, comparable across folds
-        scores[k] = float(np.mean(fold_scores)) if fold_scores else -np.inf
+            score = -bic
+        else:
+            fold_scores = []
+            for val_videos in splits:
+                val_set = set(val_videos.tolist())
+                train_videos = np.array([v for v in range(n_videos) if v not in val_set])
+                if len(train_videos) < 1 or len(val_videos) < 1:
+                    continue
+                Ztr, ltr = _subset(Z, lengths, train_videos)
+                Zva, lva = _subset(Z, lengths, val_videos)
+                model, _ = _best_of_restarts(Ztr, ltr, k, covariance_type,
+                                            min_covar, n_iter, n_restarts, seed)
+                if model is None:
+                    continue
+                try:
+                    ll = model.score(Zva, lva)
+                except Exception:  # noqa: BLE001
+                    continue
+                if np.isfinite(ll):
+                    fold_scores.append(ll / len(Zva))
+            score = float(np.mean(fold_scores)) if fold_scores else -np.inf
+        if verbose:
+            tag = (f"cv_ll/win={score:.3f} bic={bic:.0f}" if selection != "bic"
+                   else f"bic={bic:.0f}")
+            print(f"[fit_hmm]   K={k}: {tag}  ({_time.time()-_t0:.1f}s)", flush=True)
+        return k, score, bic
+
+    # Fits across K are independent; parallelise them when n_jobs != 1. Each
+    # hmmlearn fit is single-threaded, so process parallelism is the real win.
+    if n_jobs == 1:
+        results = [_eval_k(k) for k in ks]
+    else:
+        try:
+            from joblib import Parallel, delayed
+            results = Parallel(n_jobs=n_jobs, prefer="processes")(
+                delayed(_eval_k)(k) for k in ks)
+        except ImportError:
+            results = [_eval_k(k) for k in ks]
+    scores = {k: sc for k, sc, _ in results}
+    bics = {k: bic for k, _, bic in results}
     if not scores or all(v == -np.inf for v in scores.values()):
         raise ValueError("No HMM converged for any candidate K.")
     k_best = max(scores, key=scores.get)
@@ -721,4 +783,136 @@ def cluster_phenotypes(features: np.ndarray, *, k_range=range(2, 7),
         labels = np.asarray(labels)
         out["ari"] = float(adjusted_rand_score(labels, best["labels"]))
         out["ami"] = float(adjusted_mutual_info_score(labels, best["labels"]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 6. State movement dynamics — high-velocity frames per body group per state
+#    (the "what does each state mean, kinematically" figure)
+# ---------------------------------------------------------------------------
+def body_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
+    """Collapse the skeleton's limb map into head / arms / legs joint groups.
+
+    Merges left+right arms and left+right legs; head is whatever the skeleton
+    labels ``head``. Works for BODY-15 / COCO-18 limb maps.
+    """
+    def _merge(*names):
+        out = []
+        for n in names:
+            out += list(limbs.get(n, []))
+        return sorted(set(out))
+    return {"head": _merge("head"),
+            "arms": _merge("right_arm", "left_arm"),
+            "legs": _merge("right_leg", "left_leg")}
+
+
+def lateral_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
+    """Four lateralized limb groups: left_arm, right_arm, left_leg, right_leg.
+
+    For reading left/right movement **asymmetry** per state (fidgety movements
+    are roughly symmetric, so a consistent left-right gap is worth flagging).
+    """
+    out = {}
+    for name in ("left_arm", "right_arm", "left_leg", "right_leg"):
+        if limbs.get(name):
+            out[name] = sorted(set(limbs[name]))
+    return out
+
+
+def side_groups(limbs: dict[str, list[int]], include_head: bool = False
+                ) -> dict[str, list[int]]:
+    """Whole-side groups: all left limbs vs all right limbs (optional head)."""
+    L = sorted(set(list(limbs.get("left_arm", [])) + list(limbs.get("left_leg", []))))
+    R = sorted(set(list(limbs.get("right_arm", [])) + list(limbs.get("right_leg", []))))
+    out = {"left": L, "right": R}
+    if include_head and limbs.get("head"):
+        out["head"] = sorted(set(limbs["head"]))
+    return out
+
+
+def _kept_window_frame_spans(F: int, clip_len: int, stride: int, n_win: int,
+                             keep: tuple[int, int] | None) -> list[tuple[int, int]]:
+    """Frame span (start, end) of every kept window, in the trajectory's order.
+
+    Mirrors :func:`encode_window_sequence`'s crop/keep logic exactly (clip-major,
+    then the kept window range within each clip), so the spans line up 1:1 with
+    the stitched trajectory and hence with ``res['states']``.
+    """
+    l = clip_len // n_win
+    step_win = stride // l
+    if keep is None:
+        lo = (n_win - step_win) // 2
+        keep = (lo, lo + step_win)
+    lo, hi = keep
+    spans = []
+    for s in _clip_starts(F, clip_len, stride):
+        for w in range(lo, hi):
+            spans.append((s + w * l, s + (w + 1) * l))
+    return spans
+
+
+def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.ndarray,
+                            *, groups: dict[str, list[int]], clip_len: int,
+                            stride: int, n_win: int, keep: tuple[int, int] | None = None,
+                            top_frac: float = 0.10) -> dict:
+    """Per-state % of high-velocity frames for each body-point group, per video.
+
+    Reproduces the "state movement dynamics" figure (kinematic meaning of each
+    HMM state). For each video and body point, the frames in its top
+    ``top_frac`` by speed are the "high-velocity" frames. Each Viterbi window
+    state is mapped to its ``l`` frames; then for each ``(state, group)`` the
+    metric is **the percentage of that state's frames that are high-velocity,
+    averaged over the group's body points** — one value per video.
+
+    Requires the **pose** stream (window state ~ pose window). ``videos`` must be
+    the same list passed to :func:`stitch_dataset`; videos too short for one clip
+    are skipped identically here so the blocks line up with ``lengths``.
+
+    Returns:
+        Dict ``{state: {group: np.ndarray of per-video percentages}}`` (NaN for a
+        video that never visits that state), plus ``"k"`` and ``"groups"``.
+    """
+    states = np.asarray(res["states"])
+    K = res["k"]
+    kept = [v for v in videos
+            if len(_clip_starts(len(v), clip_len, stride)) > 0]
+    if len(kept) != len(lengths):
+        raise ValueError(
+            f"{len(kept)} stitchable videos but {len(lengths)} trajectory "
+            f"blocks — pass the same videos / clip_len / stride as stitch_dataset.")
+
+    out = {s: {g: [] for g in groups} for s in range(K)}
+    offset = 0
+    for video, L in zip(kept, lengths):
+        st = states[offset:offset + L]
+        offset += L
+        spans = _kept_window_frame_spans(len(video), clip_len, stride, n_win, keep)
+        # A pose stream has one state per window (len(spans) == L); the delta
+        # stream has one fewer (Δz between consecutive windows, L == n_win-1), so
+        # map each state to the first L window spans (the "from" window).
+        if len(spans) < L:
+            raise ValueError(f"fewer frame spans ({len(spans)}) than states ({L}).")
+        spans = spans[:L]
+        # per-frame, per-joint speed; high-velocity = top `top_frac` per joint.
+        speed = np.linalg.norm(np.diff(np.asarray(video, float), axis=0), axis=-1)
+        speed = np.vstack([speed, speed[-1:]])           # pad to F frames
+        thr = np.quantile(speed, 1.0 - top_frac, axis=0)  # (J,)
+        hv = speed >= thr[None, :]                        # (F, J) bool
+        F = len(video)
+        for s in range(K):
+            frames_s = []
+            for (a, b), ws in zip(spans, st):
+                if ws == s:
+                    frames_s.extend(range(a, min(b, F)))
+            for g, joints in groups.items():
+                if frames_s:
+                    pct = 100.0 * hv[np.ix_(np.asarray(frames_s), joints)].mean()
+                else:
+                    pct = np.nan
+                out[s][g].append(pct)
+    for s in range(K):
+        for g in groups:
+            out[s][g] = np.asarray(out[s][g], float)
+    out["k"] = K
+    out["groups"] = list(groups)
     return out

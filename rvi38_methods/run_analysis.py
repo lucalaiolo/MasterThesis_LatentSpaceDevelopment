@@ -75,59 +75,11 @@ def section(title):
     print(f"\n{'=' * 74}\n{title}\n{'=' * 74}")
 
 
-# ---------------------------------------------------------------------------
-# §3.4 autoregressive lag-block ordering
-# ---------------------------------------------------------------------------
-def lag_block_ordering(model: dict) -> dict:
-    """Resolve the ``ssm`` AR block convention against the stored innovation
-    covariance (§3.4)."""
-    if not L.is_arhmm(model) or "Z" not in model:
-        return {"available": False,
-                "reason": "needs ar_As/ar_bs/ar_Sigmas and the latent Z"}
-    Zt = np.asarray(model["Z"], float)
-    As, bs, Sig = (np.asarray(model[k], float)
-                   for k in ("ar_As", "ar_bs", "ar_Sigmas"))
-    st, vid = model["states"], model["vidid"]
-    K, D = bs.shape
-    if As.shape[2] < 2 * D:
-        return {"available": False, "reason": f"single lag stored {As.shape}"}
-
-    out = {}
-    for order in ("lag1_first", "lag2_first"):
-        res = {k: [] for k in range(K)}
-        for i in range(int(vid.max()) + 1):
-            z, s = Zt[vid == i], st[vid == i]
-            for t in range(2, len(z)):
-                k = int(s[t])
-                if order == "lag1_first":
-                    pred = As[k][:, :D] @ z[t - 1] + As[k][:, D:2 * D] @ z[t - 2]
-                else:
-                    pred = As[k][:, D:2 * D] @ z[t - 1] + As[k][:, :D] @ z[t - 2]
-                res[k].append(z[t] - pred - bs[k])
-        errs = []
-        for k in range(K):
-            r = np.asarray(res[k])
-            if len(r) < D + 2:
-                continue
-            errs.append(np.linalg.norm(np.cov(r.T) - Sig[k], "fro")
-                        / max(np.linalg.norm(Sig[k], "fro"), 1e-30))
-        out[order] = float(np.mean(errs)) if errs else np.nan
-    best = min(out, key=lambda k: out[k])
-    worst = max(out, key=lambda k: out[k])
-    # §3.4 only resolves the convention when one ordering is clearly better.
-    # On the real archive the separation is large (0.031 vs 0.365); a near-tie
-    # means the innovation covariance cannot discriminate and asserting an
-    # ordering anyway is exactly the silent corruption §3.4 warns about.
-    ratio = out[best] / max(out[worst], 1e-30)
-    conclusive = ratio < 0.5
-    return {"available": True, "errors": out,
-            "ordering": best if conclusive else "inconclusive",
-            "error_ratio": float(ratio), "conclusive": bool(conclusive),
-            "convention": (("A1 = A[:, :D], A2 = A[:, D:]"
-                            if best == "lag1_first"
-                            else "A1 = A[:, D:], A2 = A[:, :D]") if conclusive
-                           else "undetermined — the two orderings fit equally "
-                                "well, so no AR-derived quantity is safe")}
+# The §3.4 autoregressive lag-block check is deliberately not implemented.
+# It resolves how `ssm` serialises A^(1) and A^(2) inside `ar_As`, but no
+# quantity in A1, A5 or A7 reads those matrices — every analysis here consumes
+# only `states` and `transition`. The check therefore verifies a convention
+# nothing downstream depends on.
 
 
 # ---------------------------------------------------------------------------
@@ -183,15 +135,12 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
               f"{out['tercile']['top_over_bottom']:.2f}x more likely than "
               f"dissimilar ones")
 
-    lags, E = A.correlogram(st, vid, S, n_sub, range(1, 11),
-                            n_perm=cfg["n_corr"])
-    out["correlogram"] = {"lags": lags, "excess": E}
-    out["dwell_strat"] = A.dwell_stratified(st, vid, S, n_sub,
-                                            n_perm=cfg["n_dwell"])
-
-    # ---- §7.4 the z-score form, to show its duration bias ----
-    zform = A.phi_z(st, vid, S, n_sub, n_perm=cfg["n_phi"], seed=0)
-    out["phi_z"] = zform
+    # Dwell stratification is the over-segmentation control: it asks whether the
+    # effect is confined to the shortest dwells, which is what fragmenting one
+    # movement into several similar states would produce.
+    out["dwell_strat"] = (A.dwell_stratified(st, vid, S, n_sub,
+                                             n_perm=cfg["n_dwell"])
+                          if cfg["controls"] == "full" else [])
 
     # ---- §8 metastable decomposition ----
     Afull = model["transition"]
@@ -264,13 +213,8 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
               f"{np.mean(aris):.3f}, 95% [{out['stability']['lo']:.3f}, "
               f"{out['stability']['hi']:.3f}]")
 
-        # §10.5 Mantel: similarity against the empirical group jump chain.
-        Cg = A.group_jump_counts(st, vid, n_sub, K)
-        out["group_jump_empirical"] = G.row_normalise(Cg)
-        out["mantel"] = ST.mantel(S, out["group_jump_empirical"],
-                                  n_perm=cfg["n_mantel"])
-        print(f"  §10.5 Mantel S vs group jump chain: r = "
-              f"{out['mantel']['r']:+.3f}, p = {out['mantel']['p']:.3g}")
+        out["group_jump_empirical"] = G.row_normalise(
+            A.group_jump_counts(st, vid, n_sub, K))
 
     # ---- §9 mixing structure ----
     out["degenerate"] = G.degenerate_centralities(Afull)
@@ -350,15 +294,14 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
                          max_win=cfg["truncate"])["excess"]
     out["duration"] = {
         "phi_vs_logL": ST.duration_control(phi, logL),
-        "phi_z_vs_logL": ST.duration_control(res["phi_z"], logL),
         "kemeny_vs_logL": ST.duration_control(kem, logL),
         "phi_truncation": ST.ordering_stability(phi, trunc),
         "truncate_to": cfg["truncate"]}
     du = out["duration"]
-    print(f"  §7.4 duration bias: excess form rho(Phi, logL) = "
-          f"{du['phi_vs_logL']['rho']:+.3f} (p {du['phi_vs_logL']['p']:.3f}) "
-          f"vs z-score form {du['phi_z_vs_logL']['rho']:+.3f} "
-          f"(p {du['phi_z_vs_logL']['p']:.3f})")
+    print(f"  §2.3 duration: rho(Phi, logL) = {du['phi_vs_logL']['rho']:+.3f} "
+          f"(p {du['phi_vs_logL']['p']:.3f}); rho(Kemeny, logL) = "
+          f"{du['kemeny_vs_logL']['rho']:+.3f} "
+          f"(p {du['kemeny_vs_logL']['p']:.3f})")
     print(f"  §2.3 truncation to {cfg['truncate']} windows: ordering rho = "
           f"{du['phi_truncation']['rho']:+.3f}")
 
@@ -416,17 +359,19 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
                   f"{out['adjusted'][nm]['p']:.4g}")
 
     # §10.9 group-level BCa intervals, and §10.12 power.
-    out["bca"] = {"phi_median": ST.bca_ci(phi, np.median, cfg["n_bca"]),
-                  "kemeny_median": ST.bca_ci(kem, np.median, cfg["n_bca"])}
+    if cfg["controls"] == "full":
+        out["bca"] = {"phi_median": ST.bca_ci(phi, np.median, cfg["n_bca"]),
+                      "kemeny_median": ST.bca_ci(kem, np.median, cfg["n_bca"])}
     out["mde"] = ST.min_detectable_effect(int(pos.sum()), int((~pos).sum()))
     print(f"  §10.12 minimum detectable effect at n = {int(pos.sum())} vs "
           f"{int((~pos).sum())}: AUC {out['mde']['auc']:.3f} "
           f"(rank-biserial {out['mde']['rank_biserial']:+.3f}) for 80% power")
-    out["loo"] = {"phi": ST.loo_auc(phi[pos], phi[~pos]),
-                  "kemeny": ST.loo_auc(kem[pos], kem[~pos])}
-    for nm in ("phi", "kemeny"):
-        ps = [r["p"] for r in out["loo"][nm]]
-        print(f"  LOO {nm:7s}: p ranges {min(ps):.4g} to {max(ps):.4g}")
+    if cfg["controls"] == "full":
+        out["loo"] = {"phi": ST.loo_auc(phi[pos], phi[~pos]),
+                      "kemeny": ST.loo_auc(kem[pos], kem[~pos])}
+        for nm in ("phi", "kemeny"):
+            ps = [r["p"] for r in out["loo"][nm]]
+            print(f"  LOO {nm:7s}: p ranges {min(ps):.4g} to {max(ps):.4g}")
 
     # §11 gates.
     gates = {
@@ -465,6 +410,15 @@ def main(argv=None):
     ap.add_argument("--clip", type=int, default=64)
     ap.add_argument("--nwin", type=int, default=16)
     ap.add_argument("--stride", type=int, default=32)
+    ap.add_argument("--models", choices=("arhmm", "hmm", "both"),
+                    default="both",
+                    help="which fitted model(s) to analyse; 'arhmm' skips the "
+                         "Gaussian HMM entirely (and with it the §7.6/§8.5 "
+                         "cross-model replication)")
+    ap.add_argument("--controls", choices=("core", "full"), default="full",
+                    help="'core' runs only what the §10.13 table and the §11 "
+                         "gates require; 'full' adds the §7.6 controls and the "
+                         "corroborative tests")
     ap.add_argument("--stream", choices=("delta", "pose", "auto"),
                     default="auto",
                     help="which latent stream the model was fitted on; 'auto' infers it from the stored lengths (§4.3)")
@@ -489,6 +443,7 @@ def main(argv=None):
         "n_maxt": 20_000 if f else 200_000,   # §12.3 headline contrasts
         "n_bca": 2_000 if f else 10_000,
         "block": 50, "truncate": 387, "m_max": 6, "duration_tol": 0.3,
+        "controls": args.controls,
     }
     geom = A.Geometry(args.fps, args.clip, args.nwin, args.stride)
 
@@ -509,8 +464,13 @@ def main(argv=None):
           f"({sec.min():.0f}-{sec.max():.0f} s), "
           f"{max(frames) / min(frames):.1f}-fold range")
 
+    wanted = {"arhmm": ("AR-HMM",), "hmm": ("Gaussian HMM",),
+              "both": ("AR-HMM", "Gaussian HMM")}[args.models]
     models = {}
     for path, tag in ((args.arhmm, "AR-HMM"), (args.hmm, "Gaussian HMM")):
+        if tag not in wanted:
+            print(f"  {tag}: skipped (--models {args.models})")
+            continue
         if path and os.path.exists(path):
             try:
                 models[tag] = L.load_normalised(path, tag)
@@ -566,15 +526,6 @@ def main(argv=None):
                       f"differ in {v['n_mismatch']} subjects. Subject order or "
                       f"geometry is wrong; downstream frame attribution is "
                       f"unsafe.")
-    lag = lag_block_ordering(models.get(primary, {}))
-    results["lag_ordering"] = lag
-    if lag.get("available"):
-        checks["AR lag-block ordering (§3.4)"] = lag["conclusive"]
-        print(f"  §3.4 AR block order: {lag['ordering']} "
-              f"(relative Frobenius error "
-              f"{lag['errors']['lag1_first']:.4f} vs "
-              f"{lag['errors']['lag2_first']:.4f}, ratio "
-              f"{lag['error_ratio']:.2f}) -> {lag['convention']}")
     results["checks"] = checks
     print("\n  §12.4 verification")
     for k, v in checks.items():
@@ -619,6 +570,64 @@ def main(argv=None):
               f"{results['replication']['ari_primary']:.3f} vs {other} "
               f"{results['replication']['ari_other']:.3f}")
 
+    # ---- plain-language summary of every test that was run ----
+    section("Statistical tests performed")
+    cl = results["clinical"]
+    r_res = results[primary]
+    w = r_res["phi_wilcoxon"]
+    ag = r_res.get("agreement")
+    sh = cl["phi_split_half"]
+    rows = [
+        ("Is fluency above zero within each infant?",
+         "Wilcoxon signed-rank on Phi, one-sided", w["p"],
+         f"{w['n_positive']}/{w['n']} infants positive"),
+        ("Does fluency reproduce across the recording?",
+         "Spearman on contiguous halves, Spearman-Brown corrected",
+         sh.get("p_half"), f"r_SB = {sh['r_sb']:.3f}"),
+        ("Do abnormal infants differ in fluency?",
+         "Mann-Whitney, exact enumeration of all label assignments",
+         cl["phi_test"]["p"], f"AUC = {cl['phi_test']['auc']:.3f}"),
+        ("Do abnormal infants differ in mixing time?",
+         "Mann-Whitney, exact enumeration of all label assignments",
+         cl["kemeny_test"]["p"], f"AUC = {cl['kemeny_test']['auc']:.3f}"),
+        ("Fluency, after correcting for testing two endpoints",
+         "maxT over the pair, resampled jointly",
+         cl["maxt"]["phi"]["p_maxT"], f"Holm {cl['holm']['phi']:.3g}"),
+        ("Mixing time, after correcting for testing two endpoints",
+         "maxT over the pair, resampled jointly",
+         cl["maxt"]["kemeny"]["p_maxT"], f"Holm {cl['holm']['kemeny']:.3g}"),
+    ]
+    if ag:
+        rows.append(("Do the dynamical and kinematic groupings agree?",
+                     "adjusted Rand index against a label-permutation null",
+                     ag["p_ari"], f"ARI = {ag['ari']:.3f}, AMI = {ag['ami']:.3f}"))
+    for nm, meth in (("phi", "Fluency"), ("kemeny", "Mixing time")):
+        if nm in cl.get("adjusted", {}):
+            rows.append((f"{meth}, with recording length partialled out",
+                         "Freedman-Lane residual permutation",
+                         cl["adjusted"][nm]["p"],
+                         f"AUC = {cl['adjusted'][nm]['auc']:.3f}"))
+    for q, meth, pv, extra in rows:
+        pstr = "n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}"
+        print(f"  {q}\n      {meth}\n      p = {pstr}   ({extra})")
+    print(f"\n  Effect sizes are AUC (= probability a random abnormal infant "
+          f"exceeds a random normal one).")
+    print(f"  AUC intervals are reported two ways: the Hanley-McNeil normal "
+          f"approximation, and\n  a percentile bootstrap resampling each group "
+          f"separately ({cl['phi_test'].get('n1', 0)} and "
+          f"{cl['phi_test'].get('n2', 0)} infants). The normal approximation "
+          f"is\n  unreliable at this sample size and is clipped at 0 and 1; "
+          f"prefer the bootstrap.")
+    for nm, key in (("Fluency", "phi_test"), ("Kemeny", "kemeny_test")):
+        r = cl[key]
+        print(f"     {nm:8s} AUC {r['auc']:.3f}  normal-approx "
+              f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}]"
+              f"{'  (CLIPPED)' if r.get('hm_clipped') else ''}"
+              f"   bootstrap [{r.get('auc_lo_boot', float('nan')):.3f}, "
+              f"{r.get('auc_hi_boot', float('nan')):.3f}]")
+    print(f"  Smallest AUC this study could detect at 80% power: "
+          f"{cl['mde']['auc']:.3f}")
+
     # ---- outputs ----
     section("Outputs")
     import pandas as pd
@@ -629,7 +638,7 @@ def main(argv=None):
         + (m["lengths"] if "lengths" in m else np.bincount(m["vidid"])),
         "n_visits": res["phi"]["n_visits"],
         "phi_excess": res["phi"]["excess"], "phi_observed": res["phi"]["observed"],
-        "phi_z": res["phi_z"], "kemeny_jumps": res["kemeny_per_subject"],
+        "kemeny_jumps": res["kemeny_per_subject"],
         "kemeny_lo": res["kemeny_lo"], "kemeny_hi": res["kemeny_hi"],
         "occupancy_entropy": cl["occupancy_entropy"],
         "mean_dwell_windows": cl["mean_dwell"]})

@@ -71,6 +71,44 @@ def _json_safe(o):
     return str(o)
 
 
+def resolve_state_names(amp, k: int, path: str | None = None):
+    """Names for the states, in order of preference.
+
+    1. ``--state-names FILE`` — a JSON list or one name per line. Keeping the
+       names in a data file means they survive any edit to the analysis code.
+    2. ``a1_core.state_labels(amp)``, if that function exists.
+    3. ``a1_core.state_descriptors(amp)``, if it returns a sequence of names
+       rather than the descriptor dict.
+    4. plain state numbers.
+
+    Names are only ever figure text; no statistic reads them.
+    """
+    if path:
+        with open(path) as fh:
+            raw = fh.read().strip()
+        names = (json.loads(raw) if raw.startswith("[")
+                 else [ln.strip() for ln in raw.splitlines() if ln.strip()])
+        if len(names) != k:
+            raise ValueError(f"{path} has {len(names)} names but the model has "
+                             f"{k} states")
+        return [str(n) for n in names], os.path.basename(path)
+    for fn, src in ((getattr(A, "state_labels", None), "a1_core.state_labels"),
+                    (getattr(A, "state_descriptors", None),
+                     "a1_core.state_descriptors")):
+        if fn is None:
+            continue
+        try:
+            out = fn(amp)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if isinstance(out, dict):                # the descriptor dict, not names
+            continue
+        out = [str(v) for v in out]
+        if len(out) == k:
+            return out, src
+    return [str(i) for i in range(k)], "state numbers"
+
+
 def section(title):
     print(f"\n{'=' * 74}\n{title}\n{'=' * 74}")
 
@@ -95,9 +133,10 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
     # ---- §5 state kinematic signatures ----
     amp, nframe = A.state_profiles(st, vid, vids, spd, pose, geom,
                                   union=(stream == "delta"))
-    labels_txt = A.state_labels(amp)
+    labels_txt, name_src = resolve_state_names(amp, K, cfg.get("state_names"))
     out.update({"amplitude": amp, "state_frames": nframe,
-                "state_labels": labels_txt})
+                "state_labels": labels_txt, "state_name_source": name_src})
+    print(f"  state names from {name_src}")
     print(f"  §5 profiles: frames/state {int(nframe.min()):,}..."
           f"{int(nframe.max()):,}  (>= {int(nframe.min()) * len(build_pose.FREE):,} "
           f"joint-frames each)")
@@ -410,6 +449,9 @@ def main(argv=None):
     ap.add_argument("--clip", type=int, default=64)
     ap.add_argument("--nwin", type=int, default=16)
     ap.add_argument("--stride", type=int, default=32)
+    ap.add_argument("--state-names", default=None,
+                    help="file of state names (JSON list or one per line); "
+                         "overrides whatever a1_core provides")
     ap.add_argument("--models", choices=("arhmm", "hmm", "both"),
                     default="both",
                     help="which fitted model(s) to analyse; 'arhmm' skips the "
@@ -443,7 +485,7 @@ def main(argv=None):
         "n_maxt": 20_000 if f else 200_000,   # §12.3 headline contrasts
         "n_bca": 2_000 if f else 10_000,
         "block": 50, "truncate": 387, "m_max": 6, "duration_tol": 0.3,
-        "controls": args.controls,
+        "controls": args.controls, "state_names": args.state_names,
     }
     geom = A.Geometry(args.fps, args.clip, args.nwin, args.stride)
 

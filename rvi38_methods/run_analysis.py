@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""End-to-end runner for analyses A1, A5 and A7 (METHODS §1-§12).
+"""End-to-end runner for analyses A1 and A7 plus the raw kinematics (METHODS §1-§12).
 
     python run_analysis.py --csv rvi38_analysis.csv \
         --arhmm arhmm_rvi38_stream_delta.pkl \
         --hmm hmm_rvi38_stream_delta.pkl --outdir rvi38_out
 
 The AR-HMM is the primary model and the Gaussian HMM is the independent
-replication of §7.6/§8.5. Either may be omitted: with only one model the
+replication of §7.6. Either may be omitted: with only one model the
 replication columns are reported as unavailable rather than silently skipped.
 
 Every number in the output is computed here; nothing is hard-coded. Results land
@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a1_core as A          # noqa: E402
 import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
+import a8_movement as MV     # noqa: E402
 import build_pose            # noqa: E402
 import load_models as L      # noqa: E402
 
@@ -115,7 +116,7 @@ def section(title):
 
 # The §3.4 autoregressive lag-block check is deliberately not implemented.
 # It resolves how `ssm` serialises A^(1) and A^(2) inside `ar_As`, but no
-# quantity in A1, A5 or A7 reads those matrices — every analysis here consumes
+# quantity in A1 or A7 reads those matrices — every analysis here consumes
 # only `states` and `transition`. The check therefore verifies a convention
 # nothing downstream depends on.
 
@@ -181,79 +182,12 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
                                              n_perm=cfg["n_dwell"])
                           if cfg["controls"] == "full" else [])
 
-    # ---- §8 metastable decomposition ----
+    # ---- chain matrices (consumed by the mixing analysis below) ----
     Afull = model["transition"]
     Ajump = G.jump_chain(Afull)
     out["A_full"], out["A_jump"] = Afull, Ajump
-    out["timescales_full"] = G.implied_timescales(Afull, geom.f_win)
-    out["timescales_jump"] = G.implied_timescales(Ajump, geom.f_win)
-    gr = out["timescales_jump"]["gap_ratios"]
-    print(f"  §8.2 jump-chain gap ratios t_m/t_m+1: "
-          f"{np.round(gr[:5], 2).tolist()} (max at m="
-          f"{out['timescales_jump']['m_at_max_gap']})")
-
-    sweep = []
-    for m in range(2, min(cfg["m_max"], K - 1) + 1):
-        chi, verts = G.pcca(Ajump, m)
-        a_p = chi.argmax(1)
-        a_km = G.spectral_kmeans(Ajump, m)
-        a_kin = G.kinematic_partition(S, m)
-        from sklearn.metrics import (adjusted_mutual_info_score,
-                                     adjusted_rand_score)
-        sweep.append({
-            "m": m, "crispness": G.crispness(chi),
-            "metastability": G.metastability(Ajump, a_p),
-            "ari_pcca_kin": float(adjusted_rand_score(a_p, a_kin)),
-            "ami_pcca_kin": float(adjusted_mutual_info_score(a_p, a_kin)),
-            "ari_kmeans_kin": float(adjusted_rand_score(a_km, a_kin)),
-            "ari_pcca_kmeans": float(adjusted_rand_score(a_p, a_km)),
-            "assign_pcca": a_p, "assign_kin": a_kin, "assign_kmeans": a_km,
-            "chi": chi, "vertices": verts})
-    out["pcca_sweep"] = sweep
-    best = max(sweep, key=lambda r: r["ari_pcca_kin"]) if sweep else None
-    out["m_star"] = best["m"] if best else None
-    if best:
-        print(f"  §8.5 best agreement at m = {best['m']}: ARI = "
-              f"{best['ari_pcca_kin']:.3f}, AMI = {best['ami_pcca_kin']:.3f}, "
-              f"crispness {best['crispness']:.2f}, metastability "
-              f"{best['metastability']:.2f}/{best['m']}"
-              f"  (k-means control ARI {best['ari_pcca_kmeans']:.3f})")
-        out["agreement"] = ST.partition_agreement(
-            best["assign_pcca"], best["assign_kin"], n_perm=cfg["n_ari"])
-        ag = out["agreement"]
-        print(f"     permutation null: p = {ag['p_ari']:.3g} "
-              f"({ag['n_perm']:,} draws; null mean {ag['null_mean']:+.3f})")
-
-        # §8.5 stability: resample subjects, refit the group jump chain, rerun
-        # PCCA+, compare against the *fixed* kinematic partition.
-        rng = np.random.default_rng(0)
-        aris = []
-        for _ in range(cfg["n_stability"]):
-            pick = rng.integers(0, n_sub, n_sub)
-            C = np.zeros((K, K))
-            for i in pick:
-                seq = A.visit_sequence(st[vid == i])
-                if len(seq) > 1:
-                    np.add.at(C, (seq[:-1], seq[1:]), 1.0)
-            Pb = G.row_normalise(C)
-            np.fill_diagonal(Pb, 0.0)
-            Pb = G.row_normalise(Pb)
-            try:
-                chi_b, _ = G.pcca(Pb, best["m"])
-            except np.linalg.LinAlgError:
-                continue
-            aris.append(adjusted_rand_score(chi_b.argmax(1), best["assign_kin"]))
-        aris = np.array(aris)
-        out["stability"] = {
-            "ari": aris, "mean": float(np.mean(aris)),
-            "lo": float(np.percentile(aris, 2.5)),
-            "hi": float(np.percentile(aris, 97.5)), "n": len(aris)}
-        print(f"     subject bootstrap ({len(aris)} refits): ARI mean "
-              f"{np.mean(aris):.3f}, 95% [{out['stability']['lo']:.3f}, "
-              f"{out['stability']['hi']:.3f}]")
-
-        out["group_jump_empirical"] = G.row_normalise(
-            A.group_jump_counts(st, vid, n_sub, K))
+    out["group_jump_empirical"] = G.row_normalise(
+        A.group_jump_counts(st, vid, n_sub, K))
 
     # ---- §9 mixing structure ----
     out["degenerate"] = G.degenerate_centralities(Afull)
@@ -478,14 +412,16 @@ def main(argv=None):
         "n_phi": 200 if f else 2000,          # §12.3 occupancy-matched null
         "n_corr": 100 if f else 400,
         "n_dwell": 50 if f else 200,
-        "n_ari": 10_000 if f else 200_000,    # §12.3 partition-agreement null
         "n_mantel": 2_000 if f else 20_000,   # §12.3 Mantel
-        "n_stability": 50 if f else 300,      # §12.3 subject bootstrap
         "n_block": 100 if f else 400,         # §12.3 block bootstrap
         "n_maxt": 20_000 if f else 200_000,   # §12.3 headline contrasts
         "n_bca": 2_000 if f else 10_000,
         "block": 50, "truncate": 387, "m_max": 6, "duration_tol": 0.3,
         "controls": args.controls, "state_names": args.state_names,
+        "n_comov": 2_000 if f else 20_000,   # co-movement label permutations
+        "epoch_seconds": 5.0,                # co-movement epoch length
+        "band": (0.5, 2.0),                  # fidgety band, Hz
+        "top_frac": 0.10,                    # high-velocity frame fraction
     }
     geom = A.Geometry(args.fps, args.clip, args.nwin, args.stride)
 
@@ -592,32 +528,81 @@ def main(argv=None):
         res["S"], m["n_subjects"])
     results["_halves"] = results["clinical"].pop("phi_halves", None)
 
-    # §7.6 / §8.5 replication on the independent model.
+    # §7.6 replication on the independent model.
     if len(models) > 1:
         other = [t for t in models if t != primary][0]
-        section(f"§7.6 / §8.5  Replication on the independent model ({other})")
+        section(f"§7.6  Replication on the independent model ({other})")
         r2 = results[other]
         rho, p = stats.spearmanr(res["phi"]["excess"], r2["phi"]["excess"])
-        results["replication"] = {
-            "phi_spearman": {"rho": float(rho), "p": float(p)},
-            "ari_primary": (max(res["pcca_sweep"],
-                                key=lambda r: r["ari_pcca_kin"])["ari_pcca_kin"]
-                            if res["pcca_sweep"] else None),
-            "ari_other": (max(r2["pcca_sweep"],
-                              key=lambda r: r["ari_pcca_kin"])["ari_pcca_kin"]
-                          if r2["pcca_sweep"] else None)}
+        results["replication"] = {"phi_spearman": {"rho": float(rho),
+                                                   "p": float(p)}}
         print(f"  Phi agreement across models: Spearman rho = {rho:+.3f} "
               f"(p = {p:.3g})")
-        print(f"  best metastable/kinematic ARI: {primary} "
-              f"{results['replication']['ari_primary']:.3f} vs {other} "
-              f"{results['replication']['ari_other']:.3f}")
+
+    # ---- raw-kinematic constructs: co-movement and the fidgety band ----
+    # These read raw keypoint displacements only, so they are independent of the
+    # encoder, the latent and the state model -- a third estimator alongside
+    # fluency and mixing.
+    section("Raw kinematics: limb co-movement and the fidgety band")
+    vid_arrays = [pose[v] for v in vids]
+
+    per_rec, comov_med, n_ep = MV.comovement_dataset(
+        vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"])
+    results["comovement"] = {
+        "per_recording": per_rec, "medians": comov_med, "n_epochs": n_ep,
+        "pairs": MV.PAIR_NAMES,
+        "pair_class": [MV.PAIR_CLASS[p] for p in MV.PAIRS],
+        "epoch_seconds": cfg["epoch_seconds"]}
+    print(f"  co-movement: {len(vid_arrays)} recordings, epochs/recording "
+          f"{n_ep.min()}..{n_ep.max()} (tau = {cfg['epoch_seconds']}s), "
+          f"six pairs per epoch")
+    for p, nm in enumerate(MV.PAIR_NAMES):
+        col = comov_med[:, p]
+        print(f"     {nm:7s} ({MV.PAIR_CLASS[MV.PAIRS[p]]:>13s}): "
+              f"median over subjects {np.nanmedian(col):+.3f}")
+
+    ct = MV.comovement_test(comov_med, labels, n_perm=cfg["n_comov"], seed=0)
+    results["comovement"]["test"] = ct
+    print(f"  §10 group contrast, labels permuted ({ct['n_perm']:,} draws), "
+          f"max-statistic corrected over six pairs "
+          f"[all six reported regardless]:")
+    for p, nm in enumerate(MV.PAIR_NAMES):
+        print(f"     {nm:7s}: T = {ct['observed'][p]:+.3f}  "
+              f"p_corrected = {ct['p_corrected'][p]:.4f}  "
+              f"(uncorrected {ct['p_uncorrected'][p]:.4f})")
+
+    fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
+    fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])
+    lo, hi = ST.hanley_mcneil_ci(fb["auc"], fb["n1"], fb["n2"])
+    fb["ci"] = (lo, hi)
+    results["fbr"] = {"values": fbr, "band": cfg["band"], "test": fb}
+    print(f"  fidgety band ratio {cfg['band'][0]}-{cfg['band'][1]} Hz on raw "
+          f"velocities: abnormal median {np.nanmedian(fbr[labels == 1]):.4f} vs "
+          f"normal {np.nanmedian(fbr[labels == 0]):.4f}")
+    print(f"     AUC = {fb['auc']:.3f} [{lo:.3f}, {hi:.3f}], rank-biserial "
+          f"{fb['rank_biserial']:+.3f}, p = {fb['p']:.4f}  [{fb['method']}]")
+
+    # per-state velocity profile: regions and the lateralised limbs
+    r_res = results[primary]
+    for name, groups in (("regions", MV.region_groups()),
+                         ("lateral", MV.lateral_groups())):
+        prof = MV.state_velocity_profile(
+            models[primary]["states"], models[primary]["vidid"], vid_arrays,
+            geom, groups, top_frac=cfg["top_frac"], K=r_res["k"])
+        r_res[f"velocity_profile_{name}"] = prof
+    vp = r_res["velocity_profile_regions"]
+    print(f"  per-state high-velocity fraction (top {cfg['top_frac']:.0%} of "
+          f"each joint's frames), median over subjects:")
+    for s in range(vp["k"]):
+        cells = "  ".join(f"{g}={np.nanmedian(vp[s][g]):4.1f}%"
+                          for g in vp["groups"])
+        print(f"     state {s:2d}: {cells}")
 
     # ---- plain-language summary of every test that was run ----
     section("Statistical tests performed")
     cl = results["clinical"]
     r_res = results[primary]
     w = r_res["phi_wilcoxon"]
-    ag = r_res.get("agreement")
     sh = cl["phi_split_half"]
     rows = [
         ("Is fluency above zero within each infant?",
@@ -639,10 +624,6 @@ def main(argv=None):
          "maxT over the pair, resampled jointly",
          cl["maxt"]["kemeny"]["p_maxT"], f"Holm {cl['holm']['kemeny']:.3g}"),
     ]
-    if ag:
-        rows.append(("Do the dynamical and kinematic groupings agree?",
-                     "adjusted Rand index against a label-permutation null",
-                     ag["p_ari"], f"ARI = {ag['ari']:.3f}, AMI = {ag['ami']:.3f}"))
     for nm, meth in (("phi", "Fluency"), ("kemeny", "Mixing time")):
         if nm in cl.get("adjusted", {}):
             rows.append((f"{meth}, with recording length partialled out",

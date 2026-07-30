@@ -1,8 +1,12 @@
-# RVI-38: analyses A1, A5 and A7
+# RVI-38: fluency, mixing and raw-kinematic analyses
 
-Implementation of `METHODS_3.md` — fluency (A1), metastable decomposition (A5)
-and mixing structure (A7) on the RVI-38 cohort, with the §10 inference layer and
-the §11 pre-specified gates.
+Implementation of `METHODS_3.md` — fluency (A1) and mixing structure (A7) on the
+RVI-38 cohort, plus the raw-kinematic constructs (limb co-movement for
+cramped-synchronised movements, and the fidgety band ratio), with the §10
+inference layer and the §11 pre-specified gates.
+
+The metastable decomposition (PCCA+, implied timescales, the kinematic
+dendrogram and their agreement statistics) has been removed.
 
 ## Module map (§12.2)
 
@@ -12,10 +16,11 @@ the §11 pre-specified gates.
 | `build_pose.py` | long CSV to per-video `(F,15,2)`; verifies frame contiguity and the constant-joint property |
 | `a1_core.py` | window-to-frame geometry, state profiles, double-centred similarity, fluency estimators |
 | `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
-| `a57_graph.py` | jump chain, timescales, PCCA+, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
+| `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
+| `a8_movement.py` | raw kinematics: limb co-movement (cramped-synchronised), fidgety band ratio, per-state velocity profiles |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 45 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 55 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 
 ## Run

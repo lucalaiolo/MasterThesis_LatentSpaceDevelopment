@@ -3,8 +3,8 @@
 Produces a long-format CSV and two model dumps in the schema of METHODS §3.1,
 so ``run_analysis.py`` can be exercised end to end without the real archive.
 The planted structure is deliberate: states fall into blocks that are both
-kinematically alike and dynamically connected, so A5 should recover a
-partition, and the fluency of §7 should be positive.
+kinematically alike and dynamically connected, so the fluency of §7 should
+be positive.
 
     python make_synthetic.py --outdir synth --n-subjects 38 --k 11
 """
@@ -51,7 +51,7 @@ def state_profiles(K, rng, bid=None):
 
     When ``bid`` (the transition-block id of each state) is supplied, states in
     the same dynamical block are given the same body-group signature. That is
-    the structure A5 exists to detect: the kinematic clustering and the
+    the structure the fluency analysis exists to detect: the kinematic clustering and the
     transition-derived clustering should then agree, so a synthetic run
     exercises the whole §8 chain rather than only its plumbing.
     """

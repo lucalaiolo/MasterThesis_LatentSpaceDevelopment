@@ -128,139 +128,6 @@ def fig_fluency_by_dwell(res, results, outdir):
 
 
 # ---------------------------------------------------------------------------
-# metastable structure
-# ---------------------------------------------------------------------------
-def fig_timescales(res, results, outdir):
-    """Relaxation timescales of the full and jump chains."""
-    fig, ax = plt.subplots(figsize=(5.0, 3.4))
-    for nm, key, c in (("full chain", "timescales_full", BLUE),
-                       ("jump chain", "timescales_jump", POS)):
-        t = np.asarray(res[key]["timescales_steps"], float)
-        ax.plot(range(2, 2 + len(t)), t, "o-", color=c, ms=4, lw=1.2, label=nm)
-    ax.set_xlabel("eigenvalue index $m$")
-    ax.set_ylabel("implied timescale (steps)")
-    ax.legend(fontsize=7.5, frameon=False)
-    gr = np.asarray(res["timescales_jump"]["gap_ratios"], float)
-    big = np.isfinite(gr).any() and np.nanmax(gr) >= 2.0
-    ax.set_title(f"Implied timescales\nlargest gap ratio {np.nanmax(gr):.2f} "
-                 f"at $m$={res['timescales_jump']['m_at_max_gap']} — "
-                 f"{'clean separation' if big else 'no clean separation'}",
-                 loc="left", fontsize=10)
-    return _save(fig, outdir, "implied_timescales")
-
-
-def fig_pcca(res, results, outdir):
-    """Fuzzy membership of each state in the metastable sets."""
-    sweep = res.get("pcca_sweep", [])
-    if not sweep:
-        return None
-    best = max(sweep, key=lambda r: r["ari_pcca_kin"])
-    chi = np.asarray(best["chi"], float)
-    o = np.argsort(chi.argmax(1))
-    fig, ax = plt.subplots(figsize=(4.6, 4.0))
-    im = ax.imshow(chi[o], aspect="auto", cmap="Blues", vmin=0, vmax=1)
-    ax.set_yticks(range(res["k"]))
-    ax.set_yticklabels([res["state_labels"][i] for i in o], fontsize=7)
-    ax.set_xticks(range(best["m"]))
-    ax.set_xlabel("metastable set")
-    plt.colorbar(im, ax=ax, fraction=.046, label="membership")
-    ax.set_title(f"Metastable memberships, $m$={best['m']}\n"
-                 f"crispness {best['crispness']:.2f}, metastability "
-                 f"{best['metastability']:.2f} of {best['m']}",
-                 loc="left", fontsize=10)
-    return _save(fig, outdir, "pcca_memberships")
-
-
-def fig_agreement_sweep(res, results, outdir):
-    """Agreement between the dynamical and kinematic groupings, against m."""
-    sweep = res.get("pcca_sweep", [])
-    if not sweep:
-        return None
-    best = max(sweep, key=lambda r: r["ari_pcca_kin"])
-    ms = [r["m"] for r in sweep]
-    fig, ax = plt.subplots(figsize=(5.0, 3.4))
-    ax.plot(ms, [r["ari_pcca_kin"] for r in sweep], "o-", color=GREEN, ms=5,
-            lw=1.4, label="ARI, dynamics vs kinematics")
-    ax.plot(ms, [r["ami_pcca_kin"] for r in sweep], "^:", color=BLUE, ms=4,
-            lw=1, label="AMI, dynamics vs kinematics")
-    ax.plot(ms, [r["ari_kmeans_kin"] for r in sweep], "s--", color=GREY, ms=4,
-            lw=1, label="ARI, k-means control")
-    ax.axhline(0, color="k", lw=.6)
-    ax.set_xlabel("number of sets $m$")
-    ax.set_ylabel("agreement index")
-    ax.legend(fontsize=7, frameon=False)
-    ax.set_title(f"Agreement against number of sets\npeak ARI "
-                 f"{best['ari_pcca_kin']:.3f} at $m$={best['m']}", loc="left",
-                 fontsize=10)
-    return _save(fig, outdir, "agreement_sweep")
-
-
-def fig_dendrogram(res, results, outdir):
-    """Hierarchical clustering of states by raw-velocity similarity alone."""
-    from scipy.cluster.hierarchy import dendrogram
-    import a57_graph as G
-    sweep = res.get("pcca_sweep", [])
-    best = max(sweep, key=lambda r: r["ari_pcca_kin"]) if sweep else None
-    fig, ax = plt.subplots(figsize=(5.4, 3.8))
-    Z = G.kinematic_linkage(np.asarray(res["S"]))
-    thr = Z[-(best["m"] - 1), 2] if best and best["m"] > 1 else None
-    dendrogram(Z, labels=res["state_labels"], ax=ax, leaf_font_size=7,
-               color_threshold=thr)
-    ax.tick_params(axis="x", rotation=90)
-    ax.set_ylabel("1 - kinematic similarity")
-    ax.set_title("Kinematic clustering of states\nraw velocities only, no "
-                 "transition information", loc="left", fontsize=10)
-    return _save(fig, outdir, "kinematic_dendrogram")
-
-
-def fig_ari_null(res, results, outdir):
-    """Permutation null for the agreement between the two groupings."""
-    ag = res.get("agreement")
-    sweep = res.get("pcca_sweep", [])
-    if not ag or not sweep:
-        return None
-    from sklearn.metrics import adjusted_rand_score
-    best = max(sweep, key=lambda r: r["ari_pcca_kin"])
-    rng = np.random.default_rng(1)
-    draw = min(int(ag["n_perm"]), 30_000)
-    nul = np.array([adjusted_rand_score(best["assign_pcca"],
-                                        rng.permutation(best["assign_kin"]))
-                    for _ in range(draw)])
-    fig, ax = plt.subplots(figsize=(5.0, 3.4))
-    ax.hist(nul, bins=60, color="#b8c6d6", edgecolor="none")
-    ax.axvline(ag["ari"], color=POS, lw=1.8, label=f"observed = {ag['ari']:.3f}")
-    ax.set_yscale("log")
-    ax.set_xlabel("ARI under label permutation")
-    ax.set_ylabel("count")
-    ax.legend(fontsize=7.5, frameon=False)
-    ax.set_title(f"Permutation null for partition agreement\n"
-                 f"$p$ = {ag['p_ari']:.2g} over {ag['n_perm']:,} draws",
-                 loc="left", fontsize=10)
-    return _save(fig, outdir, "ari_permutation_null")
-
-
-def fig_stability(res, results, outdir):
-    """Agreement after resampling infants and refitting the grouping."""
-    stab = res.get("stability")
-    if not stab:
-        return None
-    fig, ax = plt.subplots(figsize=(5.0, 3.4))
-    ax.hist(np.asarray(stab["ari"], float), bins=30, color="#cfe0cf",
-            edgecolor="none")
-    ax.axvline(stab["mean"], color=GREEN, lw=1.8,
-               label=f"mean = {stab['mean']:.3f}")
-    ax.axvspan(stab["lo"], stab["hi"], color=GREEN, alpha=.12,
-               label="95% interval")
-    ax.set_xlabel("ARI against the fixed kinematic partition")
-    ax.set_ylabel("count")
-    ax.legend(fontsize=7.5, frameon=False)
-    ax.set_title(f"Stability under infant resampling\n{stab['n']} refits, "
-                 f"95% [{stab['lo']:.2f}, {stab['hi']:.2f}]", loc="left",
-                 fontsize=10)
-    return _save(fig, outdir, "subject_bootstrap")
-
-
-# ---------------------------------------------------------------------------
 # mixing structure
 # ---------------------------------------------------------------------------
 def fig_degenerate(res, results, outdir):
@@ -500,11 +367,150 @@ def fig_gates(res, results, outdir):
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# raw kinematics: limb co-movement and the fidgety band
+# ---------------------------------------------------------------------------
+def fig_comovement(res, results, outdir):
+    """Six panels, one per limb pair; each recording is a strip of its epochs.
+
+    Within-recording spread separates consistent from intermittent co-movement,
+    and between-recording differences are read across strips, so consistency and
+    magnitude appear in one display. A positive value is the
+    cramped-synchronised direction, a negative one the reciprocal pattern.
+    """
+    cm = results.get("comovement")
+    if not cm:
+        return None
+    per = cm["per_recording"]
+    med = np.asarray(cm["medians"], float)
+    y = np.asarray(results["labels"]).astype(int)
+    names, klass = cm["pairs"], cm["pair_class"]
+    n = len(per)
+    fig, axes = plt.subplots(3, 2, figsize=(11, 8.4), sharey=True)
+    rng = np.random.default_rng(0)
+    for p in range(len(names)):
+        ax = axes[p // 2][p % 2]
+        order = np.lexsort((np.nan_to_num(med[:, p], nan=-9), y))
+        for slot, i in enumerate(order):
+            v = np.asarray(per[i], float)
+            if v.size == 0:
+                continue
+            v = v[:, p]
+            v = v[np.isfinite(v)]
+            if v.size == 0:
+                continue
+            col = POS if y[i] == 1 else NEG
+            ax.scatter(slot + rng.uniform(-0.28, 0.28, len(v)), v, s=5,
+                       color=col, alpha=0.35, edgecolor="none", zorder=2)
+            ax.plot([slot - 0.42, slot + 0.42], [np.median(v)] * 2, color=col,
+                    lw=1.6, zorder=3)
+        ax.axhline(0.0, color="0.5", lw=0.8, ls="--", zorder=1)
+        t = results.get("comovement", {}).get("test")
+        extra = (f"   p={t['p_corrected'][p]:.3f}" if t is not None else "")
+        ax.set_title(f"{names[p]}  ({klass[p]}){extra}", fontsize=9, loc="left")
+        ax.set_xlim(-1, n)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set_xticks([])
+        if p % 2 == 0:
+            ax.set_ylabel("co-movement $D$")
+    fig.suptitle("Limb co-movement per 5 s epoch  (+ together, − opposition); "
+                 "one strip per infant, red = abnormal", fontsize=10)
+    return _save(fig, outdir, "comovement")
+
+
+def fig_fbr(res, results, outdir):
+    """Raw-velocity fidgety band ratio by diagnostic group."""
+    fb = results.get("fbr")
+    if not fb:
+        return None
+    v = np.asarray(fb["values"], float)
+    y = np.asarray(results["labels"]).astype(int)
+    t = fb.get("test", {})
+    fig, ax = plt.subplots(figsize=(4.0, 3.6))
+    rng = np.random.default_rng(0)
+    for k, (lab, col) in enumerate(((("normal"), NEG), (("abnormal"), POS))):
+        g = v[(y == k) & np.isfinite(v)]
+        ax.boxplot([g], positions=[k], widths=0.5, showfliers=False,
+                   medianprops=dict(color="black"))
+        ax.scatter(k + rng.uniform(-0.09, 0.09, len(g)), g, s=16, color=col,
+                   alpha=0.7, zorder=3, label=f"{lab} (n={len(g)})")
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["normal", "abnormal"])
+    band = fb.get("band", (0.5, 2.0))
+    ax.set_ylabel(f"power fraction in {band[0]}–{band[1]} Hz")
+    ttl = "Fidgety band ratio, raw velocities"
+    if t:
+        ttl += f"\nAUC {t['auc']:.3f}, p = {t['p']:.3f}"
+    ax.set_title(ttl, fontsize=9, loc="left")
+    return _save(fig, outdir, "fidgety_band_ratio")
+
+
+def _velocity_panel(prof, res, outdir, name, colors, hatch, title):
+    K, groups = prof["k"], prof["groups"]
+    fig, ax = plt.subplots(figsize=(1.5 * K + 2.5, 4.0))
+    w = 0.82 / len(groups)
+    rng = np.random.default_rng(0)
+    for gi, g in enumerate(groups):
+        pos, data = [], []
+        for s in range(K):
+            vals = np.asarray(prof[s][g], float)
+            vals = vals[np.isfinite(vals)]
+            x = s + (gi - (len(groups) - 1) / 2) * w
+            pos.append(x)
+            data.append(vals)
+            ax.scatter(x + rng.uniform(-w * 0.26, w * 0.26, len(vals)), vals,
+                       s=8, color=colors[gi], alpha=0.45, edgecolor="none",
+                       zorder=3)
+        bp = ax.boxplot(data, positions=pos, widths=w * 0.85, patch_artist=True,
+                        showfliers=False, medianprops=dict(color="black"),
+                        zorder=2)
+        for b in bp["boxes"]:
+            b.set(facecolor=colors[gi], alpha=0.45, edgecolor="grey",
+                  hatch=hatch[gi])
+    from matplotlib.patches import Patch
+    ax.legend(handles=[Patch(facecolor=colors[i], alpha=0.6, hatch=hatch[i],
+                             label=g) for i, g in enumerate(groups)],
+              frameon=False, fontsize=8, ncol=min(len(groups), 4),
+              loc="upper left")
+    ax.set_xticks(range(K))
+    ax.set_xticklabels([str(s) for s in range(K)])
+    ax.set_xlabel("state")
+    ax.set_ylabel("% high velocity frames")
+    ax.set_ylim(bottom=0)
+    ax.set_title(title, fontsize=9, loc="left")
+    return _save(fig, outdir, name)
+
+
+def fig_velocity_regions(res, results, outdir):
+    """Per-state high-velocity fraction by head / arms / legs."""
+    prof = res.get("velocity_profile_regions")
+    if not prof:
+        return None
+    return _velocity_panel(
+        prof, res, outdir, "state_velocity_regions",
+        ["#E8998D", "#EAD7A0", "#8FBF9F"], ["", "", ""],
+        "State movement dynamics — head / arms / legs (one dot per infant)")
+
+
+def fig_velocity_lateral(res, results, outdir):
+    """Per-state high-velocity fraction, left versus right."""
+    prof = res.get("velocity_profile_lateral")
+    if not prof:
+        return None
+    order = prof["groups"]
+    colors = ["#3B7DD8" if g.startswith("left") else "#D8503B" for g in order]
+    hatch = ["" if g.endswith("arm") else "//" for g in order]
+    return _velocity_panel(
+        prof, res, outdir, "state_velocity_lateral", colors, hatch,
+        "State movement dynamics — left vs right (blue left, red right; "
+        "hatched = leg)")
+
+
 ALL = [fig_state_signature, fig_similarity, fig_fluency_per_subject,
-       fig_fluency_by_dwell, fig_timescales, fig_pcca, fig_agreement_sweep,
-       fig_dendrogram, fig_ari_null, fig_stability, fig_degenerate, fig_mfpt,
+       fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage, fig_split_half,
-       fig_auc, fig_loo, fig_redundancy, fig_gates]
+       fig_auc, fig_loo, fig_redundancy, fig_gates,
+       fig_comovement, fig_fbr, fig_velocity_regions, fig_velocity_lateral]
 
 
 def make_all(results, outdir):

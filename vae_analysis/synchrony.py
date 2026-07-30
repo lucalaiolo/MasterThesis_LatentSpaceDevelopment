@@ -368,6 +368,7 @@ def run_synchrony_analysis(videos, limbs, *, labels=None, video_names=None,
                            positive_ids=None, fps: float = 25.0,
                            epoch_seconds: float = 5.0,
                            mirror_side: str | None = "left",
+                           band: tuple[float, float] | None = None,
                            statistic: str = "median_diff", n_perm: int = 10000,
                            seed: int = 0, save_prefix: str | None = None,
                            show: bool = True) -> dict:
@@ -383,10 +384,13 @@ def run_synchrony_analysis(videos, limbs, *, labels=None, video_names=None,
     """
     import re
     per_recording, medians, n_epochs = comovement_dataset(
-        videos, limbs, fps=fps, epoch_seconds=epoch_seconds, mirror_side=mirror_side)
+        videos, limbs, fps=fps, epoch_seconds=epoch_seconds,
+        mirror_side=mirror_side, band=band)
     print(f"[synchrony] {len(videos)} recordings | epochs/recording: "
           f"min={n_epochs.min()} med={int(np.median(n_epochs))} max={n_epochs.max()} "
-          f"(tau={epoch_seconds}s @ {fps}fps)")
+          f"(tau={epoch_seconds}s @ {fps}fps"
+          + (f", band-limited {band[0]}-{band[1]} Hz)" if band else
+             ", unfiltered as specified)"))
 
     if labels is None and positive_ids is not None and video_names is not None:
         pos = {str(p).zfill(4) for p in positive_ids}

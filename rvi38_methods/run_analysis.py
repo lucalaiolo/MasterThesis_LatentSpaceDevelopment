@@ -562,7 +562,7 @@ def main(argv=None):
         "per_recording": per_rec, "medians": comov_med, "n_epochs": n_ep,
         "pairs": MV.PAIR_NAMES,
         "pair_class": [MV.PAIR_CLASS[p] for p in MV.PAIRS],
-        "epoch_seconds": cfg["epoch_seconds"]}
+        "epoch_seconds": cfg["epoch_seconds"], "band_hz": cfg["band"]}
     print(f"  co-movement: {len(vid_arrays)} recordings, epochs/recording "
           f"{n_ep.min()}..{n_ep.max()} (tau = {cfg['epoch_seconds']}s), "
           f"six pairs per epoch")
@@ -592,9 +592,10 @@ def main(argv=None):
               "--no-band-sensitivity)")
         med_bp = None
     else:
-        _, med_bp, _ = MV.comovement_dataset(
+        per_bp, med_bp, _ = MV.comovement_dataset(
             vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"],
             band=cfg["band"])
+        results["comovement"]["per_recording_bandlimited"] = per_bp
     if med_bp is not None:
       ct_bp = MV.comovement_test(med_bp, labels, n_perm=cfg["n_comov"], seed=0)
       results["comovement"]["medians_bandlimited"] = med_bp

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import a1_core as A          # noqa: E402
 import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
+import a8_movement as MV     # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -158,40 +159,6 @@ def test_jump_chain_and_degeneracy():
           < d["pagerank_to_stationary_l1"][0.85],
           f"L1 {d['pagerank_to_stationary_l1'][0.99]:.2e} at 0.99 vs "
           f"{d['pagerank_to_stationary_l1'][0.85]:.2e} at 0.85")
-
-
-def test_pcca():
-    print("\n§8.3 PCCA+")
-    # Three well-separated blocks: PCCA+ must recover them.
-    K, m = 9, 3
-    A_ = np.full((K, K), 0.001)
-    for b in range(m):
-        idx = slice(3 * b, 3 * b + 3)
-        A_[idx, idx] = 0.33
-    A_ = A_ / A_.sum(1, keepdims=True)
-    chi, verts = G.pcca(A_, m)
-    assign = chi.argmax(1)
-    truth = np.repeat(np.arange(m), 3)
-    from sklearn.metrics import adjusted_rand_score
-    check("PCCA+ recovers three planted blocks (ARI = 1)",
-          adjusted_rand_score(assign, truth) == 1.0,
-          f"ARI {adjusted_rand_score(assign, truth):.3f}")
-    check("crispness is high on a near-hard partition",
-          G.crispness(chi) > 0.9, f"crispness {G.crispness(chi):.3f}")
-    ms = G.metastability(A_, assign)
-    check("metastability is bounded above by m", ms <= m + 1e-9,
-          f"{ms:.3f} <= {m}")
-    check("spectral k-means control recovers the same blocks",
-          adjusted_rand_score(G.spectral_kmeans(A_, m), truth) == 1.0)
-
-    # §8.4 kinematic partition on a matching similarity structure.
-    S = np.full((K, K), -0.5)
-    for b in range(m):
-        idx = slice(3 * b, 3 * b + 3)
-        S[idx, idx] = 0.9
-    np.fill_diagonal(S, 1.0)
-    check("kinematic partition recovers the same blocks",
-          adjusted_rand_score(G.kinematic_partition(S, m), truth) == 1.0)
 
 
 def test_exact_mannwhitney():
@@ -361,6 +328,108 @@ def test_shrinkage():
     check("moving block bootstrap preserves length", len(blocks) == 500)
 
 
+def test_comovement():
+    print("\nlimb co-movement (cramped-synchronised)")
+    from build_pose import JOINTS
+    J, F, fps = len(JOINTS), 1301, 25.0
+    t = np.arange(F - 1)
+    osc = np.sin(2 * np.pi * 1.0 * t / fps)
+
+    def mk(d):
+        return np.concatenate([np.zeros((1, J, 2)), np.cumsum(d, axis=0)], axis=0)
+
+    i = {L: k for k, L in enumerate(MV.LIMB_ORDER)}
+    # Right limbs sit at negative x and left at positive x, so a bilaterally
+    # symmetric (mirror-image) movement is outward = -x on the right, +x on the
+    # left. With the reflection that is synchrony; without it, opposition.
+    d = np.zeros((F - 1, J, 2))
+    d[:, MV.LIMBS["RA"], 0] = -osc[:, None]
+    d[:, MV.LIMBS["LA"], 0] = +osc[:, None]
+    d[:, MV.LIMBS["RL"], 1] = 0.3 * osc[:, None]
+    d[:, MV.LIMBS["LL"], 1] = 0.3 * osc[:, None]
+    D, energy = MV.comovement_matrices(mk(d), fps=fps)
+    v = float(D[:, i["RA"], i["LA"]].mean())
+    check("bilaterally symmetric arms read as synchrony (D = +1)",
+          abs(v - 1.0) < 1e-6, f"D = {v:+.4f}")
+    Dn, _ = MV.comovement_matrices(mk(d), fps=fps, mirror_side=None)
+    vn = float(Dn[:, i["RA"], i["LA"]].mean())
+    check("without the reflection the same movement reads as opposition",
+          abs(vn + 1.0) < 1e-6, f"D = {vn:+.4f}")
+
+    # anti-phase in the anatomical sense
+    d2 = np.zeros((F - 1, J, 2))
+    d2[:, MV.LIMBS["RA"], 0] = osc[:, None]
+    d2[:, MV.LIMBS["LA"], 0] = osc[:, None]
+    d2[:, MV.LIMBS["RL"], 1] = 0.3 * osc[:, None]
+    d2[:, MV.LIMBS["LL"], 1] = 0.3 * osc[:, None]
+    D2, _ = MV.comovement_matrices(mk(d2), fps=fps)
+    v2 = float(D2[:, i["RA"], i["LA"]].mean())
+    check("anti-phase arms read as opposition (D = -1)", abs(v2 + 1.0) < 1e-6,
+          f"D = {v2:+.4f}")
+
+    check("D is a Gram matrix: unit diagonal",
+          np.allclose(np.diagonal(D, axis1=1, axis2=2), 1.0))
+    check("D is symmetric", np.allclose(D, D.transpose(0, 2, 1)))
+    check("D is positive semi-definite",
+          float(np.linalg.eigvalsh(D).min()) > -1e-9)
+    check("D lies in [-1, 1]",
+          bool(np.nanmin(D) >= -1 - 1e-9 and np.nanmax(D) <= 1 + 1e-9))
+    check("epochs discard the trailing remainder",
+          len(D) == (F - 1) // int(round(fps * 5.0)),
+          f"{len(D)} epochs from {F - 1} displacement frames")
+
+    # a limb with no energy has no direction
+    d3 = np.zeros((F - 1, J, 2))
+    d3[:, MV.LIMBS["RA"], 0] = osc[:, None]
+    D3, _ = MV.comovement_matrices(mk(d3), fps=fps)
+    check("a zero-energy limb yields NaN rather than a fabricated value",
+          bool(np.all(np.isnan(D3[:, i["RA"], i["LA"]]))))
+
+
+def test_comovement_inference():
+    print("\nco-movement inference (label permutation, max-statistic)")
+    rng = np.random.default_rng(0)
+    n, n_pos = 38, 6
+    y = np.zeros(n, int)
+    y[:n_pos] = 1
+    # planted: the positives have higher homologous co-movement
+    M = rng.normal(0, 0.05, (n, 6))
+    M[y == 1, 0] += 0.6
+    t = MV.comovement_test(M, y, n_perm=2000, seed=0)
+    check("a planted homologous effect is detected",
+          t["p_corrected"][0] < 0.05, f"p = {t['p_corrected'][0]:.4f}")
+    check("the corrected p is never below the uncorrected one",
+          bool(np.all(t["p_corrected"] >= t["p_uncorrected"])))
+    check("all six pairs are reported", len(t["p_corrected"]) == 6)
+    # null control
+    yn = np.zeros(n, int)
+    yn[rng.choice(n, n_pos, replace=False)] = 1
+    Mn = rng.normal(0, 0.05, (n, 6))
+    tn = MV.comovement_test(Mn, yn, n_perm=2000, seed=1)
+    check("a label-shuffled null is not significant",
+          float(tn["p_corrected"].min()) > 0.05,
+          f"min p = {tn['p_corrected'].min():.3f}")
+
+
+def test_fbr():
+    print("\nfidgety band ratio")
+    from build_pose import JOINTS
+    J, fps, T = len(JOINTS), 25.0, 2000
+    t = np.arange(T)
+    v1 = np.zeros((T, J, 2))
+    for j in MV.LIMBS["RA"]:
+        v1[:, j, 0] = np.sin(2 * np.pi * 1.0 * t / fps)      # 1 Hz: in band
+    r1 = MV.raw_velocity_fbr(v1, fps)
+    check("motion at 1 Hz puts almost all power in the 0.5-2 Hz band",
+          r1 > 0.9, f"FBR = {r1:.3f}")
+    v2 = np.zeros((T, J, 2))
+    for j in MV.LIMBS["RA"]:
+        v2[:, j, 0] = np.sin(2 * np.pi * 8.0 * t / fps)      # 8 Hz: out of band
+    r2 = MV.raw_velocity_fbr(v2, fps)
+    check("motion at 8 Hz puts almost none in the band", r2 < 0.05,
+          f"FBR = {r2:.3f}")
+
+
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -370,11 +439,13 @@ def main():
     test_similarity()
     test_kemeny()
     test_jump_chain_and_degeneracy()
-    test_pcca()
     test_exact_mannwhitney()
     test_fluency()
     test_stats_helpers()
     test_shrinkage()
+    test_comovement()
+    test_comovement_inference()
+    test_fbr()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

@@ -1,25 +1,23 @@
-"""A5 metastable decomposition (§8) and A7 mixing structure (§9).
+"""A7 mixing structure (§9): chain quantities, passage times, Kemeny.
 
 Two chains are analysed throughout:
 
-``A``          the full chain, whose timescales mix dwell with sequencing;
+``A``          the full chain, whose behaviour mixes dwell with sequencing;
 ``A_jump``     the embedded jump chain, ``A_kk' / (1 - A_kk)`` off-diagonal with
                zero diagonal, which removes dwell and isolates sequencing.
 
-The jump chain is the object of interest for repertoire structure, because
-metastability on ``A`` is dominated by self-transitions and merely restates
-dwell time (§8.1).
+The jump chain is the object of interest for repertoire structure, because any
+statistic of ``A`` is dominated by self-transitions and merely restates dwell
+time.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.spatial.distance import squareform
 
 
 # ---------------------------------------------------------------------------
-# §8.1 basic chain quantities
+# basic chain quantities
 # ---------------------------------------------------------------------------
 def jump_chain(A: np.ndarray) -> np.ndarray:
     """Embedded jump chain: the probability that the next *different* state."""
@@ -38,28 +36,6 @@ def stationary(A: np.ndarray) -> np.ndarray:
         return np.full(len(A), 1.0 / len(A))
     v = v / s
     return np.clip(v, 1e-15, None) / np.clip(v, 1e-15, None).sum()
-
-
-def implied_timescales(A: np.ndarray, f_win: float = 6.25, n: int = 8):
-    """§8.2 ``t_m = -1 / ln|lambda_m|`` in steps and seconds, with gap ratios.
-
-    ``lambda_1 = 1`` is discarded. A large ``t_m / t_{m+1}`` is the conventional
-    criterion for ``m`` metastable sets, so the ratios are returned for
-    inspection rather than a single chosen ``m``.
-    """
-    lam = np.linalg.eigvals(np.asarray(A, float))
-    lam = lam[np.argsort(-np.abs(lam))]
-    sub = np.abs(lam[1:n + 1])
-    t = -1.0 / np.log(np.clip(sub, 1e-12, 1 - 1e-12))
-    gaps = t[:-1] / np.clip(t[1:], 1e-30, None)
-    return {"eigenvalues": lam, "timescales_steps": t,
-            "timescales_seconds": t / f_win, "gap_ratios": gaps,
-            "m_at_max_gap": int(np.argmax(gaps) + 2) if len(gaps) else np.nan}
-
-
-def spectral_gap(A: np.ndarray) -> float:
-    lam = np.sort(np.abs(np.linalg.eigvals(np.asarray(A, float))))[::-1]
-    return float(1.0 - lam[1]) if len(lam) > 1 else np.nan
 
 
 # ---------------------------------------------------------------------------
@@ -139,109 +115,6 @@ def graph_companions(A: np.ndarray, f_win: float = 6.25) -> dict:
     inbound = M.sum(0) / max(K - 1, 1)
     return {"mfpt": M, "closeness": closeness, "mean_inbound": inbound,
             "kemeny": kemeny(A), "kemeny_seconds": kemeny(A) / f_win}
-
-
-# ---------------------------------------------------------------------------
-# §8.3 PCCA+
-# ---------------------------------------------------------------------------
-def _inner_simplex(X: np.ndarray) -> np.ndarray:
-    """Vertex states of the eigenvector simplex (Deuflhard-Weber)."""
-    m = X.shape[1]
-    idx = np.zeros(m, int)
-    Y = np.array(X, float, copy=True)
-    idx[0] = int(np.argmax(np.linalg.norm(Y, axis=1)))
-    Y = Y - Y[idx[0]]
-    for j in range(1, m):
-        for i in range(j):
-            nv = np.linalg.norm(Y[idx[i]])
-            if nv < 1e-12:
-                continue
-            d = Y[idx[i]] / nv
-            Y = Y - np.outer(Y @ d, d)
-        idx[j] = int(np.argmax(np.linalg.norm(Y, axis=1)))
-    return idx
-
-
-def pcca(A: np.ndarray, m: int):
-    """§8.3 PCCA+ fuzzy memberships ``chi`` of shape ``(K, m)``."""
-    A = np.asarray(A, float)
-    w, V = np.linalg.eig(A)
-    order = np.argsort(-np.real(w))
-    X = np.real(V[:, order[:m]])
-    first = X[:, [0]]
-    first = np.where(np.abs(first) < 1e-12, 1e-12, first)
-    X = X / first
-    idx = _inner_simplex(X)
-    try:
-        inv = np.linalg.inv(X[idx])
-    except np.linalg.LinAlgError:
-        inv = np.linalg.pinv(X[idx])
-    chi = np.clip(X @ inv, 0, None)
-    s = chi.sum(1, keepdims=True)
-    chi = np.divide(chi, s, out=np.full_like(chi, 1.0 / m), where=s > 1e-12)
-    return chi, idx
-
-
-def crispness(chi: np.ndarray) -> float:
-    """Mean maximum membership; 1.0 is a hard partition (§8.3)."""
-    return float(chi.max(1).mean())
-
-
-def metastability(A: np.ndarray, assign: np.ndarray, rho=None) -> float:
-    """§8.3 occupancy-weighted within-set transition mass; upper bound is ``m``."""
-    A = np.asarray(A, float)
-    rho = stationary(A) if rho is None else rho
-    tot = 0.0
-    for s in np.unique(assign):
-        msk = assign == s
-        w = rho[msk] / max(rho[msk].sum(), 1e-30)
-        tot += float(w @ A[np.ix_(msk, msk)].sum(1))
-    return tot
-
-
-def spectral_kmeans(A: np.ndarray, m: int, seed: int = 0, n_init: int = 50):
-    """§8.3 control: k-means on the same eigenvector embedding.
-
-    If it recovers the PCCA+ partition, the result is a property of the
-    embedding rather than of the PCCA+ construction.
-    """
-    from sklearn.cluster import KMeans
-    A = np.asarray(A, float)
-    w, V = np.linalg.eig(A)
-    order = np.argsort(-np.real(w))
-    lam = np.real(w[order[:m]])
-    X = np.real(V[:, order[:m]])
-    nrm = np.linalg.norm(X, axis=0, keepdims=True)
-    X = X / np.where(nrm < 1e-12, 1.0, nrm)
-    E = X[:, 1:] * lam[1:]
-    if E.shape[1] == 0:
-        return np.zeros(len(A), int)
-    return KMeans(m, n_init=n_init, random_state=seed).fit_predict(E)
-
-
-# ---------------------------------------------------------------------------
-# §8.4 the independent kinematic partition
-# ---------------------------------------------------------------------------
-def kinematic_partition(S: np.ndarray, m: int) -> np.ndarray:
-    """Average-linkage clustering of ``D = clip(1 - S, 0, 2)`` into ``m`` sets.
-
-    Average linkage is invariant to monotone transformations of the distances
-    and does not impose Ward's compactness assumption. This partition sees no
-    transition information whatsoever, which is what makes its agreement with
-    the metastable partition informative (§8.4).
-    """
-    D = np.clip(1.0 - np.asarray(S, float), 0, 2)
-    np.fill_diagonal(D, 0.0)
-    D = 0.5 * (D + D.T)
-    Z = linkage(squareform(D, checks=False), method="average")
-    return fcluster(Z, m, "maxclust")
-
-
-def kinematic_linkage(S: np.ndarray):
-    D = np.clip(1.0 - np.asarray(S, float), 0, 2)
-    np.fill_diagonal(D, 0.0)
-    D = 0.5 * (D + D.T)
-    return linkage(squareform(D, checks=False), method="average")
 
 
 # ---------------------------------------------------------------------------

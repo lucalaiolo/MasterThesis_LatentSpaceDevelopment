@@ -430,6 +430,64 @@ def test_fbr():
           f"FBR = {r2:.3f}")
 
 
+def test_comovement_noise_attenuation():
+    print("\nco-movement under keypoint noise (why band-limiting is offered)")
+    from build_pose import JOINTS
+    J, fps, F = len(JOINTS), 25.0, 4001
+    i = {L: k for k, L in enumerate(MV.LIMB_ORDER)}
+
+    def build(nsd, seed=0):
+        """Perfect bilateral synchrony at 1 Hz plus iid keypoint noise."""
+        r = np.random.default_rng(seed)
+        pos = np.zeros((F, J, 2))
+        drive = 0.10 * np.sin(2 * np.pi * 1.0 * np.arange(F) / fps)
+        for j in MV.LIMBS["RA"]:
+            pos[:, j, 0] = -drive
+        for j in MV.LIMBS["LA"]:
+            pos[:, j, 0] = +drive
+        for j in MV.LIMBS["RL"]:
+            pos[:, j, 1] = 0.5 * drive
+        for j in MV.LIMBS["LL"]:
+            pos[:, j, 1] = 0.5 * drive
+        return pos + r.normal(0, nsd, pos.shape)
+
+    clean = build(0.0)
+    d = float(np.nanmean(MV.comovement_matrices(clean, fps=fps)[0][:, i["RA"], i["LA"]]))
+    check("noise-free perfect synchrony gives D = +1", abs(d - 1.0) < 1e-6,
+          f"D = {d:+.4f}")
+
+    noisy = build(0.02)
+    d_raw = float(np.nanmean(
+        MV.comovement_matrices(noisy, fps=fps)[0][:, i["RA"], i["LA"]]))
+    d_bp = float(np.nanmean(
+        MV.comovement_matrices(noisy, fps=fps, band=(0.5, 2.0))[0][:, i["RA"], i["LA"]]))
+    check("keypoint noise attenuates the unfiltered construct", d_raw < 0.5,
+          f"D = {d_raw:+.3f} for a perfectly synchronous pair")
+    check("band-limiting restores the true value", d_bp > 0.85,
+          f"D = {d_bp:+.3f}")
+    check("band-limiting does not flip the sign", d_raw > 0 and d_bp > 0)
+
+    # specificity: genuinely independent limbs must stay near zero either way
+    from scipy.signal import butter, filtfilt
+    b, a = butter(4, [0.5 / (fps / 2), 2.0 / (fps / 2)], btype="band")
+    r = np.random.default_rng(3)
+    pos = np.zeros((F, J, 2))
+    for L in MV.LIMB_ORDER:
+        drv = filtfilt(b, a, r.normal(0, 1, F)) * 0.10
+        sgn = -1.0 if L.startswith("R") else 1.0
+        for j in MV.LIMBS[L]:
+            pos[:, j, 0] += sgn * drv
+    pos = pos + r.normal(0, 0.02, pos.shape)
+    e_raw = float(np.nanmean(
+        MV.comovement_matrices(pos, fps=fps)[0][:, i["RA"], i["LA"]]))
+    e_bp = float(np.nanmean(
+        MV.comovement_matrices(pos, fps=fps, band=(0.5, 2.0))[0][:, i["RA"], i["LA"]]))
+    check("independent limbs stay near zero unfiltered", abs(e_raw) < 0.15,
+          f"D = {e_raw:+.3f}")
+    check("independent limbs stay near zero band-limited", abs(e_bp) < 0.15,
+          f"D = {e_bp:+.3f}")
+
+
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -446,6 +504,7 @@ def main():
     test_comovement()
     test_comovement_inference()
     test_fbr()
+    test_comovement_noise_attenuation()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

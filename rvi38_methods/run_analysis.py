@@ -571,6 +571,31 @@ def main(argv=None):
               f"p_corrected = {ct['p_corrected'][p]:.4f}  "
               f"(uncorrected {ct['p_uncorrected'][p]:.4f})")
 
+    # Sensitivity analysis. Differencing is a high-pass operation, so per-frame
+    # keypoint noise dominates the raw displacement and attenuates |D| toward
+    # zero by ~1/(1 + sigma_n^2/sigma_s^2). The noise is independent across
+    # limbs, so it does not bias the sign -- but it can hide a real effect. The
+    # band-limited version restores sensitivity without costing specificity;
+    # both are reported, and the pre-specified one above remains primary.
+    _, med_bp, _ = MV.comovement_dataset(
+        vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"],
+        band=cfg["band"])
+    ct_bp = MV.comovement_test(med_bp, labels, n_perm=cfg["n_comov"], seed=0)
+    results["comovement"]["medians_bandlimited"] = med_bp
+    results["comovement"]["test_bandlimited"] = ct_bp
+    print(f"  sensitivity analysis, displacements band-limited to "
+          f"{cfg['band'][0]}-{cfg['band'][1]} Hz before the epochs:")
+    for p, nm in enumerate(MV.PAIR_NAMES):
+        print(f"     {nm:7s}: median {np.nanmedian(med_bp[:, p]):+.3f}  "
+              f"T = {ct_bp['observed'][p]:+.3f}  "
+              f"p_corrected = {ct_bp['p_corrected'][p]:.4f}")
+    amp_raw = float(np.nanmedian(np.abs(comov_med)))
+    amp_bp = float(np.nanmedian(np.abs(med_bp)))
+    print(f"     median |D|: {amp_raw:.3f} as specified vs {amp_bp:.3f} "
+          f"band-limited"
+          + ("  -- the raw construct is noise-attenuated here"
+             if amp_bp > 3 * max(amp_raw, 1e-9) else ""))
+
     fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
     fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])
     lo, hi = ST.hanley_mcneil_ci(fb["auc"], fb["n1"], fb["n2"])

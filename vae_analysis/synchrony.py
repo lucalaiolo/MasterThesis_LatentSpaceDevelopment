@@ -129,9 +129,27 @@ def limb_velocities(video: np.ndarray, limbs: dict[str, list[int]], *,
 # ---------------------------------------------------------------------------
 # 2. Epoch-wise co-movement (cosine Gram) matrices
 # ---------------------------------------------------------------------------
+def _bandpass(x, fps, band, order=4):
+    """Zero-phase Butterworth band-pass along axis 0.
+
+    Zero phase matters: any group delay would shift one limb relative to another
+    and destroy the instantaneous alignment the construct measures.
+    """
+    from scipy.signal import butter, filtfilt
+    lo, hi = band[0] / (fps / 2.0), band[1] / (fps / 2.0)
+    if not (0 < lo < hi < 1):
+        raise ValueError(f"band {band} is not inside (0, Nyquist={fps/2}) Hz")
+    b, a = butter(order, [lo, hi], btype="band")
+    if len(x) <= 3 * max(len(a), len(b)):
+        return x
+    return filtfilt(b, a, x, axis=0)
+
+
 def comovement_matrices(video: np.ndarray, limbs: dict[str, list[int]], *,
                         fps: float = 25.0, epoch_seconds: float = 5.0,
-                        mirror_side: str | None = "left", eps: float = 1e-12
+                        mirror_side: str | None = "left",
+                        band: tuple[float, float] | None = None,
+                        eps: float = 1e-12
                         ) -> tuple[np.ndarray, np.ndarray]:
     """Per-epoch co-movement matrices ``D`` and per-limb energies (Eq. comov).
 
@@ -142,11 +160,23 @@ def comovement_matrices(video: np.ndarray, limbs: dict[str, list[int]], *,
     A limb with (near-)zero energy in an epoch has no direction, so every entry
     involving it is ``NaN`` rather than an arbitrary value.
 
+    ``band`` optionally band-limits the limb displacement series (zero-phase)
+    before the epochs are formed; ``None`` is the construct exactly as specified.
+    Differencing is high-pass, so per-frame keypoint noise dominates the raw
+    displacement and attenuates ``|D|`` by roughly
+    ``1/(1 + sigma_n^2/sigma_s^2)``. Being independent across limbs the noise
+    does not bias the sign, but it can bury a real effect: at 0.02 torso units of
+    keypoint noise a perfectly synchronous pair measures ``+0.18`` unfiltered
+    against ``+0.96`` band-limited, while independent limbs stay near zero either
+    way.
+
     Returns:
         ``D``: ``(E, 4, 4)`` cosine similarities in ``[-1, 1]``, PSD with unit
         diagonal. ``energy``: ``(E, 4)`` per-limb epoch energies ``||W_L||^2``.
     """
     W = limb_velocities(video, limbs, mirror_side=mirror_side)   # (T, 4, 2)
+    if band is not None:
+        W = _bandpass(W, fps, band)
     n = int(round(fps * epoch_seconds))
     if n < 2:
         raise ValueError(f"epoch of {epoch_seconds}s at {fps}fps is too short.")
@@ -175,7 +205,8 @@ def pair_values(D: np.ndarray) -> np.ndarray:
 
 def comovement_dataset(videos, limbs, *, fps: float = 25.0,
                        epoch_seconds: float = 5.0,
-                       mirror_side: str | None = "left"
+                       mirror_side: str | None = "left",
+                       band: tuple[float, float] | None = None
                        ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
     """Co-movement for every recording.
 
@@ -187,7 +218,7 @@ def comovement_dataset(videos, limbs, *, fps: float = 25.0,
     per_recording, n_epochs = [], []
     for v in videos:
         D, _ = comovement_matrices(v, limbs, fps=fps, epoch_seconds=epoch_seconds,
-                                   mirror_side=mirror_side)
+                                   mirror_side=mirror_side, band=band)
         vals = pair_values(D)
         per_recording.append(vals)
         n_epochs.append(len(vals))

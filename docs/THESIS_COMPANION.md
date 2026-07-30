@@ -607,7 +607,108 @@ reported as a finding, not hidden.
 
 ---
 
-## 10. Implementation notes
+## 9bis. Limb co-movement: the cramped-synchronised construct
+
+### 9bis.1 Why a separate construct is needed
+
+**Cramped-synchronised** general movements are the abnormal form most strongly
+associated with later cerebral palsy (Prechtl et al., 1997; Ferrari et al., 2002).
+Their defining feature is **simultaneity**: limbs and trunk contract and relax
+together instead of moving independently. This is a property of a *single
+instant*, so it cannot be expressed by the ordering of the state sequence
+(fluency) nor by its traversal (mixing) — both are properties of the *sequence*.
+Clinical scoring further separates **consistent** from **intermittent**
+cramped-synchronised movement, and only the consistent form carries the high risk,
+so the construct must report a **distribution over the recording**, not a single
+average.
+
+The measure uses **raw keypoint displacements only**, so it is independent of the
+encoder, the latent space, and the state model — a third, fully independent
+estimator alongside the raw-velocity FBR (§6.3) and the HMM dwell-frequency.
+
+### 9bis.2 Signed, midline-reflected limb displacement
+
+Speed discards direction, and direction is exactly what separates genuine
+co-contraction from two limbs that merely move at the same instant, so the
+**signed** displacement is kept. For the four limbs
+`L ∈ {RA, LA, RL, LL}` given by the BODY-15 joint triples `{2,3,4}`, `{5,6,7}`,
+`{9,10,11}`, `{12,13,14}`:
+
+$$
+\mathbf{w}^{(i)}_{L}(t) = \frac{1}{3}\sum_{j \in L} R_L
+\bigl(x^{(i)}_{t+1,j} - x^{(i)}_{t,j}\bigr) \in \mathbb{R}^2 ,
+\qquad
+R_L = \begin{cases}\operatorname{diag}(-1, 1) & L \in \{\text{LA}, \text{LL}\},\\
+I & L \in \{\text{RA}, \text{RL}\}.\end{cases}
+$$
+
+The reflection `R_L` changes coordinates **for each limb separately, before any
+pair is formed**, so that the first axis points away from the body midline on that
+limb's own side. Without it a bilaterally symmetric movement would register as
+*opposition* rather than synchrony — verified numerically: a mirror-image
+two-arm movement gives `D_{RA,LA} = +1` with the reflection and `−1` without.
+The construct lives at **frame rate**: averaging signed displacements over time
+would cancel the very oscillation it exists to detect.
+
+### 9bis.3 Epochs and the co-movement matrix
+
+Recording `i` is partitioned into `E_i` consecutive **non-overlapping epochs** of
+`τ = 5` s, discarding any trailing remainder. At 25 fps an epoch holds 125 frames
+and spans between 2.5 and 10 cycles of the fidgety band. Within epoch `e` the
+frames are stacked into `W^{(i,e)}_L ∈ ℝ^{250}`, with energy
+`a^{(i,e)}_L = \|W^{(i,e)}_L\|^2` and normalisation
+`\widehat W = W/\|W\|`. The **co-movement matrix** is the cosine similarity
+
+$$
+D^{(i,e)}_{LL'}=\bigl\langle \widehat W^{(i,e)}_L,\widehat W^{(i,e)}_{L'}\bigr\rangle
+=\frac{\sum_{t\in e}\bigl\langle \mathbf w^{(i)}_L(t),\mathbf w^{(i)}_{L'}(t)\bigr\rangle}
+{\bigl(a^{(i,e)}_L a^{(i,e)}_{L'}\bigr)^{1/2}}\in[-1,1],
+$$
+
+a **Gram matrix of unit vectors**, hence positive semi-definite with unit diagonal
+(verified: symmetry, unit diagonal, range, and non-negative eigenvalues). Its sign
+is clinical: a **positive** entry means the two limbs move together and in the same
+anatomical sense — the cramped-synchronised direction — and a **negative** entry
+means they move in opposition, the reciprocal pattern of normal movement. A limb
+with (near-)zero energy in an epoch has no direction, so entries involving it are
+`NaN` rather than an arbitrary value.
+
+### 9bis.4 The six pairs and their anatomical grouping
+
+Each epoch yields the six off-diagonal entries, and the grouping is the
+interpretive key:
+
+| class | pairs | reading of a positive entry |
+|---|---|---|
+| homologous | RA–LA, RL–LL | both arms, or both legs, contracting together: the cramped-synchronised signature |
+| same-side | RA–RL, LA–LL | arm and leg of one side moving as a unit |
+| contralateral | RA–LL, LA–RL | diagonal coupling |
+
+### 9bis.5 The figure
+
+Six panels, one per pair (rows = anatomical class), each showing **every recording
+as a strip of its epoch values**, coloured by diagnostic label, with a bar at the
+per-recording median and a dashed zero line. **Within-infant spread separates
+consistent from intermittent co-movement**, and between-infant differences are read
+across strips, so consistency and magnitude appear in one display.
+
+### 9bis.6 Inference
+
+Group contrasts are made by **permuting the 38 diagnostic labels, never the
+epochs** — epochs within a recording are not exchangeable, and the exchangeable
+unit is the recording. The statistic for pair `p` is the per-recording median
+`\widetilde D^{(i)}_p = \operatorname{med}_e D^{(i,e)}_p`, contrasted between
+groups. The six pairs are tested **together under a maximum-statistic
+(Westfall–Young) correction**: the null distribution is that of `\max_p |T_p|`
+over label permutations, and each pair's corrected p-value is the tail of *that*
+distribution at its observed statistic (so the corrected p is always ≥ the
+uncorrected one). **The result is reported for all six pairs whatever any one
+shows.** Because all six statistics live on the same `[-1,1]` scale, the maximum
+is taken without standardisation. Validated on synthetic data: a planted
+synchrony effect is recovered (`p_corr = 0.0025`) while a label-shuffled control is
+not (`p_corr = 0.84`).
+
+
 
 - **Repository layout.** `architectures/` (VAE models, config, training loop,
   losses, param counts); `youtube_motion/` (data loader, BODY-15 skeleton, sweep
@@ -731,6 +832,16 @@ reported as a finding, not hidden.
   movements ... *Ment. Retard. Dev. Disabil. Res. Rev.* 11(1), 61–67.
 - Prechtl, H.F.R. (1990). Qualitative changes of spontaneous movements ... *Early
   Hum. Dev.* 23(3), 151–158.
+- Prechtl, H.F.R., Einspieler, C., Cioni, G., Bos, A.F., Ferrari, F., Sontheimer,
+  D. (1997). An early marker for neurological deficits after perinatal brain
+  lesions. *The Lancet* 349(9062), 1361–1363. **[verify]** *(cramped-synchronised
+  GMs and cerebral palsy)*
+- Ferrari, F., Cioni, G., Einspieler, C., et al. (2002). Cramped synchronized
+  general movements in preterm infants as an early marker for cerebral palsy.
+  *Archives of Pediatrics & Adolescent Medicine* 156(5), 460–467. **[verify]**
+- Westfall, P.H., Young, S.S. (1993). *Resampling-Based Multiple Testing:
+  Examples and Methods for p-Value Adjustment*. Wiley. *(maximum-statistic
+  correction)*
 - McCay, K.D., Ho, E.S.L., Shum, H.P.H., et al. Pose-based feature fusion for the
   early prediction of cerebral palsy in infants; introduction of the RVI-38
   dataset. **[verify: exact title, venue, year]**

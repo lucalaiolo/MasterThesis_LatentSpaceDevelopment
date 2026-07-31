@@ -1,12 +1,15 @@
 # RVI-38: fluency, mixing and raw-kinematic analyses
 
 Implementation of `METHODS_3.md` — fluency (A1) and mixing structure (A7) on the
-RVI-38 cohort, plus the raw-kinematic constructs (limb co-movement for
-cramped-synchronised movements, and the fidgety band ratio), with the §10
-inference layer and the §11 pre-specified gates.
+RVI-38 cohort, plus the raw-kinematic constructs (WCLR-PP inter-limb
+coordination for cramped-synchronised movements, and the fidgety band ratio),
+with the §10 inference layer and the §11 pre-specified gates.
 
 The metastable decomposition (PCCA+, implied timescales, the kinematic
-dendrogram and their agreement statistics) has been removed.
+dendrogram and their agreement statistics) has been removed. The earlier
+cosine-Gram co-movement construct has been superseded by WCLR-PP
+(`a9_wclrpp.py`), a vector-valued directed measure that separates genuine
+coupling from shared limb autocorrelation and preserves lead-lag phase.
 
 ## Module map (§12.2)
 
@@ -17,10 +20,11 @@ dendrogram and their agreement statistics) has been removed.
 | `a1_core.py` | window-to-frame geometry, state profiles, double-centred similarity, fluency estimators |
 | `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
 | `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
-| `a8_movement.py` | raw kinematics: limb co-movement (cramped-synchronised), fidgety band ratio, per-state velocity profiles |
+| `a8_movement.py` | raw kinematics: fidgety band ratio, per-state velocity profiles |
+| `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, label-permutation and circular-shift surrogate inference |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 55 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 59 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 
 ## Run
@@ -32,15 +36,19 @@ dendrogram and their agreement statistics) has been removed.
         --labels RVI_38_labels.mat --outdir rvi38_out
 
 `--fast` cuts every resampling count ~20x for a smoke run. `--band LOW,HIGH` sets
-the fidgety band (default `0.5,2.0`) used by the FBR and by the band-limited
-co-movement sensitivity analysis; `--no-band-sensitivity` reports only the
-co-movement construct as specified, and `--epoch-seconds` sets its epoch length. `--stream
+the fidgety band (default `0.5,2.0`) used by the FBR. The WCLR-PP window and
+peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
+`--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
+`--wclr-ell-min` (minimum coupled run, default 19); vary `w`, `tau_max` and `c`
+over declared grids for the robustness pass. `--stream
 delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per
 subject shorter than the pose trajectory. Either model may be omitted.
 
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv`,
-`state_amplitude_profile.csv`, `run.log`, and four figure pairs (PNG + PDF).
+`state_amplitude_profile.csv`, `run.log`, and one figure pair (PNG + PDF) per
+panel, including `wclrpp_pairs` (the six per-limb-pair panels) and
+`wclrpp_summary` (the per-infant aggregation).
 
 Without the archive, exercise the pipeline on synthetic data:
 

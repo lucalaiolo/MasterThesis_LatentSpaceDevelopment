@@ -370,76 +370,93 @@ def fig_gates(res, results, outdir):
 # ---------------------------------------------------------------------------
 # raw kinematics: limb co-movement and the fidgety band
 # ---------------------------------------------------------------------------
-def _comovement_panel(results, per_key, med_key, test_key, subtitle, name,
-                      outdir):
-    """Six panels, one per limb pair; each recording is a strip of its epochs.
+def _dot_column(ax, x, vals, color, half=0.30, rng=None):
+    """A jittered dot strip with a median bar at horizontal position ``x``."""
+    vals = np.asarray(vals, float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return
+    rng = np.random.default_rng(0) if rng is None else rng
+    ax.scatter(x + rng.uniform(-half * 0.7, half * 0.7, len(vals)), vals,
+               s=16, color=color, alpha=0.6, edgecolor="none", zorder=3)
+    ax.plot([x - half, x + half], [np.median(vals)] * 2, color=color, lw=2.2,
+            zorder=4)
 
-    Within-recording spread separates consistent from intermittent co-movement,
-    and between-recording differences are read across strips, so consistency and
-    magnitude appear in one display. A positive value is the
-    cramped-synchronised direction, a negative one the reciprocal pattern.
+
+def fig_wclrpp_pairs(res, results, outdir):
+    """Per-pair WCLR-PP coupling: six panels, one per limb pair.
+
+    Each panel is the abnormal-versus-normal contrast of ``F`` (the fraction of
+    assessable time the pair spends coupled) for that specific pair, so the
+    reader sees every couple of limbs and not only the per-infant aggregate.
+    One dot per infant; the bar is the group median. Higher ``F`` is the
+    pathological (cramped-synchronised) pole. Each title carries the
+    max-statistic-corrected permutation p-value for that pair.
     """
-    cm = results.get("comovement")
-    if not cm or per_key not in cm:
+    wc = results.get("wclrpp")
+    if not wc or "F" not in wc:
         return None
-    per = cm[per_key]
-    med = np.asarray(cm[med_key], float)
-    test = cm.get(test_key)
+    F = np.asarray(wc["F"], float)
     y = np.asarray(results["labels"]).astype(int)
-    names, klass = cm["pairs"], cm["pair_class"]
-    n = len(per)
-    fig, axes = plt.subplots(3, 2, figsize=(11, 8.4), sharey=True)
+    names, klass = wc["pairs"], wc["pair_class"]
+    test = wc.get("test")
+    fig, axes = plt.subplots(2, 3, figsize=(12, 7.2), sharey=True)
     rng = np.random.default_rng(0)
     for p in range(len(names)):
-        ax = axes[p // 2][p % 2]
-        order = np.lexsort((np.nan_to_num(med[:, p], nan=-9), y))
-        for slot, i in enumerate(order):
-            v = np.asarray(per[i], float)
-            if v.size == 0:
-                continue
-            v = v[:, p]
-            v = v[np.isfinite(v)]
-            if v.size == 0:
-                continue
-            col = POS if y[i] == 1 else NEG
-            ax.scatter(slot + rng.uniform(-0.28, 0.28, len(v)), v, s=5,
-                       color=col, alpha=0.35, edgecolor="none", zorder=2)
-            ax.plot([slot - 0.42, slot + 0.42], [np.median(v)] * 2, color=col,
-                    lw=1.6, zorder=3)
-        ax.axhline(0.0, color="0.5", lw=0.8, ls="--", zorder=1)
-        extra = (f"   p={test['p_corrected'][p]:.3f}" if test is not None else "")
+        ax = axes[p // 3][p % 3]
+        for gi, (grp, col) in enumerate(((0, NEG), (1, POS))):
+            _dot_column(ax, gi, F[y == grp, p], col, rng=rng)
+        extra = ""
+        if test is not None:
+            extra = (f"   $\\Delta$={test['observed'][p]:+.3f}"
+                     f", p={test['p_corrected'][p]:.3f}")
         ax.set_title(f"{names[p]}  ({klass[p]}){extra}", fontsize=9, loc="left")
-        ax.set_xlim(-1, n)
-        ax.set_ylim(-1.05, 1.05)
-        ax.set_xticks([])
-        if p % 2 == 0:
-            ax.set_ylabel("co-movement $D$")
-    fig.suptitle(f"Limb co-movement per epoch — {subtitle}\n"
-                 "(+ together, − opposition); one strip per infant, "
-                 "red = abnormal", fontsize=10)
-    return _save(fig, outdir, name)
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["normal", "abnormal"])
+        ax.set_xlim(-0.6, 1.6)
+        ax.set_ylim(bottom=0.0)
+        if p % 3 == 0:
+            ax.set_ylabel("coupled-time fraction $F$")
+    fig.suptitle("Inter-limb coordination (WCLR-PP) per limb pair — "
+                 "$F$ = fraction of time coupled; higher = "
+                 "cramped-synchronised pole (red = abnormal)", fontsize=10)
+    return _save(fig, outdir, "wclrpp_pairs")
 
 
-def fig_comovement(res, results, outdir):
-    """Co-movement exactly as specified (unfiltered displacements)."""
-    return _comovement_panel(results, "per_recording", "medians", "test",
-                             "as specified, unfiltered", "comovement", outdir)
+def fig_wclrpp_summary(res, results, outdir):
+    """Per-infant WCLR-PP aggregation: whole-body coupling and its spread.
 
-
-def fig_comovement_bandlimited(res, results, outdir):
-    """The same construct with the displacements band-limited first.
-
-    Differencing is high-pass, so keypoint noise attenuates |D| toward zero
-    without biasing its sign; this panel is the sensitivity analysis and is
-    plotted beside the pre-specified one rather than replacing it.
+    ``mean F`` over the six pairs is the whole-body coupling; its across-pair
+    ``spread`` separates a whole-body pattern (high mean, low spread) from a
+    pair-specific one. Strength ``R2`` when coupled is shown alongside. One dot
+    per infant, group medians as bars.
     """
-    cm = results.get("comovement", {})
-    band = cm.get("band_hz")
-    sub = (f"band-limited {band[0]}–{band[1]} Hz" if band
-           else "band-limited (sensitivity analysis)")
-    return _comovement_panel(results, "per_recording_bandlimited",
-                             "medians_bandlimited", "test_bandlimited",
-                             sub, "comovement_bandlimited", outdir)
+    wc = results.get("wclrpp")
+    if not wc or "mean_F" not in wc:
+        return None
+    y = np.asarray(results["labels"]).astype(int)
+    fields = [("mean_F", "whole-body coupling\n(mean $F$ over pairs)"),
+              ("spread_F", "across-pair spread\n(SD of $F$)"),
+              ("mean_R2", "coupling strength\n(mean $R^2$ when coupled)")]
+    at = wc.get("mean_F_test")
+    fig, axes = plt.subplots(1, 3, figsize=(11, 4.2))
+    rng = np.random.default_rng(0)
+    for ax, (key, lab) in zip(axes, fields):
+        v = np.asarray(wc[key], float)
+        for gi, (grp, col) in enumerate(((0, NEG), (1, POS))):
+            _dot_column(ax, gi, v[y == grp], col, rng=rng)
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["normal", "abnormal"])
+        ax.set_xlim(-0.6, 1.6)
+        ax.set_ylim(bottom=0.0)
+        ax.set_title(lab, fontsize=9, loc="left")
+    if at is not None:
+        axes[0].annotate(f"AUC {at['auc']:.2f}, p={at['p']:.3f}",
+                         xy=(0.02, 0.96), xycoords="axes fraction",
+                         fontsize=8, va="top")
+    fig.suptitle("WCLR-PP per-infant aggregation across the six limb pairs",
+                 fontsize=10)
+    return _save(fig, outdir, "wclrpp_summary")
 
 
 def _velocity_panel(prof, res, outdir, name, colors, hatch, title):
@@ -507,7 +524,7 @@ ALL = [fig_state_signature, fig_similarity, fig_fluency_per_subject,
        fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage, fig_split_half,
        fig_auc, fig_loo, fig_redundancy, fig_gates,
-       fig_comovement, fig_comovement_bandlimited,
+       fig_wclrpp_pairs, fig_wclrpp_summary,
        fig_velocity_regions, fig_velocity_lateral]
 
 

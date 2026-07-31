@@ -30,6 +30,7 @@ import a1_core as A          # noqa: E402
 import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
 import a8_movement as MV     # noqa: E402
+import a9_wclrpp as WP       # noqa: E402
 import build_pose            # noqa: E402
 import load_models as L      # noqa: E402
 
@@ -402,13 +403,19 @@ def main(argv=None):
                     help="cut resampling counts ~20x for a smoke run")
     ap.add_argument("--band", default="0.5,2.0",
                     help="fidgety band in Hz as LOW,HIGH (default 0.5,2.0). "
-                         "Used for the raw-velocity FBR and for the "
-                         "band-limited co-movement sensitivity analysis.")
-    ap.add_argument("--no-band-sensitivity", action="store_true",
-                    help="skip the band-limited co-movement sensitivity "
-                         "analysis and report only the construct as specified.")
-    ap.add_argument("--epoch-seconds", type=float, default=5.0,
-                    help="co-movement epoch length in seconds (default 5).")
+                         "Used for the raw-velocity fidgety band ratio.")
+    ap.add_argument("--wclr-w", type=int, default=50,
+                    help="WCLR-PP window width in frames (default 50 = 2 s at "
+                         "25 fps). Lean to 62-75 if the autocorrelation length "
+                         "exceeds 30 frames.")
+    ap.add_argument("--wclr-tau-max", type=int, default=13,
+                    help="WCLR-PP maximum lag in frames (default 13 ~ 0.52 s).")
+    ap.add_argument("--wclr-c", type=float, default=0.25,
+                    help="WCLR-PP delta-R^2 cutoff (default 0.25, a heuristic "
+                         "gate; check robustness over {0.2,0.25,0.3}).")
+    ap.add_argument("--wclr-ell-min", type=int, default=19,
+                    help="WCLR-PP minimum coupled-run length in frames "
+                         "(default 19 = 0.76 s).")
     ap.add_argument("--no-figures", action="store_true")
     args = ap.parse_args(argv)
 
@@ -427,10 +434,10 @@ def main(argv=None):
         "n_bca": 2_000 if f else 10_000,
         "block": 50, "truncate": 387, "m_max": 6, "duration_tol": 0.3,
         "controls": args.controls, "state_names": args.state_names,
-        "n_comov": 2_000 if f else 20_000,   # co-movement label permutations
-        "epoch_seconds": args.epoch_seconds,  # co-movement epoch length
+        "n_wclr": 2_000 if f else 20_000,    # WCLR-PP label permutations
+        "wclr_w": args.wclr_w, "wclr_tau_max": args.wclr_tau_max,
+        "wclr_c": args.wclr_c, "wclr_ell_min": args.wclr_ell_min,
         "band": tuple(float(x) for x in args.band.split(",")),
-        "band_sensitivity": not args.no_band_sensitivity,
         "top_frac": 0.10,                    # high-velocity frame fraction
     }
     geom = A.Geometry(args.fps, args.clip, args.nwin, args.stride)
@@ -549,69 +556,56 @@ def main(argv=None):
         print(f"  Phi agreement across models: Spearman rho = {rho:+.3f} "
               f"(p = {p:.3g})")
 
-    # ---- raw-kinematic constructs: co-movement and the fidgety band ----
-    # These read raw keypoint displacements only, so they are independent of the
-    # encoder, the latent and the state model -- a third estimator alongside
-    # fluency and mixing.
-    section("Raw kinematics: limb co-movement and the fidgety band")
+    # ---- raw-kinematic constructs: inter-limb coordination and the fidgety
+    # band. These read raw keypoint displacements only, so they are independent
+    # of the encoder, the latent and the state model -- a third estimator
+    # alongside fluency and mixing.
+    section("Raw kinematics: inter-limb coordination (WCLR-PP) and the "
+            "fidgety band")
     vid_arrays = [pose[v] for v in vids]
 
-    per_rec, comov_med, n_ep = MV.comovement_dataset(
-        vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"])
-    results["comovement"] = {
-        "per_recording": per_rec, "medians": comov_med, "n_epochs": n_ep,
-        "pairs": MV.PAIR_NAMES,
-        "pair_class": [MV.PAIR_CLASS[p] for p in MV.PAIRS],
-        "epoch_seconds": cfg["epoch_seconds"], "band_hz": cfg["band"]}
-    print(f"  co-movement: {len(vid_arrays)} recordings, epochs/recording "
-          f"{n_ep.min()}..{n_ep.max()} (tau = {cfg['epoch_seconds']}s), "
-          f"six pairs per epoch")
-    for p, nm in enumerate(MV.PAIR_NAMES):
-        col = comov_med[:, p]
-        print(f"     {nm:7s} ({MV.PAIR_CLASS[MV.PAIRS[p]]:>13s}): "
-              f"median over subjects {np.nanmedian(col):+.3f}")
+    # WCLR-PP: the variance in one limb's future 2D velocity that the other
+    # explains beyond that limb's own past. High coupling is the pathological
+    # (cramped-synchronised) pole. Each of the six pairs yields one F (fraction
+    # of assessable time coupled) and one R2 (strength when coupled), averaged
+    # over both regression directions.
+    wp = WP.WCLRParams(w=cfg["wclr_w"], tau_max=cfg["wclr_tau_max"],
+                       ell_min=cfg["wclr_ell_min"], c=cfg["wclr_c"],
+                       fps=geom.fps)
+    wc = WP.wclrpp_dataset(vid_arrays, wp)
+    results["wclrpp"] = {
+        "F": wc["F"], "R2": wc["R2"], "pairs": wc["pairs"],
+        "pair_class": wc["pair_class"], "mean_F": wc["mean_F"],
+        "spread_F": wc["spread_F"], "mean_R2": wc["mean_R2"],
+        "params": {"w": wp.w, "tau_max": wp.tau_max, "ell_min": wp.ell_min,
+                   "c": wp.c, "fps": wp.fps}}
+    print(f"  WCLR-PP: {len(vid_arrays)} recordings, six limb pairs, "
+          f"w={wp.w} frames ({wp.w / geom.fps:.1f}s), "
+          f"tau_max={wp.tau_max} (+/-{wp.tau_max / geom.fps:.2f}s), "
+          f"c={wp.c}, ell_min={wp.ell_min} ({wp.ell_min / geom.fps:.2f}s)")
+    for p, nm in enumerate(wc["pairs"]):
+        print(f"     {nm:8s} ({wc['pair_class'][p]:>13s}): "
+              f"median F over subjects {np.nanmedian(wc['F'][:, p]):.3f}  "
+              f"(R2 {np.nanmedian(wc['R2'][:, p]):.3f})")
 
-    ct = MV.comovement_test(comov_med, labels, n_perm=cfg["n_comov"], seed=0)
-    results["comovement"]["test"] = ct
-    print(f"  §10 group contrast, labels permuted ({ct['n_perm']:,} draws), "
-          f"max-statistic corrected over six pairs "
+    wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0)
+    results["wclrpp"]["test"] = wt
+    print(f"  §10 group contrast on per-pair F, labels permuted "
+          f"({wt['n_perm']:,} draws), max-statistic corrected over six pairs "
           f"[all six reported regardless]:")
-    for p, nm in enumerate(MV.PAIR_NAMES):
-        print(f"     {nm:7s}: T = {ct['observed'][p]:+.3f}  "
-              f"p_corrected = {ct['p_corrected'][p]:.4f}  "
-              f"(uncorrected {ct['p_uncorrected'][p]:.4f})")
+    for p, nm in enumerate(wc["pairs"]):
+        print(f"     {nm:8s}: dF (abnormal-normal) = {wt['observed'][p]:+.3f}  "
+              f"p_corrected = {wt['p_corrected'][p]:.4f}  "
+              f"(uncorrected {wt['p_uncorrected'][p]:.4f})")
 
-    # Sensitivity analysis. Differencing is a high-pass operation, so per-frame
-    # keypoint noise dominates the raw displacement and attenuates |D| toward
-    # zero by ~1/(1 + sigma_n^2/sigma_s^2). The noise is independent across
-    # limbs, so it does not bias the sign -- but it can hide a real effect. The
-    # band-limited version restores sensitivity without costing specificity;
-    # both are reported, and the pre-specified one above remains primary.
-    if not cfg["band_sensitivity"]:
-        print("  (band-limited sensitivity analysis skipped: "
-              "--no-band-sensitivity)")
-        med_bp = None
-    else:
-        per_bp, med_bp, _ = MV.comovement_dataset(
-            vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"],
-            band=cfg["band"])
-        results["comovement"]["per_recording_bandlimited"] = per_bp
-    if med_bp is not None:
-      ct_bp = MV.comovement_test(med_bp, labels, n_perm=cfg["n_comov"], seed=0)
-      results["comovement"]["medians_bandlimited"] = med_bp
-      results["comovement"]["test_bandlimited"] = ct_bp
-      print(f"  sensitivity analysis, displacements band-limited to "
-            f"{cfg['band'][0]}-{cfg['band'][1]} Hz before the epochs:")
-      for p, nm in enumerate(MV.PAIR_NAMES):
-          print(f"     {nm:7s}: median {np.nanmedian(med_bp[:, p]):+.3f}  "
-                f"T = {ct_bp['observed'][p]:+.3f}  "
-                f"p_corrected = {ct_bp['p_corrected'][p]:.4f}")
-      amp_raw = float(np.nanmedian(np.abs(comov_med)))
-      amp_bp = float(np.nanmedian(np.abs(med_bp)))
-      print(f"     median |D|: {amp_raw:.3f} as specified vs {amp_bp:.3f} "
-            f"band-limited"
-            + ("  -- the raw construct is noise-attenuated here"
-               if amp_bp > 3 * max(amp_raw, 1e-9) else ""))
+    # whole-body aggregation: mean F over pairs (a whole-body coupling pattern
+    # scores high everywhere) and its across-pair spread.
+    agg = ST.mannwhitney(wc["mean_F"][labels == 1], wc["mean_F"][labels == 0])
+    results["wclrpp"]["mean_F_test"] = agg
+    print(f"  whole-body coupling (mean F over pairs): abnormal median "
+          f"{np.nanmedian(wc['mean_F'][labels == 1]):.3f} vs normal "
+          f"{np.nanmedian(wc['mean_F'][labels == 0]):.3f}; AUC "
+          f"{agg['auc']:.3f}, p = {agg['p']:.4f}  [{agg['method']}]")
 
     fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
     fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])

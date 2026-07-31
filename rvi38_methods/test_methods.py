@@ -328,84 +328,138 @@ def test_shrinkage():
     check("moving block bootstrap preserves length", len(blocks) == 500)
 
 
-def test_comovement():
-    print("\nlimb co-movement (cramped-synchronised)")
-    from build_pose import JOINTS
-    J, F, fps = len(JOINTS), 1301, 25.0
-    t = np.arange(F - 1)
-    osc = np.sin(2 * np.pi * 1.0 * t / fps)
-
-    def mk(d):
-        return np.concatenate([np.zeros((1, J, 2)), np.cumsum(d, axis=0)], axis=0)
-
-    i = {L: k for k, L in enumerate(MV.LIMB_ORDER)}
-    # Right limbs sit at negative x and left at positive x, so a bilaterally
-    # symmetric (mirror-image) movement is outward = -x on the right, +x on the
-    # left. With the reflection that is synchrony; without it, opposition.
-    d = np.zeros((F - 1, J, 2))
-    d[:, MV.LIMBS["RA"], 0] = -osc[:, None]
-    d[:, MV.LIMBS["LA"], 0] = +osc[:, None]
-    d[:, MV.LIMBS["RL"], 1] = 0.3 * osc[:, None]
-    d[:, MV.LIMBS["LL"], 1] = 0.3 * osc[:, None]
-    D, energy = MV.comovement_matrices(mk(d), fps=fps)
-    v = float(D[:, i["RA"], i["LA"]].mean())
-    check("bilaterally symmetric arms read as synchrony (D = +1)",
-          abs(v - 1.0) < 1e-6, f"D = {v:+.4f}")
-    Dn, _ = MV.comovement_matrices(mk(d), fps=fps, mirror_side=None)
-    vn = float(Dn[:, i["RA"], i["LA"]].mean())
-    check("without the reflection the same movement reads as opposition",
-          abs(vn + 1.0) < 1e-6, f"D = {vn:+.4f}")
-
-    # anti-phase in the anatomical sense
-    d2 = np.zeros((F - 1, J, 2))
-    d2[:, MV.LIMBS["RA"], 0] = osc[:, None]
-    d2[:, MV.LIMBS["LA"], 0] = osc[:, None]
-    d2[:, MV.LIMBS["RL"], 1] = 0.3 * osc[:, None]
-    d2[:, MV.LIMBS["LL"], 1] = 0.3 * osc[:, None]
-    D2, _ = MV.comovement_matrices(mk(d2), fps=fps)
-    v2 = float(D2[:, i["RA"], i["LA"]].mean())
-    check("anti-phase arms read as opposition (D = -1)", abs(v2 + 1.0) < 1e-6,
-          f"D = {v2:+.4f}")
-
-    check("D is a Gram matrix: unit diagonal",
-          np.allclose(np.diagonal(D, axis1=1, axis2=2), 1.0))
-    check("D is symmetric", np.allclose(D, D.transpose(0, 2, 1)))
-    check("D is positive semi-definite",
-          float(np.linalg.eigvalsh(D).min()) > -1e-9)
-    check("D lies in [-1, 1]",
-          bool(np.nanmin(D) >= -1 - 1e-9 and np.nanmax(D) <= 1 + 1e-9))
-    check("epochs discard the trailing remainder",
-          len(D) == (F - 1) // int(round(fps * 5.0)),
-          f"{len(D)} epochs from {F - 1} displacement frames")
-
-    # a limb with no energy has no direction
-    d3 = np.zeros((F - 1, J, 2))
-    d3[:, MV.LIMBS["RA"], 0] = osc[:, None]
-    D3, _ = MV.comovement_matrices(mk(d3), fps=fps)
-    check("a zero-energy limb yields NaN rather than a fabricated value",
-          bool(np.all(np.isnan(D3[:, i["RA"], i["LA"]]))))
+def test_wclrpp_peakpick():
+    print("\nWCLR-PP peak-picking (spec test vector)")
+    import a9_wclrpp as WP
+    # The exact matrix from the spec: tau in {-2..2}, c=0.25, dtau=1,
+    # ell_min=1, T=D=8. Expected F = 4/8 = 0.5, R2 = 0.3325.
+    M = np.array([
+        [0.05, 0.08, 0.10, 0.06, 0.03],
+        [0.04, 0.07, 0.12, 0.09, 0.05],
+        [0.06, 0.10, 0.15, 0.28, 0.31],
+        [0.05, 0.09, 0.14, 0.30, 0.35],
+        [0.07, 0.11, 0.16, 0.33, 0.38],
+        [0.06, 0.10, 0.15, 0.29, 0.27],
+        [0.05, 0.08, 0.11, 0.07, 0.04],
+        [0.04, 0.06, 0.09, 0.05, 0.03],
+    ])
+    r = WP.peak_pick(M, c=0.25, dtau=1, ell_min=1, h=1, D=8)
+    check("peak-picking reproduces the spec test vector F = 0.5",
+          abs(r["F"] - 0.5) < 1e-9, f"F = {r['F']:.4f}")
+    check("peak-picking reproduces the spec test vector R2 = 0.3325",
+          abs(r["R2"] - 0.3325) < 1e-9, f"R2 = {r['R2']:.4f}")
+    check("exactly one interval survives, of length 4",
+          r["n_intervals"] == 1 and r["intervals"][0][2] == 4)
+    # ell_min gate: raising it above the run length rejects the interval
+    r2 = WP.peak_pick(M, c=0.25, dtau=1, ell_min=5, h=1, D=8)
+    check("an interval shorter than ell_min is discarded",
+          r2["F"] == 0.0 and r2["n_intervals"] == 0)
+    # c gate: raising the cutoff above every peak leaves nothing
+    r3 = WP.peak_pick(M, c=0.5, dtau=1, ell_min=1, h=1, D=8)
+    check("a cutoff above every peak leaves F = 0",
+          r3["F"] == 0.0 and not np.isfinite(r3["R2"]))
 
 
-def test_comovement_inference():
-    print("\nco-movement inference (label permutation, max-statistic)")
+def test_wclrpp_reduction():
+    print("\nWCLR-PP 1-D reduction and non-negativity")
+    import a9_wclrpp as WP
     rng = np.random.default_rng(0)
+    L, w, tmax = 400, 50, 13
+    xA = rng.standard_normal(L) * 0.05
+    xB = 0.6 * np.roll(xA, 3) + rng.standard_normal(L) * 0.03   # A leads B by 3
+    vA = np.stack([xA, np.zeros(L)], axis=1)                    # dy == 0
+    vB = np.stack([xB, np.zeros(L)], axis=1)
+    Mv, taus, _, _ = WP.delta_r2_matrix(vA, vB, w, tmax)
+
+    # scalar reference on dx only (the x-component regression)
+    def scalar(a, b):
+        rows = np.arange(tmax, L - w - tmax + 1)
+        k = rows[:, None] + np.arange(w)[None, :]
+        PA, PB, one = a[k], b[k], np.ones((len(rows), w))
+        X1 = np.stack([one, PA], -1)
+        X2 = np.stack([one, PA, PB], -1)
+        P1 = np.linalg.pinv(np.einsum("dwi,dwj->dij", X1, X1))
+        P2 = np.linalg.pinv(np.einsum("dwi,dwj->dij", X2, X2))
+        out = np.empty((len(rows), len(taus)))
+        for j, ta in enumerate(taus):
+            Y = a[k + ta]
+            tss = ((Y - Y.mean(1, keepdims=True)) ** 2).sum(1)
+            b1 = np.einsum("dij,dj->di", P1, np.einsum("dwi,dw->di", X1, Y))
+            b2 = np.einsum("dij,dj->di", P2, np.einsum("dwi,dw->di", X2, Y))
+            s1 = ((Y - np.einsum("dwi,di->dw", X1, b1)) ** 2).sum(1)
+            s2 = ((Y - np.einsum("dwi,di->dw", X2, b2)) ** 2).sum(1)
+            out[:, j] = np.where(tss > 1e-12, (s1 - s2) / tss, 0.0)
+        return out
+
+    check("vector delta-R^2 on 1-D motion equals the scalar delta-R^2",
+          np.allclose(Mv, scalar(xA, xB), atol=1e-9),
+          f"max abs diff = {np.abs(Mv - scalar(xA, xB)).max():.1e}")
+    check("delta-R^2 is non-negative in every cell", Mv.min() >= -1e-8,
+          f"min = {Mv.min():+.1e}")
+    # lead-lag: B is a delayed copy of A (A leads), so the peak lag is negative
+    lead = float(np.median(taus[Mv.argmax(1)]))
+    check("lead-lag reads off the correct direction (A leads -> tau < 0)",
+          lead < 0, f"median tau* = {lead:+.0f}")
+    # N_rows > 0
+    check("N_rows is positive for an admissible clip", Mv.shape[0] > 0,
+          f"N_rows = {Mv.shape[0]}")
+
+
+def test_wclrpp_coupling():
+    print("\nWCLR-PP coupling: coupled vs independent, aggregation, inference")
+    import a9_wclrpp as WP
+    from scipy.signal import butter, filtfilt
+    rng = np.random.default_rng(3)
+    F, fps = 1400, 25.0
+    b, a = butter(3, [0.5 / (fps / 2), 2.0 / (fps / 2)], btype="band")
+
+    def bl():
+        return filtfilt(b, a, rng.standard_normal((F, 2)), axis=0) * 0.08
+
+    src = bl()
+    A = src + rng.standard_normal((F, 2)) * 0.005
+    B = np.roll(src, -6, axis=0) + rng.standard_normal((F, 2)) * 0.005  # B leads
+    p = WP.WCLRParams()
+    f_coup = WP.pair_wclrpp(np.diff(A, axis=0), np.diff(B, axis=0), p)["F"]
+    Ai = bl() + rng.standard_normal((F, 2)) * 0.005
+    Bi = bl() + rng.standard_normal((F, 2)) * 0.005
+    f_ind = WP.pair_wclrpp(np.diff(Ai, axis=0), np.diff(Bi, axis=0), p)["F"]
+    check("a coupled pair scores higher F than an independent one",
+          f_coup > f_ind + 0.1, f"F_coupled = {f_coup:.3f} vs {f_ind:.3f}")
+
+    # symmetry: averaging both directions is order-invariant
+    r12 = WP.pair_wclrpp(np.diff(A, axis=0), np.diff(B, axis=0), p)
+    r21 = WP.pair_wclrpp(np.diff(B, axis=0), np.diff(A, axis=0), p)
+    check("the symmetric per-pair score is order-invariant",
+          abs(r12["F"] - r21["F"]) < 1e-9)
+
+    # dataset shape and aggregation
+    from build_pose import JOINTS
+    J = len(JOINTS)
+    vids = [rng.standard_normal((600, J, 2)) * 0.02 for _ in range(4)]
+    ds = WP.wclrpp_dataset(vids, WP.WCLRParams())
+    check("wclrpp_dataset returns one F per pair per recording",
+          ds["F"].shape == (4, 6))
+    check("the aggregation carries mean, spread and strength",
+          ds["mean_F"].shape == (4,) and ds["spread_F"].shape == (4,)
+          and ds["mean_R2"].shape == (4,))
+
+    # group inference: planted pair-1 effect is detected, max-statistic corrected
     n, n_pos = 38, 6
     y = np.zeros(n, int)
     y[:n_pos] = 1
-    # planted: the positives have higher homologous co-movement
-    M = rng.normal(0, 0.05, (n, 6))
-    M[y == 1, 0] += 0.6
-    t = MV.comovement_test(M, y, n_perm=2000, seed=0)
-    check("a planted homologous effect is detected",
+    Fm = np.abs(rng.normal(0, 0.03, (n, 6)))
+    Fm[y == 1, 0] += 0.4
+    t = WP.wclrpp_test(Fm, y, n_perm=2000, seed=0)
+    check("a planted per-pair effect is detected",
           t["p_corrected"][0] < 0.05, f"p = {t['p_corrected'][0]:.4f}")
     check("the corrected p is never below the uncorrected one",
           bool(np.all(t["p_corrected"] >= t["p_uncorrected"])))
     check("all six pairs are reported", len(t["p_corrected"]) == 6)
-    # null control
     yn = np.zeros(n, int)
     yn[rng.choice(n, n_pos, replace=False)] = 1
-    Mn = rng.normal(0, 0.05, (n, 6))
-    tn = MV.comovement_test(Mn, yn, n_perm=2000, seed=1)
+    Fn = np.abs(rng.normal(0, 0.03, (n, 6)))
+    tn = WP.wclrpp_test(Fn, yn, n_perm=2000, seed=1)
     check("a label-shuffled null is not significant",
           float(tn["p_corrected"].min()) > 0.05,
           f"min p = {tn['p_corrected'].min():.3f}")
@@ -430,64 +484,6 @@ def test_fbr():
           f"FBR = {r2:.3f}")
 
 
-def test_comovement_noise_attenuation():
-    print("\nco-movement under keypoint noise (why band-limiting is offered)")
-    from build_pose import JOINTS
-    J, fps, F = len(JOINTS), 25.0, 4001
-    i = {L: k for k, L in enumerate(MV.LIMB_ORDER)}
-
-    def build(nsd, seed=0):
-        """Perfect bilateral synchrony at 1 Hz plus iid keypoint noise."""
-        r = np.random.default_rng(seed)
-        pos = np.zeros((F, J, 2))
-        drive = 0.10 * np.sin(2 * np.pi * 1.0 * np.arange(F) / fps)
-        for j in MV.LIMBS["RA"]:
-            pos[:, j, 0] = -drive
-        for j in MV.LIMBS["LA"]:
-            pos[:, j, 0] = +drive
-        for j in MV.LIMBS["RL"]:
-            pos[:, j, 1] = 0.5 * drive
-        for j in MV.LIMBS["LL"]:
-            pos[:, j, 1] = 0.5 * drive
-        return pos + r.normal(0, nsd, pos.shape)
-
-    clean = build(0.0)
-    d = float(np.nanmean(MV.comovement_matrices(clean, fps=fps)[0][:, i["RA"], i["LA"]]))
-    check("noise-free perfect synchrony gives D = +1", abs(d - 1.0) < 1e-6,
-          f"D = {d:+.4f}")
-
-    noisy = build(0.02)
-    d_raw = float(np.nanmean(
-        MV.comovement_matrices(noisy, fps=fps)[0][:, i["RA"], i["LA"]]))
-    d_bp = float(np.nanmean(
-        MV.comovement_matrices(noisy, fps=fps, band=(0.5, 2.0))[0][:, i["RA"], i["LA"]]))
-    check("keypoint noise attenuates the unfiltered construct", d_raw < 0.5,
-          f"D = {d_raw:+.3f} for a perfectly synchronous pair")
-    check("band-limiting restores the true value", d_bp > 0.85,
-          f"D = {d_bp:+.3f}")
-    check("band-limiting does not flip the sign", d_raw > 0 and d_bp > 0)
-
-    # specificity: genuinely independent limbs must stay near zero either way
-    from scipy.signal import butter, filtfilt
-    b, a = butter(4, [0.5 / (fps / 2), 2.0 / (fps / 2)], btype="band")
-    r = np.random.default_rng(3)
-    pos = np.zeros((F, J, 2))
-    for L in MV.LIMB_ORDER:
-        drv = filtfilt(b, a, r.normal(0, 1, F)) * 0.10
-        sgn = -1.0 if L.startswith("R") else 1.0
-        for j in MV.LIMBS[L]:
-            pos[:, j, 0] += sgn * drv
-    pos = pos + r.normal(0, 0.02, pos.shape)
-    e_raw = float(np.nanmean(
-        MV.comovement_matrices(pos, fps=fps)[0][:, i["RA"], i["LA"]]))
-    e_bp = float(np.nanmean(
-        MV.comovement_matrices(pos, fps=fps, band=(0.5, 2.0))[0][:, i["RA"], i["LA"]]))
-    check("independent limbs stay near zero unfiltered", abs(e_raw) < 0.15,
-          f"D = {e_raw:+.3f}")
-    check("independent limbs stay near zero band-limited", abs(e_bp) < 0.15,
-          f"D = {e_bp:+.3f}")
-
-
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -501,10 +497,10 @@ def main():
     test_fluency()
     test_stats_helpers()
     test_shrinkage()
-    test_comovement()
-    test_comovement_inference()
+    test_wclrpp_peakpick()
+    test_wclrpp_reduction()
+    test_wclrpp_coupling()
     test_fbr()
-    test_comovement_noise_attenuation()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

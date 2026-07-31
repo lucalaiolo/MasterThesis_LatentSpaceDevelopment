@@ -31,7 +31,10 @@ dendrogram and their agreement statistics) has been removed.
         --hmm hmm_rvi38_stream_delta.pkl \
         --labels RVI_38_labels.mat --outdir rvi38_out
 
-`--fast` cuts every resampling count ~20x for a smoke run. `--stream
+`--fast` cuts every resampling count ~20x for a smoke run. `--band LOW,HIGH` sets
+the fidgety band (default `0.5,2.0`) used by the FBR and by the band-limited
+co-movement sensitivity analysis; `--no-band-sensitivity` reports only the
+co-movement construct as specified, and `--epoch-seconds` sets its epoch length. `--stream
 delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per
 subject shorter than the pose trajectory. Either model may be omitted.

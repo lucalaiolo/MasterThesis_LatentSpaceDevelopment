@@ -400,6 +400,15 @@ def main(argv=None):
                     help="which latent stream the model was fitted on; 'auto' infers it from the stored lengths (§4.3)")
     ap.add_argument("--fast", action="store_true",
                     help="cut resampling counts ~20x for a smoke run")
+    ap.add_argument("--band", default="0.5,2.0",
+                    help="fidgety band in Hz as LOW,HIGH (default 0.5,2.0). "
+                         "Used for the raw-velocity FBR and for the "
+                         "band-limited co-movement sensitivity analysis.")
+    ap.add_argument("--no-band-sensitivity", action="store_true",
+                    help="skip the band-limited co-movement sensitivity "
+                         "analysis and report only the construct as specified.")
+    ap.add_argument("--epoch-seconds", type=float, default=5.0,
+                    help="co-movement epoch length in seconds (default 5).")
     ap.add_argument("--no-figures", action="store_true")
     args = ap.parse_args(argv)
 
@@ -419,8 +428,9 @@ def main(argv=None):
         "block": 50, "truncate": 387, "m_max": 6, "duration_tol": 0.3,
         "controls": args.controls, "state_names": args.state_names,
         "n_comov": 2_000 if f else 20_000,   # co-movement label permutations
-        "epoch_seconds": 5.0,                # co-movement epoch length
-        "band": (0.5, 2.0),                  # fidgety band, Hz
+        "epoch_seconds": args.epoch_seconds,  # co-movement epoch length
+        "band": tuple(float(x) for x in args.band.split(",")),
+        "band_sensitivity": not args.no_band_sensitivity,
         "top_frac": 0.10,                    # high-velocity frame fraction
     }
     geom = A.Geometry(args.fps, args.clip, args.nwin, args.stride)
@@ -552,7 +562,7 @@ def main(argv=None):
         "per_recording": per_rec, "medians": comov_med, "n_epochs": n_ep,
         "pairs": MV.PAIR_NAMES,
         "pair_class": [MV.PAIR_CLASS[p] for p in MV.PAIRS],
-        "epoch_seconds": cfg["epoch_seconds"]}
+        "epoch_seconds": cfg["epoch_seconds"], "band_hz": cfg["band"]}
     print(f"  co-movement: {len(vid_arrays)} recordings, epochs/recording "
           f"{n_ep.min()}..{n_ep.max()} (tau = {cfg['epoch_seconds']}s), "
           f"six pairs per epoch")
@@ -577,24 +587,31 @@ def main(argv=None):
     # limbs, so it does not bias the sign -- but it can hide a real effect. The
     # band-limited version restores sensitivity without costing specificity;
     # both are reported, and the pre-specified one above remains primary.
-    _, med_bp, _ = MV.comovement_dataset(
-        vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"],
-        band=cfg["band"])
-    ct_bp = MV.comovement_test(med_bp, labels, n_perm=cfg["n_comov"], seed=0)
-    results["comovement"]["medians_bandlimited"] = med_bp
-    results["comovement"]["test_bandlimited"] = ct_bp
-    print(f"  sensitivity analysis, displacements band-limited to "
-          f"{cfg['band'][0]}-{cfg['band'][1]} Hz before the epochs:")
-    for p, nm in enumerate(MV.PAIR_NAMES):
-        print(f"     {nm:7s}: median {np.nanmedian(med_bp[:, p]):+.3f}  "
-              f"T = {ct_bp['observed'][p]:+.3f}  "
-              f"p_corrected = {ct_bp['p_corrected'][p]:.4f}")
-    amp_raw = float(np.nanmedian(np.abs(comov_med)))
-    amp_bp = float(np.nanmedian(np.abs(med_bp)))
-    print(f"     median |D|: {amp_raw:.3f} as specified vs {amp_bp:.3f} "
-          f"band-limited"
-          + ("  -- the raw construct is noise-attenuated here"
-             if amp_bp > 3 * max(amp_raw, 1e-9) else ""))
+    if not cfg["band_sensitivity"]:
+        print("  (band-limited sensitivity analysis skipped: "
+              "--no-band-sensitivity)")
+        med_bp = None
+    else:
+        per_bp, med_bp, _ = MV.comovement_dataset(
+            vid_arrays, fps=geom.fps, epoch_seconds=cfg["epoch_seconds"],
+            band=cfg["band"])
+        results["comovement"]["per_recording_bandlimited"] = per_bp
+    if med_bp is not None:
+      ct_bp = MV.comovement_test(med_bp, labels, n_perm=cfg["n_comov"], seed=0)
+      results["comovement"]["medians_bandlimited"] = med_bp
+      results["comovement"]["test_bandlimited"] = ct_bp
+      print(f"  sensitivity analysis, displacements band-limited to "
+            f"{cfg['band'][0]}-{cfg['band'][1]} Hz before the epochs:")
+      for p, nm in enumerate(MV.PAIR_NAMES):
+          print(f"     {nm:7s}: median {np.nanmedian(med_bp[:, p]):+.3f}  "
+                f"T = {ct_bp['observed'][p]:+.3f}  "
+                f"p_corrected = {ct_bp['p_corrected'][p]:.4f}")
+      amp_raw = float(np.nanmedian(np.abs(comov_med)))
+      amp_bp = float(np.nanmedian(np.abs(med_bp)))
+      print(f"     median |D|: {amp_raw:.3f} as specified vs {amp_bp:.3f} "
+            f"band-limited"
+            + ("  -- the raw construct is noise-attenuated here"
+               if amp_bp > 3 * max(amp_raw, 1e-9) else ""))
 
     fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
     fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])

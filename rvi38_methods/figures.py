@@ -370,7 +370,8 @@ def fig_gates(res, results, outdir):
 # ---------------------------------------------------------------------------
 # raw kinematics: limb co-movement and the fidgety band
 # ---------------------------------------------------------------------------
-def fig_comovement(res, results, outdir):
+def _comovement_panel(results, per_key, med_key, test_key, subtitle, name,
+                      outdir):
     """Six panels, one per limb pair; each recording is a strip of its epochs.
 
     Within-recording spread separates consistent from intermittent co-movement,
@@ -379,10 +380,11 @@ def fig_comovement(res, results, outdir):
     cramped-synchronised direction, a negative one the reciprocal pattern.
     """
     cm = results.get("comovement")
-    if not cm:
+    if not cm or per_key not in cm:
         return None
-    per = cm["per_recording"]
-    med = np.asarray(cm["medians"], float)
+    per = cm[per_key]
+    med = np.asarray(cm[med_key], float)
+    test = cm.get(test_key)
     y = np.asarray(results["labels"]).astype(int)
     names, klass = cm["pairs"], cm["pair_class"]
     n = len(per)
@@ -405,44 +407,39 @@ def fig_comovement(res, results, outdir):
             ax.plot([slot - 0.42, slot + 0.42], [np.median(v)] * 2, color=col,
                     lw=1.6, zorder=3)
         ax.axhline(0.0, color="0.5", lw=0.8, ls="--", zorder=1)
-        t = results.get("comovement", {}).get("test")
-        extra = (f"   p={t['p_corrected'][p]:.3f}" if t is not None else "")
+        extra = (f"   p={test['p_corrected'][p]:.3f}" if test is not None else "")
         ax.set_title(f"{names[p]}  ({klass[p]}){extra}", fontsize=9, loc="left")
         ax.set_xlim(-1, n)
         ax.set_ylim(-1.05, 1.05)
         ax.set_xticks([])
         if p % 2 == 0:
             ax.set_ylabel("co-movement $D$")
-    fig.suptitle("Limb co-movement per 5 s epoch  (+ together, − opposition); "
-                 "one strip per infant, red = abnormal", fontsize=10)
-    return _save(fig, outdir, "comovement")
+    fig.suptitle(f"Limb co-movement per epoch — {subtitle}\n"
+                 "(+ together, − opposition); one strip per infant, "
+                 "red = abnormal", fontsize=10)
+    return _save(fig, outdir, name)
 
 
-def fig_fbr(res, results, outdir):
-    """Raw-velocity fidgety band ratio by diagnostic group."""
-    fb = results.get("fbr")
-    if not fb:
-        return None
-    v = np.asarray(fb["values"], float)
-    y = np.asarray(results["labels"]).astype(int)
-    t = fb.get("test", {})
-    fig, ax = plt.subplots(figsize=(4.0, 3.6))
-    rng = np.random.default_rng(0)
-    for k, (lab, col) in enumerate(((("normal"), NEG), (("abnormal"), POS))):
-        g = v[(y == k) & np.isfinite(v)]
-        ax.boxplot([g], positions=[k], widths=0.5, showfliers=False,
-                   medianprops=dict(color="black"))
-        ax.scatter(k + rng.uniform(-0.09, 0.09, len(g)), g, s=16, color=col,
-                   alpha=0.7, zorder=3, label=f"{lab} (n={len(g)})")
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(["normal", "abnormal"])
-    band = fb.get("band", (0.5, 2.0))
-    ax.set_ylabel(f"power fraction in {band[0]}–{band[1]} Hz")
-    ttl = "Fidgety band ratio, raw velocities"
-    if t:
-        ttl += f"\nAUC {t['auc']:.3f}, p = {t['p']:.3f}"
-    ax.set_title(ttl, fontsize=9, loc="left")
-    return _save(fig, outdir, "fidgety_band_ratio")
+def fig_comovement(res, results, outdir):
+    """Co-movement exactly as specified (unfiltered displacements)."""
+    return _comovement_panel(results, "per_recording", "medians", "test",
+                             "as specified, unfiltered", "comovement", outdir)
+
+
+def fig_comovement_bandlimited(res, results, outdir):
+    """The same construct with the displacements band-limited first.
+
+    Differencing is high-pass, so keypoint noise attenuates |D| toward zero
+    without biasing its sign; this panel is the sensitivity analysis and is
+    plotted beside the pre-specified one rather than replacing it.
+    """
+    cm = results.get("comovement", {})
+    band = cm.get("band_hz")
+    sub = (f"band-limited {band[0]}–{band[1]} Hz" if band
+           else "band-limited (sensitivity analysis)")
+    return _comovement_panel(results, "per_recording_bandlimited",
+                             "medians_bandlimited", "test_bandlimited",
+                             sub, "comovement_bandlimited", outdir)
 
 
 def _velocity_panel(prof, res, outdir, name, colors, hatch, title):
@@ -510,7 +507,8 @@ ALL = [fig_state_signature, fig_similarity, fig_fluency_per_subject,
        fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage, fig_split_half,
        fig_auc, fig_loo, fig_redundancy, fig_gates,
-       fig_comovement, fig_fbr, fig_velocity_regions, fig_velocity_lateral]
+       fig_comovement, fig_comovement_bandlimited,
+       fig_velocity_regions, fig_velocity_lateral]
 
 
 def make_all(results, outdir):

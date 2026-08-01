@@ -21,10 +21,10 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
 | `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
 | `a8_movement.py` | raw kinematics: fidgety band ratio, per-state velocity profiles |
-| `a9_wclrpp.py` | WCLR-PP inter-limb coordination: limb velocity signals, vector-valued conditional limb regression, peak-picking, per-pair F/R2, label-permutation and circular-shift surrogate inference |
+| `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, label-permutation and circular-shift surrogate inference |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 71 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 59 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 
 ## Run
@@ -39,7 +39,10 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 the fidgety band (default `0.5,2.0`) used by the FBR. The WCLR-PP window and
 peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
 `--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
-`--wclr-ell-min` (minimum coupled run, default 19); vary `w`, `tau_max` and `c`
+`--wclr-ell-min` (minimum coupled run, default 19) and `--wclr-dtau` (peak-lag
+continuity tolerance, default 1 — consecutive windows chain into one coupled run
+only while their peak lags stay within this many frames, so raising it tolerates
+more lag wander and F rises); vary `w`, `tau_max` and `c`
 over declared grids for the robustness pass. `--wclr-limb-signal` chooses which
 joints define a limb's velocity — `end_effector` (default: wrist/ankle alone,
 the specified construct), `distal` (elbow+wrist, knee+ankle) or `limb` (the
@@ -49,7 +52,6 @@ buy far less noise suppression than they appear to (see `LIMB_SIGNALS` in
 torso-normalised velocities are near-negations of each other across the
 midline — ΔR² ignores the sign of a relation, so that reads as coupling in
 exactly the homologous pairs that carry the cramped-synchronised signature.
-Every run prints that midline tie as a diagnostic before the coupling table.
 `--stream
 delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per

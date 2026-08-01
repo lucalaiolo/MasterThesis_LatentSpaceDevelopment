@@ -39,7 +39,10 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 the fidgety band (default `0.5,2.0`) used by the FBR. The WCLR-PP window and
 peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
 `--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
-`--wclr-ell-min` (minimum coupled run, default 19); vary `w`, `tau_max` and `c`
+`--wclr-ell-min` (minimum coupled run, default 19) and `--wclr-dtau` (peak-lag
+continuity tolerance, default 1 — consecutive windows chain into one coupled run
+only while their peak lags stay within this many frames, so raising it tolerates
+more lag wander and F rises); vary `w`, `tau_max` and `c`
 over declared grids for the robustness pass. `--wclr-limb-signal` chooses which
 joints define a limb's velocity — `end_effector` (default: wrist/ankle alone,
 the specified construct), `distal` (elbow+wrist, knee+ankle) or `limb` (the

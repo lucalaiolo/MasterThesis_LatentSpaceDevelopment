@@ -416,6 +416,13 @@ def main(argv=None):
     ap.add_argument("--wclr-ell-min", type=int, default=19,
                     help="WCLR-PP minimum coupled-run length in frames "
                          "(default 19 = 0.76 s).")
+    ap.add_argument("--wclr-dtau", type=int, default=1,
+                    help="WCLR-PP peak-lag continuity tolerance in frames "
+                         "(default 1, the spec value): consecutive windows "
+                         "chain into one coupled run only while their peak "
+                         "lags stay within this many frames. Raising it "
+                         "tolerates more lag wander, so runs survive more "
+                         "often and F rises.")
     ap.add_argument("--wclr-limb-signal", choices=sorted(WP.LIMB_SIGNALS),
                     default=WP.DEFAULT_LIMB_SIGNAL,
                     help="which joints define a limb's velocity: "
@@ -446,6 +453,7 @@ def main(argv=None):
         "n_wclr": 2_000 if f else 20_000,    # WCLR-PP label permutations
         "wclr_w": args.wclr_w, "wclr_tau_max": args.wclr_tau_max,
         "wclr_c": args.wclr_c, "wclr_ell_min": args.wclr_ell_min,
+        "wclr_dtau": args.wclr_dtau,
         "wclr_limb_signal": args.wclr_limb_signal,
         "band": tuple(float(x) for x in args.band.split(",")),
         "top_frac": 0.10,                    # high-velocity frame fraction
@@ -581,7 +589,8 @@ def main(argv=None):
     # over both regression directions.
     wp = WP.WCLRParams(w=cfg["wclr_w"], tau_max=cfg["wclr_tau_max"],
                        ell_min=cfg["wclr_ell_min"], c=cfg["wclr_c"],
-                       fps=geom.fps, limb_signal=cfg["wclr_limb_signal"])
+                       dtau=cfg["wclr_dtau"], fps=geom.fps,
+                       limb_signal=cfg["wclr_limb_signal"])
 
     wc = WP.wclrpp_dataset(vid_arrays, wp)
     results["wclrpp"] = {
@@ -589,14 +598,16 @@ def main(argv=None):
         "pair_class": wc["pair_class"], "mean_F": wc["mean_F"],
         "spread_F": wc["spread_F"], "mean_R2": wc["mean_R2"],
         "params": {"w": wp.w, "tau_max": wp.tau_max, "ell_min": wp.ell_min,
-                   "c": wp.c, "fps": wp.fps, "limb_signal": wp.limb_signal}}
+                   "c": wp.c, "dtau": wp.dtau, "fps": wp.fps,
+                   "limb_signal": wp.limb_signal}}
     print(f"  WCLR-PP: {len(vid_arrays)} recordings, six limb pairs, "
           f"limb signal '{wp.limb_signal}' "
           f"({'+'.join(str(j) for j in WP.LIMB_SIGNALS[wp.limb_signal]['RA'])}"
           f" for the right arm), "
           f"w={wp.w} frames ({wp.w / geom.fps:.1f}s), "
           f"tau_max={wp.tau_max} (+/-{wp.tau_max / geom.fps:.2f}s), "
-          f"c={wp.c}, ell_min={wp.ell_min} ({wp.ell_min / geom.fps:.2f}s)")
+          f"c={wp.c}, ell_min={wp.ell_min} ({wp.ell_min / geom.fps:.2f}s), "
+          f"dtau={wp.dtau}")
     for p, nm in enumerate(wc["pairs"]):
         print(f"     {nm:8s} ({wc['pair_class'][p]:>13s}): "
               f"median F over subjects {np.nanmedian(wc['F'][:, p]):.3f}  "

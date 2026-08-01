@@ -424,8 +424,7 @@ def main(argv=None):
                          "'limb' (whole chain). 'limb' folds in shoulder and "
                          "hip, whose torso-normalised velocities are close to "
                          "negations of each other across the midline and so "
-                         "manufacture coupling in the homologous pairs -- the "
-                         "run prints that diagnostic before using them.")
+                         "manufacture coupling in the homologous pairs.")
     ap.add_argument("--no-figures", action="store_true")
     args = ap.parse_args(argv)
 
@@ -583,19 +582,6 @@ def main(argv=None):
     wp = WP.WCLRParams(w=cfg["wclr_w"], tau_max=cfg["wclr_tau_max"],
                        ell_min=cfg["wclr_ell_min"], c=cfg["wclr_c"],
                        fps=geom.fps, limb_signal=cfg["wclr_limb_signal"])
-
-    # Torso normalisation can tie the two hips (and the two shoulders) to be
-    # negations of one another, which delta-R^2 -- blind to the sign of a
-    # relation -- would read as coupling in the homologous pairs. Report how
-    # strong that tie is, since it is what makes the proximal joints unusable
-    # in the limb mean when it is tight.
-    pa = WP.proximal_antisymmetry(vid_arrays)
-    results["wclrpp_proximal_antisymmetry"] = pa
-    print("  proximal cross-midline tie (a normalisation artefact, not the "
-          "infant; |r| near 1 disqualifies these joints from the limb mean):")
-    for nm, d in pa.items():
-        print(f"     {nm:20s} r = {d['median_r']:+.3f}, velocity RMS "
-              f"{d['median_rms_vs_distal']:.2f}x the end-effector's")
 
     wc = WP.wclrpp_dataset(vid_arrays, wp)
     results["wclrpp"] = {

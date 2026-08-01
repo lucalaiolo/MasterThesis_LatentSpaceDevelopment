@@ -92,9 +92,7 @@ LIMB_ORDER: tuple[str, ...] = ("RA", "LA", "RL", "LL")
 #: injects near-perfectly predictable common variance into precisely the two
 #: homologous pairs (RA-LA, RL-LL) that carry the cramped-synchronised
 #: signature, driving their ``F`` toward the ceiling for every infant and
-#: flattening the group contrast. :func:`proximal_antisymmetry` measures how
-#: strong that relation actually is in a cohort; check it before using
-#: ``"limb"``.
+#: flattening the group contrast.
 LIMB_SIGNALS: dict[str, dict[str, tuple[int, ...]]] = {
     "end_effector": {"RA": (4,), "LA": (7,), "RL": (11,), "LL": (14,)},
     "distal": {"RA": (3, 4), "LA": (6, 7), "RL": (10, 11), "LL": (13, 14)},
@@ -192,42 +190,6 @@ def limb_velocities(video: np.ndarray,
     vel = np.diff(x, axis=0)                                    # (L, J, 2)
     return np.stack([vel[:, list(joints[L]), :].mean(axis=1)
                      for L in LIMB_ORDER], axis=1)              # (L, 4, 2)
-
-
-def proximal_antisymmetry(vids) -> dict:
-    """How close each proximal joint pair is to being a negation of the other.
-
-    The diagnostic behind the warning on :data:`LIMB_SIGNALS`. For the two
-    joint pairs that torso normalisation can tie together, reports the median
-    over recordings of the velocity correlation (``median_r``; ``-1`` is exact
-    negation, and any ``|r|`` near 1 is equally damaging because ``ΔR²`` ignores
-    the sign) and the median size of those velocities relative to the limb's
-    end-effector (``median_rms_vs_distal``), which is what sets how much of the
-    ``"limb"`` mean the shared component actually occupies.
-    """
-    from build_pose import JOINTS
-    idx = {n: JOINTS.index(n) for n in
-           ("RShoulder", "LShoulder", "RHip", "LHip",
-            "RWrist", "LWrist", "RAnkle", "LAnkle")}
-    out: dict[str, dict[str, float]] = {}
-    for prox, distal in ((("RShoulder", "LShoulder"), ("RWrist", "LWrist")),
-                         (("RHip", "LHip"), ("RAnkle", "LAnkle"))):
-        rs, shares = [], []
-        for v in vids:
-            d = np.diff(np.asarray(v, float), axis=0)
-            a = d[:, idx[prox[0]], :].ravel()
-            b = d[:, idx[prox[1]], :].ravel()
-            if a.std() > 0 and b.std() > 0:
-                rs.append(float(np.corrcoef(a, b)[0, 1]))
-            p_rms = np.sqrt((d[:, [idx[prox[0]], idx[prox[1]]], :] ** 2).mean())
-            d_rms = np.sqrt((d[:, [idx[distal[0]], idx[distal[1]]], :] ** 2).mean())
-            if d_rms > 0:
-                shares.append(float(p_rms / d_rms))
-        out["-".join(prox)] = {
-            "median_r": float(np.median(rs)) if rs else np.nan,
-            "median_rms_vs_distal": float(np.median(shares)) if shares else np.nan,
-        }
-    return out
 
 
 # ---------------------------------------------------------------------------

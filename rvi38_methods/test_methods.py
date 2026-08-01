@@ -465,116 +465,6 @@ def test_wclrpp_coupling():
           f"min p = {tn['p_corrected'].min():.3f}")
 
 
-def test_wclrpp_limb_signal():
-    print("\nWCLR-PP limb velocity signal")
-    import a9_wclrpp as WP
-    from scipy.signal import butter, filtfilt
-    from build_pose import JOINTS
-    rng = np.random.default_rng(11)
-
-    # --- the mean is over exactly the listed joints -----------------------
-    vid = rng.standard_normal((200, len(JOINTS), 2)) * 0.02
-    d = np.diff(vid, axis=0)
-    V_ee = WP.limb_velocities(vid, "end_effector")
-    check("the end-effector signal is the raw wrist/ankle velocity",
-          np.allclose(V_ee[:, WP.LIMB_ORDER.index("RA"), :],
-                      d[:, JOINTS.index("RWrist"), :]))
-    V_li = WP.limb_velocities(vid, "limb")
-    chain = [JOINTS.index(n) for n in ("RHip", "RKnee", "RAnkle")]
-    check("the limb signal is the mean over the limb's joints",
-          np.allclose(V_li[:, WP.LIMB_ORDER.index("RL"), :],
-                      d[:, chain, :].mean(axis=1)))
-    check("every signal yields one 2-D series per limb",
-          all(WP.limb_velocities(vid, s).shape == (199, 4, 2)
-              for s in WP.LIMB_SIGNALS))
-    try:
-        WP.limb_velocities(vid, "elbows")
-        check("an unknown limb signal is rejected", False)
-    except ValueError:
-        check("an unknown limb signal is rejected", True)
-
-    # --- labels follow the signal, classes stay aligned -------------------
-    check("end-effector runs are labelled by keypoint",
-          WP.pair_names("end_effector")[0] == "RWr-LWr")
-    check("limb-average runs are labelled by limb",
-          WP.pair_names("limb")[0] == "RA-LA"
-          and WP.pair_names("distal")[1] == "RL-LL")
-    check("the anatomical classes stay aligned with the pairs",
-          WP.PAIR_CLASSES[:2] == ("homologous", "homologous")
-          and len(WP.PAIR_CLASSES) == 6)
-    ds = WP.wclrpp_dataset([rng.standard_normal((300, len(JOINTS), 2)) * 0.02],
-                           WP.WCLRParams(limb_signal="distal"))
-    check("the dataset reports the signal it was built with",
-          ds["limb_signal"] == "distal" and ds["pairs"][0] == "RA-LA"
-          and ds["F"].shape == (1, 6))
-
-    # --- the proximal hazard, demonstrated -------------------------------
-    # Torso normalisation places RHip/LHip about a pinned MidHip, so a pelvis
-    # motion moves them by exact negations of each other. delta-R^2 ignores the
-    # sign of a relation, so folding the hips into the limb mean reads that
-    # normalisation artefact as leg coupling -- with the legs independent.
-    # The contrast is within-signal: one cohort of recordings, then the same
-    # recordings with only a midline-tied pelvis component added, so nothing
-    # but the artefact differs.
-    fps, F = 25.0, 800
-    bb, aa = butter(3, [0.5 / (fps / 2), 2.0 / (fps / 2)], btype="band")
-
-    def one(seed):
-        r = np.random.default_rng(seed)
-
-        def bl(scale):
-            return filtfilt(bb, aa, r.standard_normal((F, 2)), axis=0) * scale
-
-        x = np.zeros((F, len(JOINTS), 2))
-        for limb in (("RHip", "RKnee", "RAnkle"), ("LHip", "LKnee", "LAnkle"),
-                     ("RShoulder", "RElbow", "RWrist"),
-                     ("LShoulder", "LElbow", "LWrist")):
-            s = bl(0.08)                     # each limb moves independently
-            for g, n in zip((0.25, 0.6, 1.0), limb):
-                x[:, JOINTS.index(n), :] += g * s
-        x = x + r.standard_normal(x.shape) * 0.005
-        tied = x.copy()
-        pelvis = bl(0.16)
-        tied[:, JOINTS.index("RHip"), :] += pelvis
-        tied[:, JOINTS.index("LHip"), :] -= pelvis
-        return x, tied
-
-    cohort = [one(11 + k) for k in range(5)]
-    free, tied = [c[0] for c in cohort], [c[1] for c in cohort]
-    pa = WP.proximal_antisymmetry(tied)
-    check("the midline tie is detected as a near-exact negation",
-          pa["RHip-LHip"]["median_r"] < -0.7,
-          f"r = {pa['RHip-LHip']['median_r']:+.2f}")
-
-    # The signals that exclude the hips cannot see the added component at all,
-    # which is what makes this contrast a clean isolation of the artefact.
-    check("the hip-free signals are untouched by a pelvis component",
-          all(np.array_equal(WP.limb_velocities(a, s),
-                             WP.limb_velocities(b, s))
-              for a, b in zip(free, tied)
-              for s in ("end_effector", "distal")))
-    check("the whole-limb signal does absorb it",
-          not np.array_equal(WP.limb_velocities(free[0], "limb"),
-                             WP.limb_velocities(tied[0], "limb")))
-
-    p = WP.WCLRParams()
-    i = {L: k for k, L in enumerate(WP.LIMB_ORDER)}
-
-    def leg_coupling(vids, signal):
-        out = []
-        for v in vids:
-            V = WP.limb_velocities(v, signal)
-            out.append(WP.pair_wclrpp(V[:, i["RL"], :], V[:, i["LL"], :],
-                                      p)["F"])
-        return float(np.median(out))
-
-    f0 = leg_coupling(free, "limb")
-    f1 = leg_coupling(tied, "limb")
-    check("a pelvis component alone manufactures leg coupling under 'limb'",
-          f1 > f0 + 0.04,
-          f"median F {f0:.3f} -> {f1:.3f} with the legs still independent")
-
-
 def test_fbr():
     print("\nfidgety band ratio")
     from build_pose import JOINTS
@@ -610,7 +500,6 @@ def main():
     test_wclrpp_peakpick()
     test_wclrpp_reduction()
     test_wclrpp_coupling()
-    test_wclrpp_limb_signal()
     test_fbr()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

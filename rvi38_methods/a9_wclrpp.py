@@ -27,6 +27,13 @@ The Frobenius (trace) norm makes the measure rotation- and scale-invariant. The
 ``(t,\\tau)`` map of ``ΔR²`` is reduced by the peak-picking of the spec to two
 per-pair scalars: ``F`` (fraction of assessable time spent coupled, the
 pathological quantity) and ``R2`` (mean coupling strength when coupled).
+
+What counts as "a limb's velocity" is a construct choice, exposed as
+:data:`LIMB_SIGNALS` and selected by ``WCLRParams.limb_signal``: the distal
+end-effector alone (``"end_effector"``, the original specification), the mean
+over the distal two joints (``"distal"``), or the mean over the whole chain
+including shoulder or hip (``"limb"``). The proximal joints are not a free
+choice here — see the warning on :data:`LIMB_SIGNALS`.
 """
 
 from __future__ import annotations
@@ -44,25 +51,90 @@ def _nanmean(a, axis=None):
         return np.nanmean(a, axis=axis)
 
 # ---------------------------------------------------------------------------
-# limb end-effectors and the six clinically-motivated pairs (BODY-15 layout)
+# limb velocity signals and the six clinically-motivated pairs (BODY-15 layout)
 # ---------------------------------------------------------------------------
+LIMB_ORDER: tuple[str, ...] = ("RA", "LA", "RL", "LL")
+
+#: A limb's velocity signal is the **mean signed** frame-to-frame displacement
+#: of the joints listed here, so which joints are listed is a construct choice:
+#:
+#: ``"end_effector"``
+#:     the distal keypoint alone (wrist, ankle) — the original specification;
+#: ``"distal"``
+#:     elbow+wrist and knee+ankle — the limb average without the proximal
+#:     joints, and the recommended way to read "the velocity of the arm/leg";
+#: ``"limb"``
+#:     the whole chain, shoulder or hip included.
+#:
+#: **Averaging buys less than it appears to.** The motive for a limb average is
+#: that it should suppress per-keypoint detector noise, which differencing
+#: amplifies and which is the binding constraint on this measure. It does, but
+#: weakly: torso normalisation pins MidHip and Neck, so proximal joints must
+#: move *less* than distal ones, and they therefore contribute little signal
+#: while contributing full noise. Simulated at a plausible chain gain
+#: (0.25/0.6/1.0 from proximal to distal), the velocity SNR of the leg signal
+#: relative to the ankle alone is **1.18x** for ``"distal"`` and **1.03x** for
+#: ``"limb"`` under iid per-keypoint noise -- and *below* 1 (0.74x and 0.47x)
+#: once the detector's errors are correlated along the limb, as they are
+#: whenever a mislocated segment moves its joints together. Prefer these
+#: variants as a robustness check on the end-effector result, not as an
+#: upgrade to it.
+#:
+#: **The proximal joints are not a free choice.** The pose is torso-normalised
+#: (:mod:`build_pose`: MidHip pinned at ``(0,0)``, Neck at ``(0,1)``), which
+#: leaves RHip/LHip placed about a fixed MidHip and RShoulder/LShoulder about a
+#: fixed Neck. Wherever that placement is symmetric — MidHip at the midpoint of
+#: the two hips is exactly the case in which it is — the two hips carry velocity
+#: components that are a *negation* of one another, and likewise the two
+#: shoulders: a deterministic linear relation that is a property of the
+#: normalisation, not of the infant. ``ΔR²`` is explained variance and is blind
+#: to the sign of the relation, so folding those joints into the limb means
+#: injects near-perfectly predictable common variance into precisely the two
+#: homologous pairs (RA-LA, RL-LL) that carry the cramped-synchronised
+#: signature, driving their ``F`` toward the ceiling for every infant and
+#: flattening the group contrast. :func:`proximal_antisymmetry` measures how
+#: strong that relation actually is in a cohort; check it before using
+#: ``"limb"``.
+LIMB_SIGNALS: dict[str, dict[str, tuple[int, ...]]] = {
+    "end_effector": {"RA": (4,), "LA": (7,), "RL": (11,), "LL": (14,)},
+    "distal": {"RA": (3, 4), "LA": (6, 7), "RL": (10, 11), "LL": (13, 14)},
+    "limb": {"RA": (2, 3, 4), "LA": (5, 6, 7),
+             "RL": (9, 10, 11), "LL": (12, 13, 14)},
+}
+DEFAULT_LIMB_SIGNAL = "end_effector"
+
 END_EFFECTORS: dict[str, int] = {
     "RWrist": 4, "LWrist": 7, "RAnkle": 11, "LAnkle": 14,
 }
 
-# Each pair is (index A, index B, anatomical class, short name). The class is
-# the interpretive key: a homologous or ipsilateral coupling that is high on
-# every pair at once is the whole-body cramped-synchronised pattern.
-PAIRS: tuple[tuple[int, int, str, str], ...] = (
-    (4, 7, "homologous", "RWr-LWr"),      # homologous arms
-    (11, 14, "homologous", "RAn-LAn"),    # homologous legs
-    (4, 11, "ipsilateral", "RWr-RAn"),    # ipsilateral right
-    (7, 14, "ipsilateral", "LWr-LAn"),    # ipsilateral left
-    (4, 14, "contralateral", "RWr-LAn"),  # contralateral
-    (7, 11, "contralateral", "LWr-RAn"),  # contralateral
+# Each pair is (limb A, limb B, anatomical class). The class is the interpretive
+# key: a homologous or ipsilateral coupling that is high on every pair at once is
+# the whole-body cramped-synchronised pattern.
+PAIRS: tuple[tuple[str, str, str], ...] = (
+    ("RA", "LA", "homologous"),      # homologous arms
+    ("RL", "LL", "homologous"),      # homologous legs
+    ("RA", "RL", "ipsilateral"),     # ipsilateral right
+    ("LA", "LL", "ipsilateral"),     # ipsilateral left
+    ("RA", "LL", "contralateral"),   # contralateral
+    ("LA", "RL", "contralateral"),   # contralateral
 )
-PAIR_NAMES: tuple[str, ...] = tuple(p[3] for p in PAIRS)
-PAIR_CLASS: dict[str, str] = {p[3]: p[2] for p in PAIRS}
+PAIR_CLASSES: tuple[str, ...] = tuple(p[2] for p in PAIRS)
+
+# Labels follow the signal: an end-effector run is named for the keypoint it
+# actually uses, a limb-average run for the limb.
+_SIGNAL_ABBREV: dict[str, dict[str, str]] = {
+    "end_effector": {"RA": "RWr", "LA": "LWr", "RL": "RAn", "LL": "LAn"},
+}
+
+
+def pair_names(limb_signal: str = DEFAULT_LIMB_SIGNAL) -> tuple[str, ...]:
+    """The six pair labels for a limb signal, in :data:`PAIRS` order."""
+    ab = _SIGNAL_ABBREV.get(limb_signal, {})
+    return tuple(f"{ab.get(a, a)}-{ab.get(b, b)}" for a, b, _ in PAIRS)
+
+
+PAIR_NAMES: tuple[str, ...] = pair_names()
+PAIR_CLASS: dict[str, str] = dict(zip(PAIR_NAMES, PAIR_CLASSES))
 
 
 @dataclass(frozen=True)
@@ -74,6 +146,11 @@ class WCLRParams:
     ``c`` = 0.25 magnitude cutoff (kept as a heuristic gate, not compared across
     methods). ``h`` = 1 means one assessable row per frame, so ``F`` is a
     frame-fraction.
+
+    ``limb_signal`` selects which joints define a limb's velocity — a key of
+    :data:`LIMB_SIGNALS` or an explicit ``{limb: joint indices}`` map. It
+    defaults to the specified ``"end_effector"``; changing it changes the
+    construct, not just an estimator setting.
     """
 
     w: int = 50
@@ -84,6 +161,73 @@ class WCLRParams:
     c: float = 0.25
     fps: float = 25.0
     eps: float = 1e-12
+    limb_signal: str = DEFAULT_LIMB_SIGNAL
+
+
+# ---------------------------------------------------------------------------
+# 0. limb velocity signals (the input to everything below)
+# ---------------------------------------------------------------------------
+def limb_velocities(video: np.ndarray,
+                    limb_signal: str | dict[str, tuple[int, ...]]
+                    = DEFAULT_LIMB_SIGNAL) -> np.ndarray:
+    """Per-limb velocity series ``(L, 4, 2)``, limbs in :data:`LIMB_ORDER`.
+
+    The mean is taken over the **signed** displacement, so an oscillation
+    survives it — averaging speeds instead would destroy the very alternation
+    the measure exists to read.
+    """
+    x = np.asarray(video, float)
+    if x.ndim != 3 or x.shape[-1] != 2:
+        raise ValueError(f"video must be (F, J, 2); got {x.shape}")
+    if isinstance(limb_signal, str):
+        if limb_signal not in LIMB_SIGNALS:
+            raise ValueError(f"unknown limb signal {limb_signal!r}; choose "
+                             f"from {sorted(LIMB_SIGNALS)}")
+        joints = LIMB_SIGNALS[limb_signal]
+    else:
+        joints = limb_signal
+    missing = [L for L in LIMB_ORDER if not len(joints.get(L, ()))]
+    if missing:
+        raise ValueError(f"limb signal defines no joints for {missing}")
+    vel = np.diff(x, axis=0)                                    # (L, J, 2)
+    return np.stack([vel[:, list(joints[L]), :].mean(axis=1)
+                     for L in LIMB_ORDER], axis=1)              # (L, 4, 2)
+
+
+def proximal_antisymmetry(vids) -> dict:
+    """How close each proximal joint pair is to being a negation of the other.
+
+    The diagnostic behind the warning on :data:`LIMB_SIGNALS`. For the two
+    joint pairs that torso normalisation can tie together, reports the median
+    over recordings of the velocity correlation (``median_r``; ``-1`` is exact
+    negation, and any ``|r|`` near 1 is equally damaging because ``ΔR²`` ignores
+    the sign) and the median size of those velocities relative to the limb's
+    end-effector (``median_rms_vs_distal``), which is what sets how much of the
+    ``"limb"`` mean the shared component actually occupies.
+    """
+    from build_pose import JOINTS
+    idx = {n: JOINTS.index(n) for n in
+           ("RShoulder", "LShoulder", "RHip", "LHip",
+            "RWrist", "LWrist", "RAnkle", "LAnkle")}
+    out: dict[str, dict[str, float]] = {}
+    for prox, distal in ((("RShoulder", "LShoulder"), ("RWrist", "LWrist")),
+                         (("RHip", "LHip"), ("RAnkle", "LAnkle"))):
+        rs, shares = [], []
+        for v in vids:
+            d = np.diff(np.asarray(v, float), axis=0)
+            a = d[:, idx[prox[0]], :].ravel()
+            b = d[:, idx[prox[1]], :].ravel()
+            if a.std() > 0 and b.std() > 0:
+                rs.append(float(np.corrcoef(a, b)[0, 1]))
+            p_rms = np.sqrt((d[:, [idx[prox[0]], idx[prox[1]]], :] ** 2).mean())
+            d_rms = np.sqrt((d[:, [idx[distal[0]], idx[distal[1]]], :] ** 2).mean())
+            if d_rms > 0:
+                shares.append(float(p_rms / d_rms))
+        out["-".join(prox)] = {
+            "median_r": float(np.median(rs)) if rs else np.nan,
+            "median_rms_vs_distal": float(np.median(shares)) if shares else np.nan,
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -256,17 +400,16 @@ def wclrpp_recording(video: np.ndarray, params: WCLRParams = WCLRParams()
                      ) -> tuple[np.ndarray, np.ndarray]:
     """The six per-pair ``F`` and ``R2`` values for one recording.
 
-    ``video`` is ``(F, 15, 2)`` registered keypoints; velocities are its frame
-    differences. Returns ``(F[6], R2[6])`` in :data:`PAIR_NAMES` order.
+    ``video`` is ``(F, 15, 2)`` registered keypoints; each limb's velocity is
+    built by :func:`limb_velocities` under ``params.limb_signal``. Returns
+    ``(F[6], R2[6])`` in ``pair_names(params.limb_signal)`` order.
     """
-    x = np.asarray(video, float)
-    if x.ndim != 3 or x.shape[-1] != 2:
-        raise ValueError(f"video must be (F, J, 2); got {x.shape}")
-    vel = np.diff(x, axis=0)                    # (L, 15, 2)
+    V = limb_velocities(video, params.limb_signal)     # (L, 4, 2)
+    idx = {L: i for i, L in enumerate(LIMB_ORDER)}
     F = np.full(len(PAIRS), np.nan)
     R2 = np.full(len(PAIRS), np.nan)
-    for p, (a, b, _, _) in enumerate(PAIRS):
-        res = pair_wclrpp(vel[:, a, :], vel[:, b, :], params)
+    for p, (a, b, _) in enumerate(PAIRS):
+        res = pair_wclrpp(V[:, idx[a], :], V[:, idx[b], :], params)
         F[p] = res["F"]
         R2[p] = res["R2"]
     return F, R2
@@ -293,8 +436,9 @@ def wclrpp_dataset(vids, params: WCLRParams = WCLRParams()) -> dict:
             "spread_F": Fmat.std(axis=1),
             "mean_R2": _nanmean(R2mat, axis=1),
         }
-    return {"F": Fmat, "R2": R2mat, "pairs": PAIR_NAMES,
-            "pair_class": [PAIR_CLASS[n] for n in PAIR_NAMES], **agg}
+    return {"F": Fmat, "R2": R2mat, "pairs": pair_names(params.limb_signal),
+            "pair_class": list(PAIR_CLASSES),
+            "limb_signal": params.limb_signal, **agg}
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +455,7 @@ def _contrast(M: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def wclrpp_test(Fmatrix: np.ndarray, labels, n_perm: int = 10000,
-                seed: int = 0) -> dict:
+                seed: int = 0, pairs=None) -> dict:
     """Label-permutation test over the six pairs, max-statistic corrected.
 
     The per-recording ``F`` is the exchangeable unit; the labels are permuted.
@@ -319,6 +463,9 @@ def wclrpp_test(Fmatrix: np.ndarray, labels, n_perm: int = 10000,
     maximum-statistic procedure, and **all six pairs are reported whatever any
     one shows**. Every ``F`` lives on the same ``[0,1]`` scale, so the maximum is
     taken without standardisation.
+
+    ``pairs`` names the columns for the report; pass ``dataset["pairs"]`` so the
+    labels match the limb signal the ``F`` matrix was built with.
     """
     M = np.asarray(Fmatrix, float)
     y = np.asarray(labels).astype(int)
@@ -339,7 +486,8 @@ def wclrpp_test(Fmatrix: np.ndarray, labels, n_perm: int = 10000,
     return {"observed": observed,
             "p_corrected": (1 + (null_max[:, None] >= a[None, :]).sum(0)) / (1 + n_perm),
             "p_uncorrected": (1 + (np.abs(null) >= a[None, :]).sum(0)) / (1 + n_perm),
-            "null_max": null_max, "pairs": PAIR_NAMES, "n_perm": n_perm,
+            "null_max": null_max, "n_perm": n_perm,
+            "pairs": PAIR_NAMES if pairs is None else tuple(pairs),
             "n_pos": n1, "n_neg": n - n1}
 
 

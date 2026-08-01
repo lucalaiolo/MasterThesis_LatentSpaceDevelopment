@@ -416,6 +416,16 @@ def main(argv=None):
     ap.add_argument("--wclr-ell-min", type=int, default=19,
                     help="WCLR-PP minimum coupled-run length in frames "
                          "(default 19 = 0.76 s).")
+    ap.add_argument("--wclr-limb-signal", choices=sorted(WP.LIMB_SIGNALS),
+                    default=WP.DEFAULT_LIMB_SIGNAL,
+                    help="which joints define a limb's velocity: "
+                         "'end_effector' (wrist/ankle only, the specified "
+                         "construct), 'distal' (elbow+wrist, knee+ankle) or "
+                         "'limb' (whole chain). 'limb' folds in shoulder and "
+                         "hip, whose torso-normalised velocities are close to "
+                         "negations of each other across the midline and so "
+                         "manufacture coupling in the homologous pairs -- the "
+                         "run prints that diagnostic before using them.")
     ap.add_argument("--no-figures", action="store_true")
     args = ap.parse_args(argv)
 
@@ -437,6 +447,7 @@ def main(argv=None):
         "n_wclr": 2_000 if f else 20_000,    # WCLR-PP label permutations
         "wclr_w": args.wclr_w, "wclr_tau_max": args.wclr_tau_max,
         "wclr_c": args.wclr_c, "wclr_ell_min": args.wclr_ell_min,
+        "wclr_limb_signal": args.wclr_limb_signal,
         "band": tuple(float(x) for x in args.band.split(",")),
         "top_frac": 0.10,                    # high-velocity frame fraction
     }
@@ -571,15 +582,32 @@ def main(argv=None):
     # over both regression directions.
     wp = WP.WCLRParams(w=cfg["wclr_w"], tau_max=cfg["wclr_tau_max"],
                        ell_min=cfg["wclr_ell_min"], c=cfg["wclr_c"],
-                       fps=geom.fps)
+                       fps=geom.fps, limb_signal=cfg["wclr_limb_signal"])
+
+    # Torso normalisation can tie the two hips (and the two shoulders) to be
+    # negations of one another, which delta-R^2 -- blind to the sign of a
+    # relation -- would read as coupling in the homologous pairs. Report how
+    # strong that tie is, since it is what makes the proximal joints unusable
+    # in the limb mean when it is tight.
+    pa = WP.proximal_antisymmetry(vid_arrays)
+    results["wclrpp_proximal_antisymmetry"] = pa
+    print("  proximal cross-midline tie (a normalisation artefact, not the "
+          "infant; |r| near 1 disqualifies these joints from the limb mean):")
+    for nm, d in pa.items():
+        print(f"     {nm:20s} r = {d['median_r']:+.3f}, velocity RMS "
+              f"{d['median_rms_vs_distal']:.2f}x the end-effector's")
+
     wc = WP.wclrpp_dataset(vid_arrays, wp)
     results["wclrpp"] = {
         "F": wc["F"], "R2": wc["R2"], "pairs": wc["pairs"],
         "pair_class": wc["pair_class"], "mean_F": wc["mean_F"],
         "spread_F": wc["spread_F"], "mean_R2": wc["mean_R2"],
         "params": {"w": wp.w, "tau_max": wp.tau_max, "ell_min": wp.ell_min,
-                   "c": wp.c, "fps": wp.fps}}
+                   "c": wp.c, "fps": wp.fps, "limb_signal": wp.limb_signal}}
     print(f"  WCLR-PP: {len(vid_arrays)} recordings, six limb pairs, "
+          f"limb signal '{wp.limb_signal}' "
+          f"({'+'.join(str(j) for j in WP.LIMB_SIGNALS[wp.limb_signal]['RA'])}"
+          f" for the right arm), "
           f"w={wp.w} frames ({wp.w / geom.fps:.1f}s), "
           f"tau_max={wp.tau_max} (+/-{wp.tau_max / geom.fps:.2f}s), "
           f"c={wp.c}, ell_min={wp.ell_min} ({wp.ell_min / geom.fps:.2f}s)")
@@ -588,7 +616,8 @@ def main(argv=None):
               f"median F over subjects {np.nanmedian(wc['F'][:, p]):.3f}  "
               f"(R2 {np.nanmedian(wc['R2'][:, p]):.3f})")
 
-    wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0)
+    wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0,
+                        pairs=wc["pairs"])
     results["wclrpp"]["test"] = wt
     print(f"  §10 group contrast on per-pair F, labels permuted "
           f"({wt['n_perm']:,} draws), max-statistic corrected over six pairs "

@@ -417,9 +417,11 @@ def fig_wclrpp_pairs(res, results, outdir):
         ax.set_ylim(bottom=0.0)
         if p % 3 == 0:
             ax.set_ylabel("coupled-time fraction $F$")
+    sig = wc.get("params", {}).get("limb_signal")
     fig.suptitle("Inter-limb coordination (WCLR-PP) per limb pair — "
                  "$F$ = fraction of time coupled; higher = "
-                 "cramped-synchronised pole (red = abnormal)", fontsize=10)
+                 "cramped-synchronised pole (red = abnormal)"
+                 + (f"\nlimb velocity: {sig}" if sig else ""), fontsize=10)
     return _save(fig, outdir, "wclrpp_pairs")
 
 

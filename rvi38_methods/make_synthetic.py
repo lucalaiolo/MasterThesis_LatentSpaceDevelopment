@@ -90,6 +90,24 @@ def simulate(n_sub=38, K=11, seed=0, fmin=1600, fmax=2400, geom=None):
     prof = state_profiles(K, rng, bid)
     cdf = A.cumsum(1)
 
+    # Anisotropic shape structure for the direction-aware similarity (§7): each
+    # dynamical block gets its own principal axis, and the active joints of a
+    # state move mostly along it. The per-joint transform ``T`` satisfies
+    # ``trace(T Tᵀ) = 2``, the same total speed variance as isotropic noise, so
+    # the magnitude channel ``a`` is unchanged in expectation and only the axis
+    # is planted -- exactly the redirection the shape channel exists to detect.
+    names = list(GROUPS)
+    n_blocks = int(bid.max()) + 1
+    aniso = 0.85                                       # -> anisotropy rho = 0.85
+    sx, sy = np.sqrt(1 + aniso), np.sqrt(1 - aniso)
+    Tshape = np.tile(np.eye(2), (K, 15, 1, 1))
+    for k in range(K):
+        ang = np.pi * bid[k] / max(n_blocks, 1)        # block axis in [0, pi)
+        R = np.array([[np.cos(ang), -np.sin(ang)],
+                      [np.sin(ang), np.cos(ang)]])
+        for j in GROUPS[names[bid[k] % len(names)]]:
+            Tshape[k, j] = R @ np.diag([sx, sy])
+
     frames = rng.integers(fmin, fmax, n_sub)
     frames = (frames // geom.stride) * geom.stride     # tidy tiling
     rows, states, lengths, vidid = [], [], [], []
@@ -108,11 +126,14 @@ def simulate(n_sub=38, K=11, seed=0, fmin=1600, fmax=2400, geom=None):
                                n_delta - 1)
         amp = prof[s[win_of_frame]]                    # (F, 15)
 
+        state_f = s[win_of_frame]                      # state at each frame
         x = np.tile(BASE, (F, 1, 1))
         jit = np.zeros((15, 2))
         a = 0.72                                       # OU retention
         for t in range(F):
-            jit = a * jit + amp[t][:, None] * rng.normal(size=(15, 2))
+            noise = np.einsum("jab,jb->ja", Tshape[state_f[t]],
+                              rng.normal(size=(15, 2)))
+            jit = a * jit + amp[t][:, None] * noise
             x[t] += jit
         x[:, 1] = BASE[1]                              # Neck exactly (0,1)
         x[:, 8] = BASE[8]                              # MidHip exactly (0,0)

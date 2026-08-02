@@ -67,10 +67,47 @@ def fig_similarity(res, results, outdir):
     ax.set_yticks(range(K)); ax.set_yticklabels(res["state_labels"], fontsize=7)
     plt.colorbar(im, ax=ax, fraction=.046, label="$S_{kk'}$")
     off = S[~np.eye(K, dtype=bool)]
-    ax.set_title(f"Kinematic similarity between states\n"
+    form = res.get("similarity_form", {})
+    sub = ""
+    if form.get("form") == "separated":
+        sub = f"  (separated, $\\omega$={form.get('omega', 0.5):.2f})"
+    elif form.get("form"):
+        sub = f"  ({form['form']})"
+    ax.set_title(f"Kinematic similarity between states{sub}\n"
                  f"off-diagonal range [{off.min():+.2f}, {off.max():+.2f}]",
                  loc="left", fontsize=10)
     return _save(fig, outdir, "similarity_matrix")
+
+
+def fig_similarity_channels(res, results, outdir):
+    """The magnitude and shape channels of the direction-aware similarity.
+
+    Side by side these show what direction adds: two states can share a
+    magnitude signature (both move the same joints at the same speed) yet differ
+    in shape (those joints move along different axes), which is the redirection
+    the fluency construct exists to read.
+    """
+    if "S_mag" not in res or "S_shape" not in res:
+        return None
+    K = res["k"]
+    lab = res["state_labels"]
+    panels = [("magnitude  $S^{\\mathrm{mag}}$", np.asarray(res["S_mag"])),
+              ("shape  $S^{\\mathrm{shape}}$", np.asarray(res["S_shape"]))]
+    if "S_orient" in res:
+        panels.append(("orientation  $S^{\\mathrm{orient}}$",
+                       np.asarray(res["S_orient"])))
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.4 * len(panels), 4.0))
+    for ax, (name, mat) in zip(np.atleast_1d(axes), panels):
+        im = ax.imshow(mat, cmap="RdBu_r", vmin=-1, vmax=1)
+        ax.set_xticks(range(K)); ax.set_xticklabels(range(K), fontsize=6)
+        ax.set_yticks(range(K)); ax.set_yticklabels(lab, fontsize=6)
+        off = mat[~np.eye(K, dtype=bool)]
+        ax.set_title(f"{name}\noff-diag mean {np.nanmean(off):+.2f}",
+                     loc="left", fontsize=9)
+        plt.colorbar(im, ax=ax, fraction=.046)
+    fig.suptitle("Direction-aware similarity, by channel", x=.01, ha="left",
+                 fontsize=10)
+    return _save(fig, outdir, "similarity_channels")
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +559,8 @@ def fig_velocity_lateral(res, results, outdir):
         "hatched = leg)")
 
 
-ALL = [fig_state_signature, fig_similarity, fig_fluency_per_subject,
+ALL = [fig_state_signature, fig_similarity, fig_similarity_channels,
+       fig_fluency_per_subject,
        fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage, fig_split_half,
        fig_auc, fig_loo, fig_redundancy, fig_gates,

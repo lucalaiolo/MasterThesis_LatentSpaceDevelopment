@@ -17,7 +17,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 |---|---|
 | `load_models.py` | lazy stub package for `ssm`/`autograd`; recovers arrays from joblib dumps; normalises both dict layouts to one schema |
 | `build_pose.py` | long CSV to per-video `(F,15,2)`; verifies frame contiguity and the constant-joint property |
-| `a1_core.py` | window-to-frame geometry, state profiles, double-centred similarity, fluency estimators |
+| `a1_core.py` | window-to-frame geometry, state profiles, the direction-aware second-moment signature (`M`, its double-angle shape coordinate `u`) and the magnitude+shape similarity, fluency estimators |
 | `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
 | `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
 | `a8_movement.py` | raw kinematics: fidgety band ratio, per-state velocity profiles |
@@ -36,7 +36,40 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
         --labels RVI_38_labels.mat --outdir rvi38_out
 
 `--fast` cuts every resampling count ~20x for a smoke run. `--band LOW,HIGH` sets
-the fidgety band (default `0.5,2.0`) used by the FBR. The WCLR-PP window and
+the fidgety band (default `0.5,2.0`) used by the FBR.
+
+### Direction-aware fluency (`DIRECTION_AWARE_KINEMATIC_SIMILARITY.md`)
+
+The similarity `S` behind the fluency measure `Φ` is built from a
+**direction-aware** state signature. Each free joint's motion in a state is
+summarised not by a single RMS speed but by the pooled second-moment matrix
+`M[k,j] = mean(v vᵀ)`, whose trace is the same `a[k,j]²` as before and whose
+trace-normalised part is the double-angle axis coordinate
+`u = (ρ cos 2θ, ρ sin 2θ)` — anisotropy `ρ = ‖u‖ ∈ [0,1]` and principal axis
+`θ = ∠u / 2` (mod π). `S` then combines a **magnitude** channel (the log-RMS-speed
+correlation, unchanged) with a **shape** channel (the residual-axis cosine). This
+is local to the signature: no model is refitted, the confirmatory family stays
+`{Φ, 𝒦}`, and the maxT correction is untouched — one statistic enters and one
+leaves.
+
+* `--fluency-similarity {separated,concatenated,scalar}` — how the channels are
+  combined (default `separated`). `separated` (preferred) is
+  `S = ω·S_mag + (1−ω)·S_shape`; `concatenated` standardises and stacks all `3J`
+  residuals into one correlation; `scalar` is the legacy magnitude-only
+  similarity (`ω = 1`), i.e. the §11 sensitivity check against the
+  direction-blind version.
+* `--fluency-omega Ω` — magnitude weight in the separated form (default `0.5`,
+  fixed a priori, in `[0,1]`). `Ω = 1` recovers the scalar measure, `Ω = 0` is
+  shape-only.
+* `--fluency-drop-state-term` — drop the per-state term from the shape
+  residualisation (keep only the per-joint anatomical-axis removal). Off by
+  default (state term kept, matching the magnitude channel); this is the one
+  free modelling choice, reported both ways as a sensitivity check.
+
+The run reports a **magnitude-versus-direction split**: `Φ` recomputed under
+each channel and contrasted across groups, so the study can say whether fluency
+rides on how much a joint moves or on the axis along which it moves. The WCLR-PP
+window and
 peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
 `--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
 `--wclr-ell-min` (minimum coupled run, default 19) and `--wclr-dtau` (peak-lag
@@ -57,10 +90,13 @@ delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per
 subject shorter than the pose trajectory. Either model may be omitted.
 
-Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv`,
-`state_amplitude_profile.csv`, `run.log`, and one figure pair (PNG + PDF) per
-panel, including `wclrpp_pairs` (the six per-limb-pair panels) and
-`wclrpp_summary` (the per-infant aggregation).
+Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
+combined `S`) with `similarity_matrix_magnitude.csv` and
+`similarity_matrix_shape.csv` for its two channels, `state_amplitude_profile.csv`,
+`state_shape_profile.csv` (per state and free joint: anisotropy `ρ`, principal
+axis `θ`, and the `(u₁,u₂)` coordinate), `run.log`, and one figure pair
+(PNG + PDF) per panel, including `wclrpp_pairs` (the six per-limb-pair panels)
+and `wclrpp_summary` (the per-infant aggregation).
 
 Without the archive, exercise the pipeline on synthetic data:
 

@@ -125,7 +125,7 @@ def section(title):
 # ---------------------------------------------------------------------------
 # per-model pipeline
 # ---------------------------------------------------------------------------
-def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
+def analyse_model(model, vids, pose, spd, vel, labels, geom, cfg, tag,
                   stream="delta"):
     """§5-§9 for one fitted model. Returns everything the figures need."""
     st, vid = model["states"], model["vidid"]
@@ -143,13 +143,45 @@ def analyse_model(model, vids, pose, spd, labels, geom, cfg, tag,
           f"{int(nframe.max()):,}  (>= {int(nframe.min()) * len(build_pose.FREE):,} "
           f"joint-frames each)")
 
-    # ---- §6 similarity ----
-    S = A.similarity(amp, "double")
+    # ---- direction-aware signature: the second-moment matrix M[k,j], its
+    # trace is the same a[k,j]^2 as above, and its trace-normalised part gives
+    # the double-angle axis coordinate u[k,j] the shape channel correlates.
+    M, _ = A.state_second_moments(st, vid, vids, vel, pose, geom,
+                                  union=(stream == "delta"), k=amp.shape[0])
+    u = A.shape_coordinates(M)                        # (K, J, 2)
+    out["shape_coord"] = u
+    rho = np.linalg.norm(u[:, build_pose.FREE, :], axis=-1)   # anisotropy on FREE
+    out["anisotropy"] = rho
+    print(f"  §4 shape: anisotropy rho over free joints "
+          f"[{np.nanmin(rho):.2f},{np.nanmax(rho):.2f}] median "
+          f"{np.nanmedian(rho):.2f} (0=isotropic, 1=line)")
+
+    # ---- §6-§7 similarity ----
+    S, Sparts = A.direction_aware_similarity(
+        amp, u, omega=cfg["fluency_omega"], form=cfg["fluency_similarity"],
+        shape_state_term=cfg["fluency_shape_state_term"])
     out["S"] = S
+    out["S_mag"], out["S_shape"] = Sparts["S_mag"], Sparts["S_shape"]
+    out["S_orient"] = Sparts["S_orient"]
+    out["similarity_form"] = {"form": Sparts["form"], "omega": Sparts["omega"],
+                              "shape_state_term": Sparts["shape_state_term"]}
     out["centring"] = A.centring_comparison(amp)
     out["face_validity"] = A.face_validity(S, labels_txt)
+    off = ~np.eye(K, dtype=bool)
+    if cfg["fluency_similarity"] == "separated":
+        print(f"  §7 similarity form: separated, omega={cfg['fluency_omega']:.2f}"
+              f"  (S = omega*S_mag + (1-omega)*S_shape), shape state-term "
+              f"{'kept' if cfg['fluency_shape_state_term'] else 'dropped'}")
+    else:
+        print(f"  §7 similarity form: {cfg['fluency_similarity']}, shape "
+              f"state-term "
+              f"{'kept' if cfg['fluency_shape_state_term'] else 'dropped'}")
+    print(f"     off-diagonal S: combined mean {S[off].mean():+.2f}  |  "
+          f"magnitude {Sparts['S_mag'][off].mean():+.2f}  shape "
+          f"{Sparts['S_shape'][off].mean():+.2f}  orientation "
+          f"{np.nanmean(Sparts['S_orient'][off]):+.2f}")
     c = out["centring"]
-    print(f"  §6 similarity off-diagonal: single-centred "
+    print(f"  §6 magnitude off-diagonal: single-centred "
           f"[{c['single']['min']:+.2f},{c['single']['max']:+.2f}] mean "
           f"{c['single']['mean']:+.2f}  ->  double-centred "
           f"[{c['double']['min']:+.2f},{c['double']['max']:+.2f}] mean "
@@ -310,6 +342,25 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
               f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}], rank-biserial "
               f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}  [{r['method']}]")
 
+    # §7 magnitude-vs-direction split: is the fluency signal carried by how much
+    # a joint moves or by the axis along which it moves? Recompute Phi under
+    # each channel of the direction-aware similarity and contrast the groups.
+    # Descriptive only -- the confirmatory family stays {Phi, Kemeny}.
+    out["channel_split"] = {"combined": out["phi_test"]}
+    for nm, s_key in (("magnitude", "S_mag"), ("shape", "S_shape")):
+        if s_key in res:
+            phi_c = A.phi_excess(st, vid, np.asarray(res[s_key]), n_sub,
+                                 n_perm=cfg["n_phi"], seed=0)["excess"]
+            out["channel_split"][nm] = ST.mannwhitney(phi_c[pos], phi_c[~pos])
+    cs = out["channel_split"]
+    print("  §7 fluency channel split (Phi group contrast per similarity "
+          "channel):")
+    for nm in ("combined", "magnitude", "shape"):
+        if nm in cs:
+            r = cs[nm]
+            print(f"     {nm:9s}: AUC = {r['auc']:.3f}, rank-biserial "
+                  f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}")
+
     # §10.7 confirmatory family: maxT over {Phi, Kemeny}.
     out["maxt"] = ST.maxt({"phi": phi, "kemeny": kem}, pos, n_perm=cfg["n_maxt"])
     out["holm"] = dict(zip(["phi", "kemeny"],
@@ -404,6 +455,30 @@ def main(argv=None):
     ap.add_argument("--band", default="0.5,2.0",
                     help="fidgety band in Hz as LOW,HIGH (default 0.5,2.0). "
                          "Used for the raw-velocity fidgety band ratio.")
+    ap.add_argument("--fluency-similarity",
+                    choices=("separated", "concatenated", "scalar"),
+                    default="separated",
+                    help="direction-aware kinematic similarity S feeding the "
+                         "fluency measure Phi (§7). 'separated' (preferred, "
+                         "default) keeps the magnitude and shape channels apart "
+                         "and combines them as omega*S_mag + (1-omega)*S_shape; "
+                         "'concatenated' standardises and stacks all 3J "
+                         "residuals into one correlation; 'scalar' is the legacy "
+                         "log-RMS-speed similarity (magnitude only), i.e. "
+                         "omega=1, for the §11 sensitivity check against the "
+                         "direction-blind version.")
+    ap.add_argument("--fluency-omega", type=float, default=0.5,
+                    help="weight of the magnitude channel in the 'separated' "
+                         "similarity (§7); omega=1 recovers the scalar measure "
+                         "and omega=0 is shape-only. Fixed a priori "
+                         "(default 0.5); must lie in [0, 1].")
+    ap.add_argument("--fluency-drop-state-term", action="store_true",
+                    help="drop the per-state term from the shape residualisation "
+                         "(§6): keep only the per-joint anatomical axis removal, "
+                         "leaving each state's whole-body drift in. Off by "
+                         "default (the state term is kept, matching the "
+                         "magnitude channel); pass this for the sensitivity "
+                         "variant.")
     ap.add_argument("--wclr-w", type=int, default=50,
                     help="WCLR-PP window width in frames (default 50 = 2 s at "
                          "25 fps). Lean to 62-75 if the autocorrelation length "
@@ -457,7 +532,13 @@ def main(argv=None):
         "wclr_limb_signal": args.wclr_limb_signal,
         "band": tuple(float(x) for x in args.band.split(",")),
         "top_frac": 0.10,                    # high-velocity frame fraction
+        "fluency_similarity": args.fluency_similarity,
+        "fluency_omega": args.fluency_omega,
+        "fluency_shape_state_term": not args.fluency_drop_state_term,
     }
+    if not 0.0 <= cfg["fluency_omega"] <= 1.0:
+        raise SystemExit(f"--fluency-omega must lie in [0, 1], got "
+                         f"{cfg['fluency_omega']}")
     geom = A.Geometry(args.fps, args.clip, args.nwin, args.stride)
 
     section("§2  Data and verification")
@@ -545,13 +626,14 @@ def main(argv=None):
         print(f"     {'OK  ' if v else 'FAIL'}  {k}")
 
     spd = A.speeds(pose, vids, geom.fps)
+    vel = A.velocities(pose, vids, geom.fps)          # signed vectors for §4 shape
 
     for tag, m in models.items():
         section(f"§5-§9  {tag}")
         if m["n_subjects"] != len(vids):
             print(f"  WARNING: model has {m['n_subjects']} subjects but the CSV "
                   f"has {len(vids)} videos; alignment is assumed by sort order.")
-        results[tag] = analyse_model(m, vids, pose, spd, labels, geom, cfg,
+        results[tag] = analyse_model(m, vids, pose, spd, vel, labels, geom, cfg,
                                      tag, stream)
 
     section(f"§10-§11  Clinical layer  ({primary})")
@@ -732,10 +814,32 @@ def main(argv=None):
                res["S"], delimiter=",", fmt="%.6f")
     np.savetxt(os.path.join(args.outdir, "state_amplitude_profile.csv"),
                res["amplitude"], delimiter=",", fmt="%.6f")
+    for nm, key in (("magnitude", "S_mag"), ("shape", "S_shape")):
+        if key in res:
+            np.savetxt(os.path.join(args.outdir,
+                                    f"similarity_matrix_{nm}.csv"),
+                       np.asarray(res[key]), delimiter=",", fmt="%.6f")
+
+    # direction-aware shape signature (§4), long format on the free joints:
+    # anisotropy rho = ||u|| and principal-axis angle theta = angle(u)/2.
+    u_arr = np.asarray(res["shape_coord"])
+    shp_rows = []
+    for k in range(res["k"]):
+        for j in build_pose.FREE:
+            u1, u2 = float(u_arr[k, j, 0]), float(u_arr[k, j, 1])
+            shp_rows.append({
+                "state": k, "state_label": res["state_labels"][k],
+                "joint": build_pose.JOINTS[j], "rho": float(np.hypot(u1, u2)),
+                "theta_deg": float(0.5 * np.degrees(np.arctan2(u2, u1))),
+                "u1": u1, "u2": u2})
+    pd.DataFrame(shp_rows).to_csv(
+        os.path.join(args.outdir, "state_shape_profile.csv"), index=False)
+
     with open(os.path.join(args.outdir, "results.json"), "w") as fh:
         json.dump(_json_safe(results), fh, indent=1)
     print(f"  wrote per_subject.csv, similarity_matrix.csv, "
-          f"state_amplitude_profile.csv, results.json")
+          f"similarity_matrix_{{magnitude,shape}}.csv, "
+          f"state_amplitude_profile.csv, state_shape_profile.csv, results.json")
 
     if not args.no_figures:
         import figures

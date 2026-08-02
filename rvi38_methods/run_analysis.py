@@ -424,6 +424,101 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
 
 
 # ---------------------------------------------------------------------------
+# raw-kinematic constructs (§8): inter-limb coordination and the fidgety band.
+# These read raw keypoint displacements only, so they are independent of the
+# encoder, the latent and the state model -- a third estimator alongside
+# fluency and mixing, and the slow part of a run. Split out so
+# ``--skip-raw-kinematics`` can omit them for a fluency-only run.
+# ---------------------------------------------------------------------------
+def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
+    """WCLR-PP inter-limb coordination, the fidgety band ratio, and the
+    per-state velocity profiles. Populates ``results['wclrpp']``,
+    ``results['fbr']`` and the primary model's ``velocity_profile_*`` entries.
+    """
+    section("Raw kinematics: inter-limb coordination (WCLR-PP) and the "
+            "fidgety band")
+    vid_arrays = [pose[v] for v in vids]
+
+    # WCLR-PP: the variance in one limb's future 2D velocity that the other
+    # explains beyond that limb's own past. High coupling is the pathological
+    # (cramped-synchronised) pole. Each of the six pairs yields one F (fraction
+    # of assessable time coupled) and one R2 (strength when coupled), averaged
+    # over both regression directions.
+    wp = WP.WCLRParams(w=cfg["wclr_w"], tau_max=cfg["wclr_tau_max"],
+                       ell_min=cfg["wclr_ell_min"], c=cfg["wclr_c"],
+                       dtau=cfg["wclr_dtau"], fps=geom.fps,
+                       limb_signal=cfg["wclr_limb_signal"])
+
+    wc = WP.wclrpp_dataset(vid_arrays, wp)
+    results["wclrpp"] = {
+        "F": wc["F"], "R2": wc["R2"], "pairs": wc["pairs"],
+        "pair_class": wc["pair_class"], "mean_F": wc["mean_F"],
+        "spread_F": wc["spread_F"], "mean_R2": wc["mean_R2"],
+        "params": {"w": wp.w, "tau_max": wp.tau_max, "ell_min": wp.ell_min,
+                   "c": wp.c, "dtau": wp.dtau, "fps": wp.fps,
+                   "limb_signal": wp.limb_signal}}
+    print(f"  WCLR-PP: {len(vid_arrays)} recordings, six limb pairs, "
+          f"limb signal '{wp.limb_signal}' "
+          f"({'+'.join(str(j) for j in WP.LIMB_SIGNALS[wp.limb_signal]['RA'])}"
+          f" for the right arm), "
+          f"w={wp.w} frames ({wp.w / geom.fps:.1f}s), "
+          f"tau_max={wp.tau_max} (+/-{wp.tau_max / geom.fps:.2f}s), "
+          f"c={wp.c}, ell_min={wp.ell_min} ({wp.ell_min / geom.fps:.2f}s), "
+          f"dtau={wp.dtau}")
+    for p, nm in enumerate(wc["pairs"]):
+        print(f"     {nm:8s} ({wc['pair_class'][p]:>13s}): "
+              f"median F over subjects {np.nanmedian(wc['F'][:, p]):.3f}  "
+              f"(R2 {np.nanmedian(wc['R2'][:, p]):.3f})")
+
+    wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0,
+                        pairs=wc["pairs"])
+    results["wclrpp"]["test"] = wt
+    print(f"  §10 group contrast on per-pair F, labels permuted "
+          f"({wt['n_perm']:,} draws), max-statistic corrected over six pairs "
+          f"[all six reported regardless]:")
+    for p, nm in enumerate(wc["pairs"]):
+        print(f"     {nm:8s}: dF (abnormal-normal) = {wt['observed'][p]:+.3f}  "
+              f"p_corrected = {wt['p_corrected'][p]:.4f}  "
+              f"(uncorrected {wt['p_uncorrected'][p]:.4f})")
+
+    # whole-body aggregation: mean F over pairs (a whole-body coupling pattern
+    # scores high everywhere) and its across-pair spread.
+    agg = ST.mannwhitney(wc["mean_F"][labels == 1], wc["mean_F"][labels == 0])
+    results["wclrpp"]["mean_F_test"] = agg
+    print(f"  whole-body coupling (mean F over pairs): abnormal median "
+          f"{np.nanmedian(wc['mean_F'][labels == 1]):.3f} vs normal "
+          f"{np.nanmedian(wc['mean_F'][labels == 0]):.3f}; AUC "
+          f"{agg['auc']:.3f}, p = {agg['p']:.4f}  [{agg['method']}]")
+
+    fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
+    fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])
+    lo, hi = ST.hanley_mcneil_ci(fb["auc"], fb["n1"], fb["n2"])
+    fb["ci"] = (lo, hi)
+    results["fbr"] = {"values": fbr, "band": cfg["band"], "test": fb}
+    print(f"  fidgety band ratio {cfg['band'][0]}-{cfg['band'][1]} Hz on raw "
+          f"velocities: abnormal median {np.nanmedian(fbr[labels == 1]):.4f} vs "
+          f"normal {np.nanmedian(fbr[labels == 0]):.4f}")
+    print(f"     AUC = {fb['auc']:.3f} [{lo:.3f}, {hi:.3f}], rank-biserial "
+          f"{fb['rank_biserial']:+.3f}, p = {fb['p']:.4f}  [{fb['method']}]")
+
+    # per-state velocity profile: regions and the lateralised limbs
+    r_res = results[primary]
+    for name, groups in (("regions", MV.region_groups()),
+                         ("lateral", MV.lateral_groups())):
+        prof = MV.state_velocity_profile(
+            models[primary]["states"], models[primary]["vidid"], vid_arrays,
+            geom, groups, top_frac=cfg["top_frac"], K=r_res["k"])
+        r_res[f"velocity_profile_{name}"] = prof
+    vp = r_res["velocity_profile_regions"]
+    print(f"  per-state high-velocity fraction (top {cfg['top_frac']:.0%} of "
+          f"each joint's frames), median over subjects:")
+    for s in range(vp["k"]):
+        cells = "  ".join(f"{g}={np.nanmedian(vp[s][g]):4.1f}%"
+                          for g in vp["groups"])
+        print(f"     state {s:2d}: {cells}")
+
+
+# ---------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="rvi38_analysis.csv")
@@ -479,6 +574,13 @@ def main(argv=None):
                          "default (the state term is kept, matching the "
                          "magnitude channel); pass this for the sensitivity "
                          "variant.")
+    ap.add_argument("--skip-raw-kinematics", action="store_true",
+                    help="run the fluency (and mixing) analysis only: skip the "
+                         "raw-kinematic block -- WCLR-PP inter-limb coordination "
+                         "(the synchrony construct, and the slow part of a run), "
+                         "the fidgety band ratio, and the per-state velocity "
+                         "profiles. The §5-§11 fluency and clinical layer are "
+                         "unaffected.")
     ap.add_argument("--wclr-w", type=int, default=50,
                     help="WCLR-PP window width in frames (default 50 = 2 s at "
                          "25 fps). Lean to 62-75 if the autocorrelation length "
@@ -535,6 +637,7 @@ def main(argv=None):
         "fluency_similarity": args.fluency_similarity,
         "fluency_omega": args.fluency_omega,
         "fluency_shape_state_term": not args.fluency_drop_state_term,
+        "skip_raw_kinematics": args.skip_raw_kinematics,
     }
     if not 0.0 <= cfg["fluency_omega"] <= 1.0:
         raise SystemExit(f"--fluency-omega must lie in [0, 1], got "
@@ -656,91 +759,17 @@ def main(argv=None):
         print(f"  Phi agreement across models: Spearman rho = {rho:+.3f} "
               f"(p = {p:.3g})")
 
-    # ---- raw-kinematic constructs: inter-limb coordination and the fidgety
-    # band. These read raw keypoint displacements only, so they are independent
-    # of the encoder, the latent and the state model -- a third estimator
-    # alongside fluency and mixing.
-    section("Raw kinematics: inter-limb coordination (WCLR-PP) and the "
-            "fidgety band")
-    vid_arrays = [pose[v] for v in vids]
-
-    # WCLR-PP: the variance in one limb's future 2D velocity that the other
-    # explains beyond that limb's own past. High coupling is the pathological
-    # (cramped-synchronised) pole. Each of the six pairs yields one F (fraction
-    # of assessable time coupled) and one R2 (strength when coupled), averaged
-    # over both regression directions.
-    wp = WP.WCLRParams(w=cfg["wclr_w"], tau_max=cfg["wclr_tau_max"],
-                       ell_min=cfg["wclr_ell_min"], c=cfg["wclr_c"],
-                       dtau=cfg["wclr_dtau"], fps=geom.fps,
-                       limb_signal=cfg["wclr_limb_signal"])
-
-    wc = WP.wclrpp_dataset(vid_arrays, wp)
-    results["wclrpp"] = {
-        "F": wc["F"], "R2": wc["R2"], "pairs": wc["pairs"],
-        "pair_class": wc["pair_class"], "mean_F": wc["mean_F"],
-        "spread_F": wc["spread_F"], "mean_R2": wc["mean_R2"],
-        "params": {"w": wp.w, "tau_max": wp.tau_max, "ell_min": wp.ell_min,
-                   "c": wp.c, "dtau": wp.dtau, "fps": wp.fps,
-                   "limb_signal": wp.limb_signal}}
-    print(f"  WCLR-PP: {len(vid_arrays)} recordings, six limb pairs, "
-          f"limb signal '{wp.limb_signal}' "
-          f"({'+'.join(str(j) for j in WP.LIMB_SIGNALS[wp.limb_signal]['RA'])}"
-          f" for the right arm), "
-          f"w={wp.w} frames ({wp.w / geom.fps:.1f}s), "
-          f"tau_max={wp.tau_max} (+/-{wp.tau_max / geom.fps:.2f}s), "
-          f"c={wp.c}, ell_min={wp.ell_min} ({wp.ell_min / geom.fps:.2f}s), "
-          f"dtau={wp.dtau}")
-    for p, nm in enumerate(wc["pairs"]):
-        print(f"     {nm:8s} ({wc['pair_class'][p]:>13s}): "
-              f"median F over subjects {np.nanmedian(wc['F'][:, p]):.3f}  "
-              f"(R2 {np.nanmedian(wc['R2'][:, p]):.3f})")
-
-    wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0,
-                        pairs=wc["pairs"])
-    results["wclrpp"]["test"] = wt
-    print(f"  §10 group contrast on per-pair F, labels permuted "
-          f"({wt['n_perm']:,} draws), max-statistic corrected over six pairs "
-          f"[all six reported regardless]:")
-    for p, nm in enumerate(wc["pairs"]):
-        print(f"     {nm:8s}: dF (abnormal-normal) = {wt['observed'][p]:+.3f}  "
-              f"p_corrected = {wt['p_corrected'][p]:.4f}  "
-              f"(uncorrected {wt['p_uncorrected'][p]:.4f})")
-
-    # whole-body aggregation: mean F over pairs (a whole-body coupling pattern
-    # scores high everywhere) and its across-pair spread.
-    agg = ST.mannwhitney(wc["mean_F"][labels == 1], wc["mean_F"][labels == 0])
-    results["wclrpp"]["mean_F_test"] = agg
-    print(f"  whole-body coupling (mean F over pairs): abnormal median "
-          f"{np.nanmedian(wc['mean_F'][labels == 1]):.3f} vs normal "
-          f"{np.nanmedian(wc['mean_F'][labels == 0]):.3f}; AUC "
-          f"{agg['auc']:.3f}, p = {agg['p']:.4f}  [{agg['method']}]")
-
-    fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
-    fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])
-    lo, hi = ST.hanley_mcneil_ci(fb["auc"], fb["n1"], fb["n2"])
-    fb["ci"] = (lo, hi)
-    results["fbr"] = {"values": fbr, "band": cfg["band"], "test": fb}
-    print(f"  fidgety band ratio {cfg['band'][0]}-{cfg['band'][1]} Hz on raw "
-          f"velocities: abnormal median {np.nanmedian(fbr[labels == 1]):.4f} vs "
-          f"normal {np.nanmedian(fbr[labels == 0]):.4f}")
-    print(f"     AUC = {fb['auc']:.3f} [{lo:.3f}, {hi:.3f}], rank-biserial "
-          f"{fb['rank_biserial']:+.3f}, p = {fb['p']:.4f}  [{fb['method']}]")
-
-    # per-state velocity profile: regions and the lateralised limbs
-    r_res = results[primary]
-    for name, groups in (("regions", MV.region_groups()),
-                         ("lateral", MV.lateral_groups())):
-        prof = MV.state_velocity_profile(
-            models[primary]["states"], models[primary]["vidid"], vid_arrays,
-            geom, groups, top_frac=cfg["top_frac"], K=r_res["k"])
-        r_res[f"velocity_profile_{name}"] = prof
-    vp = r_res["velocity_profile_regions"]
-    print(f"  per-state high-velocity fraction (top {cfg['top_frac']:.0%} of "
-          f"each joint's frames), median over subjects:")
-    for s in range(vp["k"]):
-        cells = "  ".join(f"{g}={np.nanmedian(vp[s][g]):4.1f}%"
-                          for g in vp["groups"])
-        print(f"     state {s:2d}: {cells}")
+    # ---- raw-kinematic constructs (§8): WCLR-PP inter-limb coordination (the
+    # synchrony construct and the slow part of a run), the fidgety band ratio,
+    # and the per-state velocity profiles. A third estimator alongside fluency
+    # and mixing; omitted for a fluency-only run. See raw_kinematics().
+    if cfg["skip_raw_kinematics"]:
+        section("Raw kinematics: skipped (--skip-raw-kinematics)")
+        print("  WCLR-PP synchrony, fidgety band ratio and per-state velocity "
+              "profiles omitted; the fluency and clinical layers above are "
+              "unaffected.")
+    else:
+        raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg)
 
     # ---- plain-language summary of every test that was run ----
     section("Statistical tests performed")

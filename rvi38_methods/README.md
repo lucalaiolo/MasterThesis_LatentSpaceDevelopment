@@ -68,8 +68,15 @@ leaves.
 
 The run reports a **magnitude-versus-direction split**: `Φ` recomputed under
 each channel and contrasted across groups, so the study can say whether fluency
-rides on how much a joint moves or on the axis along which it moves. The WCLR-PP
-window and
+rides on how much a joint moves or on the axis along which it moves.
+
+**Fluency only.** `--skip-raw-kinematics` runs the fluency (and mixing)
+analysis and the whole §5–§11 clinical layer, but skips the raw-kinematic block
+— WCLR-PP inter-limb coordination (the synchrony construct, and the slow part
+of a run), the fidgety band ratio, and the per-state velocity profiles. Use it
+for a fast fluency turnaround; the `Φ` result, its group contrast, the channel
+split, split-half reliability, the gates and the fluency figures are all
+unaffected. The WCLR-PP window and
 peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
 `--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
 `--wclr-ell-min` (minimum coupled run, default 19) and `--wclr-dtau` (peak-lag

@@ -99,6 +99,121 @@ def test_similarity():
           f"single {c['single']['mean']:+.2f} -> double {c['double']['mean']:+.2f}")
 
 
+def _M_from(rho, theta, scale=1.0):
+    """A 2x2 second-moment with anisotropy ``rho`` and principal axis ``theta``."""
+    lam = np.array([0.5 * (1 + rho), 0.5 * (1 - rho)])
+    R = np.array([[np.cos(theta), -np.sin(theta)],
+                  [np.sin(theta), np.cos(theta)]])
+    return scale * (R @ np.diag(lam) @ R.T)
+
+
+def test_second_moment_signature():
+    """The direction-aware signature contains the scalar one and strictly more."""
+    print("\n§2-§4 second-moment signature")
+    rng = np.random.default_rng(3)
+    g = A.Geometry()
+
+    # velocities are the signed form of speeds: norm(velocities) == speeds.
+    F = 700
+    vids = ["v0"]
+    pose = {"v0": rng.normal(size=(F, len(A.JOINTS), 2)).cumsum(0) * 0.01}
+    spd = A.speeds(pose, vids, g.fps)
+    vel = A.velocities(pose, vids, g.fps)
+    check("norm(velocities) == speeds",
+          np.allclose(np.linalg.norm(vel["v0"], axis=-1), spd["v0"]))
+
+    nd = g.n_delta_windows(F)
+    states = rng.integers(0, 4, nd)
+    vidid = np.zeros(nd, int)
+    a, nfr = A.state_profiles(states, vidid, vids, spd, pose, g, union=True)
+    M, nM = A.state_second_moments(states, vidid, vids, vel, pose, g, union=True)
+    check("second-moment frame counts match the scalar profile",
+          np.array_equal(nfr, nM))
+    tr = M[..., 0, 0] + M[..., 1, 1]
+    check("trace(M) == a^2  (the scalar feature is recovered exactly)",
+          np.allclose(np.sqrt(np.clip(tr, 0, None)), a, equal_nan=True,
+                      atol=1e-9),
+          f"max abs diff {np.nanmax(np.abs(np.sqrt(np.clip(tr,0,None)) - a)):.2e}")
+
+    # M is invariant to sign reversal of the velocity: M(v) == M(-v).
+    Mneg, _ = A.state_second_moments(states, vidid, vids,
+                                     {"v0": -vel["v0"]}, pose, g, union=True)
+    check("M(v) == M(-v)  (the second moment sees axes, not directions)",
+          np.allclose(M, Mneg, equal_nan=True))
+
+    # Lemma 1: shape_coordinates gives ||u|| = rho and angle(u) = 2 theta,
+    # independent of the magnitude scale.
+    ok_l1 = True
+    for rho, th in [(1.0, 0.0), (1.0, np.pi / 2), (0.6, np.pi / 4),
+                    (0.8, 1.1)]:
+        u = A.shape_coordinates(_M_from(rho, th, scale=3.7)[None, None])[0, 0]
+        d = (np.arctan2(u[1], u[0]) - 2 * th + np.pi) % (2 * np.pi) - np.pi
+        ok_l1 &= abs(np.hypot(*u) - rho) < 1e-9 and abs(d) < 1e-9
+    check("Lemma 1: ||u|| = rho and angle(u) = 2 theta", ok_l1)
+
+    ua = A.shape_coordinates(_M_from(0.7, 0.3)[None, None])[0, 0]
+    ub = A.shape_coordinates(_M_from(0.7, 0.3 + np.pi / 2)[None, None])[0, 0]
+    uc = A.shape_coordinates(_M_from(0.7, 0.3 + np.pi)[None, None])[0, 0]
+    check("orthogonal axis sends u -> -u, half-turn sends u -> u",
+          np.allclose(ua, -ub) and np.allclose(ua, uc))
+    u_iso = A.shape_coordinates(_M_from(0.0, 0.9, scale=5.0)[None, None])[0, 0]
+    check("isotropic motion (rho = 0) has u = 0 and no defined axis",
+          np.allclose(u_iso, 0.0))
+
+
+def test_direction_aware_similarity():
+    """The shape channel and the separated similarity that combines it."""
+    print("\n§6-§7 direction-aware similarity")
+    rng = np.random.default_rng(1)
+    K = 7
+    a = np.exp(rng.normal(0, 0.4, (K, 15)))
+    u = rng.normal(0, 0.3, (K, 15, 2))
+
+    # Lemma 2: with the state term the shape residual is doubly centred.
+    ush = A.residualize_shape(u, A.FREE, state_term=True)
+    check("Lemma 2: shape residual has zero column sums (over states)",
+          np.allclose(ush.sum(0), 0.0, atol=1e-10))
+    check("Lemma 2: shape residual has zero row sums (over joints)",
+          np.allclose(ush.sum(1), 0.0, atol=1e-10))
+
+    # The shape cosine has the intended semantics: identical residual axes score
+    # +1, orthogonal axes (u -> -u) score -1.
+    ushape = np.zeros((3, 4, 2))
+    ushape[0, :, 0] = 1.0            # state 0: axis theta = 0
+    ushape[1, :, 0] = 1.0            # state 1: same axis
+    ushape[2, :, 0] = -1.0           # state 2: orthogonal axis (u -> -u)
+    Ssh = A.shape_similarity(ushape)
+    check("aligned residual axes score +1, orthogonal score -1",
+          abs(Ssh[0, 1] - 1.0) < 1e-12 and abs(Ssh[0, 2] + 1.0) < 1e-12,
+          f"S01={Ssh[0,1]:+.3f} S02={Ssh[0,2]:+.3f}")
+
+    # Separated form: omega selects the channel, and S is a valid similarity.
+    S1, p1 = A.direction_aware_similarity(a, u, omega=1.0, form="separated")
+    S0, p0 = A.direction_aware_similarity(a, u, omega=0.0, form="separated")
+    Sh, _ = A.direction_aware_similarity(a, u, omega=0.5, form="separated")
+    check("omega = 1 recovers the magnitude channel S_mag",
+          np.allclose(S1, p1["S_mag"]))
+    check("omega = 0 is the shape channel S_shape",
+          np.allclose(S0, p0["S_shape"]))
+    check("separated S is the linear blend omega*S_mag + (1-omega)*S_shape",
+          np.allclose(Sh, 0.5 * (p1["S_mag"] + p0["S_shape"])))
+    check("S_mag equals the legacy scalar similarity",
+          np.allclose(p1["S_mag"], A.similarity(a, "double")))
+
+    for form in ("separated", "concatenated", "scalar"):
+        S, _ = A.direction_aware_similarity(a, u, omega=0.5, form=form)
+        check(f"S ({form}) is symmetric, unit-diagonal, bounded in [-1, 1]",
+              np.allclose(S, S.T) and np.allclose(np.diag(S), 1.0)
+              and bool(S.min() >= -1 and S.max() <= 1))
+
+    try:
+        A.direction_aware_similarity(a, u, omega=1.7)
+        bad = False
+    except ValueError:
+        bad = True
+    check("omega outside [0, 1] is rejected", bad)
+
+
 def test_kemeny():
     print("\n§9.2 Kemeny and mean first passage")
     rng = np.random.default_rng(1)
@@ -491,6 +606,8 @@ def main():
     test_geometry()
     test_state_profiles_union()
     test_similarity()
+    test_second_moment_signature()
+    test_direction_aware_similarity()
     test_kemeny()
     test_jump_chain_and_degeneracy()
     test_exact_mannwhitney()

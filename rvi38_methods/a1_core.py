@@ -3,6 +3,22 @@
 Implements METHODS §4 (geometry), §5 (state kinematic signatures), §6 (the
 kinematic similarity matrix) and §7 (fluency).
 
+Direction-aware signature (``DIRECTION_AWARE_KINEMATIC_SIMILARITY.md``). The
+scalar RMS speed ``a[k, j]`` that the original similarity correlated is blind
+to the axis along which a joint moves and to how confined the motion is: two
+states that drive the same joint at equal speed along orthogonal axes are
+identical under it, so a genuine redirection reads as monotony -- exactly the
+signal a fluency measure exists to index. The signature is therefore lifted to
+the pooled **second-moment matrix** ``M[k, j] = mean(v v^T)`` per state and
+joint, whose trace is still ``a[k, j]^2`` (:func:`state_second_moments`), and
+whose trace-normalised part is read off as the double-angle shape coordinate
+``u = (rho cos 2theta, rho sin 2theta)`` (:func:`shape_coordinates`). The
+similarity fed to Phi combines a magnitude channel (log RMS speed, as before)
+with a shape channel (the residual axes), the preferred *separated* form being
+``S = omega S_mag + (1 - omega) S_shape`` (:func:`direction_aware_similarity`).
+Nothing else changes: Phi and the maxT family are untouched -- one statistic
+enters the signature and one leaves.
+
 Two deviations from the supplied reference implementation are deliberate and
 are documented where they occur:
 
@@ -131,6 +147,21 @@ def speeds(pose: dict, vids, fps: float = GEOM.fps) -> dict:
     return out
 
 
+def velocities(pose: dict, vids, fps: float = GEOM.fps) -> dict:
+    """Signed per-frame velocity **vectors** ``(F-1, J, 2)`` in units/second.
+
+    The direction-aware counterpart of :func:`speeds`; the scalar speed is
+    exactly its Euclidean norm, so
+    ``np.linalg.norm(velocities(...), axis=-1) == speeds(...)``. These vectors
+    feed the second-moment signature of :func:`state_second_moments`.
+    """
+    out = {}
+    for v in vids:
+        x = np.asarray(pose[v], np.float64)
+        out[v] = np.diff(x, axis=0) * fps
+    return out
+
+
 def state_frame_mask(states_i: np.ndarray, k: int, n_frames: int,
                      geom: Geometry = GEOM, union: bool = True) -> np.ndarray:
     """Boolean mask over the speed array of frames assigned to state ``k``.
@@ -169,6 +200,69 @@ def state_profiles(states, vidid, vids, spd, pose, geom: Geometry = GEOM,
     with np.errstate(invalid="ignore", divide="ignore"):
         a = np.sqrt(sq / n[:, None])
     return a, n
+
+
+def state_second_moments(states, vidid, vids, vel, pose, geom: Geometry = GEOM,
+                         union: bool = True, k: int | None = None):
+    """Pooled mean second-moment matrix ``M[k, j]`` and frame counts ``N_k``.
+
+    ``M[k, j] = (1/N_k) * sum over state-k frames of v v^T`` in ``Sym^+_2``, the
+    direction-aware generalisation of the pooled RMS speed. It contains the old
+    feature and strictly more: its trace is ``a[k, j]^2`` (so
+    ``np.sqrt(trace(M)) == state_profiles(...)[0]`` up to summation order), its
+    eigenvalues are the mean squared speeds along the principal and secondary
+    axes, its leading eigenvector is the principal axis of the joint's motion,
+    and the eigenvalue gap measures how confined the motion is to that axis.
+
+    Frames are the same **set union** ``F_k`` used by :func:`state_profiles`, so
+    the magnitude channel derived from either function agrees exactly. Returns
+    ``M`` of shape ``(K, J, 2, 2)`` and ``N`` of shape ``(K,)``.
+    """
+    K = int(states.max()) + 1 if k is None else k
+    J = len(JOINTS)
+    Msum = np.zeros((K, J, 2, 2))
+    n = np.zeros(K)
+    for i, v in enumerate(vids):
+        st = states[vidid == i]
+        if not len(st):
+            continue
+        F = pose[v].shape[0]
+        vv = np.asarray(vel[v], np.float64)                 # (F-1, J, 2)
+        outer = vv[..., :, None] * vv[..., None, :]         # (F-1, J, 2, 2)
+        for kk in range(K):
+            m = state_frame_mask(st, kk, F, geom, union)
+            if not m.any():
+                continue
+            Msum[kk] += np.nansum(outer[m], axis=0)
+            n[kk] += int(m.sum())
+    with np.errstate(invalid="ignore", divide="ignore"):
+        M = Msum / n[:, None, None, None]
+    return M, n
+
+
+def shape_coordinates(M: np.ndarray) -> np.ndarray:
+    """Double-angle shape coordinate ``u[k, j] = (u1, u2)`` from ``M`` (§3-§4).
+
+    Factoring ``M = a^2 * Mhat`` with ``trace(Mhat) = 1``, the traceless part is
+    read off as ``u1 = Mhat_11 - Mhat_22`` and ``u2 = 2 Mhat_12``, i.e.
+    ``u1 = (M11 - M22)/trace(M)`` and ``u2 = 2 M12/trace(M)``. By Lemma 1 this
+    is the Cartesian form of ``(rho, 2 theta)``: ``||u|| = rho`` (anisotropy,
+    in [0, 1]) and ``angle(u) = 2 theta`` (twice the principal axis). The factor
+    of two is the "axis mod pi" identification made linear -- a half-turn of the
+    physical axis is a full turn of ``u``, and an orthogonal axis sends
+    ``u -> -u`` -- so unlike a raw angle ``u`` lives in a linear space and can be
+    averaged, residualised and correlated.
+
+    Isotropic motion (``rho = 0``) has no defined axis and returns ``u = 0``, as
+    does a joint that never moves in a state (``trace(M) = 0``).
+    """
+    M = np.asarray(M, float)
+    tr = M[..., 0, 0] + M[..., 1, 1]
+    good = tr > 0
+    denom = np.where(good, tr, 1.0)
+    u1 = np.where(good, (M[..., 0, 0] - M[..., 1, 1]) / denom, 0.0)
+    u2 = np.where(good, 2.0 * M[..., 0, 1] / denom, 0.0)
+    return np.stack([u1, u2], axis=-1)
 
 
 GROUPS = {
@@ -243,6 +337,161 @@ def centring_comparison(a: np.ndarray, free=FREE) -> dict:
         out[mode] = {"min": float(off.min()), "max": float(off.max()),
                      "mean": float(off.mean())}
     return out
+
+
+# ---------------------------------------------------------------------------
+# §6-§7 direction-aware similarity: the magnitude channel above plus a shape
+# channel built from the double-angle axis coordinate of §4.
+# ---------------------------------------------------------------------------
+def _interaction(x: np.ndarray) -> np.ndarray:
+    """Two-way additive interaction (double centring) of a ``(K, J)`` table.
+
+    ``x_kj - rowmean_k - colmean_j + grandmean``. For the log-magnitude table
+    this is identical to what :func:`similarity` computes internally before the
+    row-normalisation; the shape channels reuse it component-wise.
+    """
+    x = np.asarray(x, float)
+    return (x - x.mean(axis=1, keepdims=True) - x.mean(axis=0, keepdims=True)
+            + x.mean())
+
+
+def residualize_shape(u: np.ndarray, free=FREE,
+                      state_term: bool = True) -> np.ndarray:
+    """§6 shape residual ``ũ[k, j, c]`` on the free joints.
+
+    Each double-angle component ``u[:, :, c]`` is reduced to its two-way
+    interaction over the ``(state, joint)`` table. The per-joint term removes
+    the axis a joint tends to move along across all states -- the anatomical
+    baseline in the torso-normalised frame -- so the residual isolates the
+    state-specific redirection that fluency reads. The per-state term removes a
+    whole-body drift or rotation shared by all joints in a state, the shape
+    analogue of vigour; retaining it (``state_term=True``, the default) keeps
+    the shape residualisation consistent with the magnitude channel and, by
+    Lemma 2, makes the residual doubly centred so the shape cosine of
+    :func:`shape_similarity` is a genuine correlation. Dropping it keeps the
+    per-state drift and is the sensitivity variant.
+    """
+    uf = np.asarray(u, float)[:, free, :]                    # (K, |free|, 2)
+    out = np.empty_like(uf)
+    for c in range(uf.shape[-1]):
+        x = uf[..., c]
+        out[..., c] = _interaction(x) if state_term \
+            else x - x.mean(axis=0, keepdims=True)
+    return out
+
+
+def shape_similarity(ushape: np.ndarray) -> np.ndarray:
+    """§7 shape channel ``S_shape`` from a residualised ``(K, |free|, 2)`` field.
+
+    ``S_shape[k,k'] = sum_j <ũ_kj, ũ_k'j> / (||ũ_k|| ||ũ_k'||)`` -- the cosine of
+    the stacked ``2|free|``-vectors of residual axes. Because the inner product
+    scales as ``cos(angle(ũ_kj) - angle(ũ_k'j))``, states whose joints move
+    along the same residual axes score positive and orthogonal axes score
+    negative. With the doubly-centred residual of :func:`residualize_shape` the
+    per-joint sums vanish (Lemma 2), so this cosine is a genuine correlation and
+    needs no further centring, matching the magnitude channel.
+    """
+    K = ushape.shape[0]
+    flat = np.asarray(ushape, float).reshape(K, -1)
+    nrm = np.linalg.norm(flat, axis=1, keepdims=True)
+    nrm = np.where(nrm < 1e-12, 1.0, nrm)
+    S = (flat / nrm) @ (flat / nrm).T
+    return np.clip(S, -1.0, 1.0)
+
+
+def orientation_similarity(ushape: np.ndarray) -> np.ndarray:
+    """§8 orientation-only diagnostic on a residualised ``(K, |free|, 2)`` field.
+
+    Within the shape channel, redirection -- the fluency signal -- is the
+    orientation part: a fidgety infant's successive states move along different
+    axes, a poor-repertoire or cramped-synchronised infant repeats them. Writing
+    the shape inner product as ``||ũ_kj|| ||ũ_k'j|| cos(phi_kj - phi_k'j)``, this
+    isolates the orientation factor from the anisotropy magnitude,
+
+        ``S_orient[k,k'] = sum_j <ũ_kj, ũ_k'j> / sum_j ||ũ_kj|| ||ũ_k'j||``,
+
+    the weighted mean of the residual-axis mismatch cosine with weight
+    ``||ũ_kj|| ||ũ_k'j||``. Because the residual has the per-joint anatomical
+    axis removed (§6), this reads *state-specific* redirection rather than the
+    axis a joint habitually moves along, and joints whose residual axis is
+    ill-defined (``||ũ|| ≈ 0``) barely count. Reported alongside the shape
+    channel to show whether redirection carries the effect; not the headline
+    ``S``.
+    """
+    ush = np.asarray(ushape, float)
+    dot = np.einsum("kfc,lfc->kl", ush, ush)                 # sum_j <ũ_kj,ũ_k'j>
+    nrm = np.linalg.norm(ush, axis=-1)                       # (K, |free|)
+    wsum = nrm @ nrm.T                                       # sum_j ||ũ_kj|| ||ũ_k'j||
+    good = wsum > 1e-12
+    S = np.where(good, dot / np.where(good, wsum, 1.0), np.nan)
+    return np.clip(S, -1.0, 1.0)
+
+
+def concatenated_similarity(a: np.ndarray, u: np.ndarray, free=FREE,
+                            state_term: bool = True) -> np.ndarray:
+    """§7 concatenated form: one correlation across all ``3J`` residuals.
+
+    The magnitude residual (interaction of ``log a``) and the two shape
+    residuals are each standardised across the ``K x |free|`` table -- otherwise
+    the magnitude term dominates the two shape terms by scale alone -- then
+    stacked into a ``(K, 3|free|)`` matrix whose row correlation is ``S``.
+    """
+    a_res = _interaction(np.log(np.clip(a[:, free], 1e-12, None)))
+    ushape = residualize_shape(u, free, state_term)
+    cols = []
+    for ch in (a_res, ushape[..., 0], ushape[..., 1]):
+        s = float(ch.std())
+        cols.append((ch - ch.mean()) / (s if s > 1e-12 else 1.0))
+    X = np.concatenate(cols, axis=1)                         # (K, 3|free|)
+    X = X - X.mean(axis=1, keepdims=True)                    # -> correlation
+    nrm = np.linalg.norm(X, axis=1, keepdims=True)
+    nrm = np.where(nrm < 1e-12, 1.0, nrm)
+    S = (X / nrm) @ (X / nrm).T
+    return np.clip(S, -1.0, 1.0)
+
+
+def direction_aware_similarity(a: np.ndarray, u: np.ndarray, omega: float = 0.5,
+                               form: str = "separated",
+                               shape_state_term: bool = True, free=FREE):
+    """§7 direction-aware kinematic similarity ``S`` in ``[-1, 1]``.
+
+    Combines the magnitude channel (``S_mag``, the log-RMS-speed correlation of
+    §6) with the shape channel (``S_shape``, the residual-axis cosine) so that
+    ``S`` sees not only how fast a joint moves but along which axis and how
+    confined the motion is. Three forms:
+
+    * ``'separated'`` (preferred): ``S = omega * S_mag + (1-omega) * S_shape``.
+      ``omega`` is fixed a priori (default ``1/2``); ``omega = 1`` recovers the
+      scalar measure and ``omega = 0`` is shape-only.
+    * ``'concatenated'``: :func:`concatenated_similarity`, all ``3J`` residuals
+      standardised and reduced to one correlation.
+    * ``'scalar'``: the legacy magnitude-only similarity, equivalently
+      ``omega = 1``, for the §11 sensitivity check against the scalar version.
+
+    Returns ``(S, parts)`` with ``parts`` carrying the separate channels
+    (``S_mag``, ``S_shape`` and the orientation-only diagnostic ``S_orient``) so
+    the study can report whether the fluency effect is carried by magnitude or
+    by direction, which is a finding in itself.
+    """
+    if not 0.0 <= omega <= 1.0:
+        raise ValueError(f"omega must lie in [0, 1], got {omega}")
+    S_mag = similarity(a, "double", free)
+    ushape = residualize_shape(u, free, shape_state_term)
+    S_shape = shape_similarity(ushape)
+    parts = {"S_mag": S_mag, "S_shape": S_shape,
+             "S_orient": orientation_similarity(ushape),
+             "form": form, "omega": float(omega),
+             "shape_state_term": bool(shape_state_term)}
+    if form == "scalar":
+        S = S_mag
+    elif form == "concatenated":
+        S = concatenated_similarity(a, u, free, shape_state_term)
+    elif form == "separated":
+        S = omega * S_mag + (1.0 - omega) * S_shape
+    else:
+        raise ValueError(f"unknown similarity form {form!r}; expected "
+                         f"'separated', 'concatenated' or 'scalar'")
+    return np.clip(S, -1.0, 1.0), parts
 
 
 def face_validity(S: np.ndarray, labels=None) -> dict:

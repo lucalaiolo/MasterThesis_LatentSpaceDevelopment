@@ -21,6 +21,7 @@ import a1_core as A          # noqa: E402
 import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
 import a8_movement as MV     # noqa: E402
+import fluency_curve as FC   # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -368,6 +369,74 @@ def test_fluency():
           td["top_over_bottom"] > 1.0, f"ratio {td['top_over_bottom']:.2f}")
 
 
+def test_fluency_curve():
+    """FLUENCY_CURVE: the temporal decomposition must reduce to A1's Phi."""
+    print("\nFLUENCY_CURVE temporal decomposition")
+    rng = np.random.default_rng(11)
+    K = 7
+    S = np.clip(rng.normal(0, 0.4, (K, K)), -1, 1)
+    S = (S + S.T) / 2
+    np.fill_diagonal(S, 1.0)
+    st = A.visit_sequence(rng.integers(0, K, 500))
+    vid = np.zeros(len(st), int)
+
+    s = FC.transition_similarity(S, st)
+    check("transition_similarity has n-1 entries and equals S[q_t, q_{t+1}]",
+          s.shape[0] == len(st) - 1
+          and np.allclose(s, S[st[:-1], st[1:]]))
+
+    # null_offset must reproduce a1_core.phi_excess's uniform null exactly:
+    # both draw B permutations of the same sequence from default_rng(seed).
+    phi = A.phi_excess(st, vid, S, 1, n_perm=1000, seed=0)
+    c = FC.null_offset(S, st, B=1000, seed=0)
+    check("null_offset reproduces phi_excess's null mean exactly",
+          abs(c - float(phi["null_mean"][0])) < 1e-12,
+          f"|Δ| = {abs(c - float(phi['null_mean'][0])):.2e}")
+    check("mean(s) equals A1's observed statistic",
+          abs(float(s.mean()) - float(phi["observed"][0])) < 1e-12)
+
+    # Prop 1: the flat-kernel limit of the curve is the scalar Phi.
+    Phi = float(s.mean() - c)
+    flat = FC.phi_curve(s, 1e7, c)
+    check("Prop 1: flat-kernel curve equals Phi at every t",
+          np.allclose(flat, Phi, atol=1e-9),
+          f"max|Δ| = {np.abs(flat - Phi).max():.2e}")
+
+    # weight-normalised smoothing keeps phi(t)+c a convex mean of s.
+    ok = True
+    for sg in (3, 5):
+        cur = FC.phi_curve(s, sg, 0.0)
+        ok &= bool(cur.max() <= s.max() + 1e-9 and cur.min() >= s.min() - 1e-9)
+    check("phi_curve is a weight-normalised convex mean (no edge blow-up)", ok)
+
+    # the step-2 assertion is a real guard: a Phi from a different S trips it.
+    S2 = np.clip(S + rng.normal(0, 0.3, S.shape), -1, 1)
+    S2 = (S2 + S2.T) / 2
+    np.fill_diagonal(S2, 1.0)
+    phi2 = A.phi_excess(st, vid, S2, 1, n_perm=1000, seed=0)
+    import tempfile
+    import shutil
+    tmp = tempfile.mkdtemp(prefix="fc_test_")
+    tripped = False
+    try:
+        FC.fluency_curves(st, vid, S, ["r"], [0], phi=phi2, out_root=tmp,
+                          verbose=False)
+    except AssertionError:
+        tripped = True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    check("step-2 identity guards against an S / Phi mismatch", tripped)
+
+    # transition_times: aligned with s, strictly increasing, whole-window onsets.
+    st2 = np.repeat([0, 1, 2, 1, 0], [3, 2, 4, 1, 5])
+    T = FC.transition_times(st2, A.GEOM)
+    g = A.GEOM
+    check("transition_times aligns with s and is monotone",
+          T.shape[0] == 4 and np.all(np.diff(T) > 0)
+          and abs(T[0] - (g.f0 + g.l * 3) / g.fps) < 1e-9,
+          f"onsets [3,5,9,10] -> T={np.round(T, 3).tolist()}")
+
+
 def test_stats_helpers():
     print("\n§10 helpers")
     check("Holm adjustment is monotone and bounded",
@@ -612,6 +681,7 @@ def main():
     test_jump_chain_and_degeneracy()
     test_exact_mannwhitney()
     test_fluency()
+    test_fluency_curve()
     test_stats_helpers()
     test_shrinkage()
     test_wclrpp_peakpick()

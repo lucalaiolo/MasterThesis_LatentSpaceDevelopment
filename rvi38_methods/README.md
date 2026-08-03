@@ -18,6 +18,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `load_models.py` | lazy stub package for `ssm`/`autograd`; recovers arrays from joblib dumps; normalises both dict layouts to one schema |
 | `build_pose.py` | long CSV to per-video `(F,15,2)`; verifies frame contiguity and the constant-joint property |
 | `a1_core.py` | window-to-frame geometry, state profiles, the direction-aware second-moment signature (`M`, its double-angle shape coordinate `u`) and the magnitude+shape similarity, fluency estimators |
+| `fluency_curve.py` | exploratory temporal decomposition of `Φ`: the Gaussian-on-index curve `φ(t)` whose flat-kernel limit is `Φ` (reuses `S`, the visit sequence and the cached null) |
 | `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
 | `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
 | `a8_movement.py` | raw kinematics: fidgety band ratio, per-state velocity profiles |
@@ -69,6 +70,34 @@ leaves.
 The run reports a **magnitude-versus-direction split**: `Φ` recomputed under
 each channel and contrasted across groups, so the study can say whether fluency
 rides on how much a joint moves or on the axis along which it moves.
+
+### Temporal decomposition of `Φ` (`fluency_curve.py`)
+
+`Φ` is one number per recording — the excess similarity of consecutive
+movements, averaged over every visit transition. `--fluency-curve` unrolls that
+same average along the transition index into a smoothed curve
+
+    φ(t) = ( Σ_t' k_σ(t'−t) s_t' ) / ( Σ_t' k_σ(t'−t) ) − c ,   k_σ(u) = e^(−u²/2σ²)
+
+with `s_t = S[q_t, q_{t+1}]` the per-transition kinematic similarity, `c` A1's
+§7.2 occupancy-matched null mean, and the Gaussian kernel running over the
+**transition index** (never over seconds), at `σ ∈ {3,5}` transitions. Nothing
+new is estimated: with a flat kernel `φ(t)` collapses to the constant
+`mean_t s_t − c = Φ` (Prop 1), and the run asserts that identity before
+plotting. Everything is reused from A1 — the similarity `S` (built from the same
+`--fluency-omega`), the run-length-compressed visit sequence `q`, and the cached
+null `c` and scalar `Φ` — so the temporal view and the reported scalar can never
+disagree. The wall-clock time `T_t` of each transition (derived from the window
+geometry and visit dwell lengths) is the plot axis only.
+
+This is deliberately **exploratory**: the reported scalar stays the
+transition-averaged `Φ`; `σ` is fixed a priori and never tuned against the group
+contrast; the CSV carries no test column; and there is no time-integral average
+`(1/T)∫φ` (which equals `Φ + Cov_t(Δ,s)/mean(Δ)`, a duration-weighted quantity
+that is *not* `Φ`). Outputs: one panel per recording at
+`<outdir>/figures/fluency_curve/{id}.png` — the two `σ` curves against `T_t`,
+horizontal lines at `0` (chance) and `Φ`, and a rug of the transitions below the
+axis — plus `<outdir>/results/fluency_curve.csv` (`id, label, Φ, n_transitions`).
 
 **Fluency only.** `--skip-raw-kinematics` runs the fluency (and mixing)
 analysis and the whole §5–§11 clinical layer, but skips the raw-kinematic block

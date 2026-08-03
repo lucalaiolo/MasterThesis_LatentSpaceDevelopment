@@ -609,6 +609,13 @@ def main(argv=None):
                          "hip, whose torso-normalised velocities are close to "
                          "negations of each other across the midline and so "
                          "manufacture coupling in the homologous pairs.")
+    ap.add_argument("--fluency-curve", action="store_true",
+                    help="also write the exploratory FLUENCY_CURVE temporal "
+                         "decomposition of Phi (one panel per recording under "
+                         "figures/fluency_curve/, plus results/fluency_curve.csv"
+                         "). Reuses the primary model's S(omega) and the cached "
+                         "A1 null so the flat-kernel curve equals Phi exactly; "
+                         "the reported scalar stays the transition-averaged Phi.")
     ap.add_argument("--no-figures", action="store_true")
     args = ap.parse_args(argv)
 
@@ -869,6 +876,19 @@ def main(argv=None):
     print(f"  wrote per_subject.csv, similarity_matrix.csv, "
           f"similarity_matrix_{{magnitude,shape}}.csv, "
           f"state_amplitude_profile.csv, state_shape_profile.csv, results.json")
+
+    # FLUENCY_CURVE: exploratory temporal decomposition of Phi. Reuses the
+    # primary model's S(omega), its run-length-compressed visit sequences and
+    # the cached §7.2 null so the flat-kernel curve equals Phi (Prop 1). The
+    # reported scalar is unchanged; this only unrolls it along the transition
+    # index. Opt-in because it writes one figure per recording.
+    if args.fluency_curve:
+        section("FLUENCY_CURVE  temporal decomposition of Phi (exploratory)")
+        import fluency_curve as FCV
+        FCV.fluency_curves(
+            m["states"], m["vidid"], np.asarray(res["S"]), vids, labels,
+            phi=res["phi"], geom=geom, sigmas=(3, 5), out_root=args.outdir,
+            label_names=("normal", "abnormal"))
 
     if not args.no_figures:
         import figures

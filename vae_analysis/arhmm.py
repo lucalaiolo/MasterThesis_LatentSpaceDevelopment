@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .hmm_pipeline import kfold_subject_splits
+
 
 def _split(Z, lengths):
     """Concatenated ``(M, d)`` -> list of per-video ``(M_v, d)`` arrays."""
@@ -117,7 +119,7 @@ def _res_from_model(model, datas, lengths, K, f_win):
 
 def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
               n_iters=50, tol=1e-4, n_restarts=1, selection="cv", n_splits=5,
-              val_fraction=0.2, seed=0, verbose=True) -> dict:
+              seed=0, verbose=True) -> dict:
     """Fit an autoregressive HMM and select K, mirroring :func:`fit_hmm`.
 
     Args:
@@ -133,8 +135,9 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
             to every state's dynamics matrix, so higher orders need more windows
             per state and cost more per fit.
         f_win: window sampling rate (Hz), for dwell seconds / the frequency map.
-        selection: ``"cv"`` (mean held-out LL/window over ``n_splits`` video-wise
-            splits) or ``"none"`` (fit each K on all data, pick best train LL).
+        selection: ``"cv"`` (``n_splits``-fold partition over subjects, each
+            validated once) or ``"none"`` (fit each K on all data, pick best
+            train LL).
         n_restarts: EM restarts per fit (best train LL kept).
 
     Returns:
@@ -173,12 +176,8 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
               f"selection={selection} | {len(candidates)} candidates", flush=True)
 
     def video_splits():
-        out = []
-        for s in range(n_splits):
-            perm = np.random.default_rng(seed + s).permutation(n_videos)
-            n_val = max(1, int(round(n_videos * val_fraction)))
-            out.append(set(perm[:n_val].tolist()))
-        return out
+        return [set(fold.tolist())
+                for fold in kfold_subject_splits(n_videos, n_splits, seed)]
 
     scores = {}
     for k, p in candidates:

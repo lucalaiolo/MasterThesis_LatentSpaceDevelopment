@@ -379,10 +379,28 @@ def _viterbi_summary(model, Z, lengths, f_win: float):
             "dwell_seconds": dwell_win / f_win}
 
 
+def kfold_subject_splits(n_videos: int, n_splits: int,
+                         seed: int = 0) -> list[np.ndarray]:
+    """Partition subject indices ``0..n_videos-1`` into ``n_splits`` folds.
+
+    One permutation seeded by ``seed``, sliced by :func:`numpy.array_split`, so
+    every subject falls in exactly one validation fold and fold sizes differ by
+    at most one. Genuine k-fold cross-validation, not repeated random holdout.
+    """
+    if n_splits < 2:
+        raise ValueError(f"n_splits must be >= 2, got {n_splits}.")
+    if n_splits > n_videos:
+        raise ValueError(
+            f"n_splits={n_splits} exceeds n_videos={n_videos}; "
+            f"cannot form disjoint folds.")
+    perm = np.random.default_rng(seed).permutation(n_videos)
+    return [np.asarray(fold) for fold in np.array_split(perm, n_splits)]
+
+
 def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
             f_win: float = 7.5, covariance_type: str = "full",
             min_covar: float = 1e-3, n_restarts: int = 5, n_iter: int = 200,
-            selection: str = "cv", n_splits: int = 5, val_fraction: float = 0.2,
+            selection: str = "cv", n_splits: int = 5,
             seed: int = 0, cond_ceiling: float = 1e8,
             occupancy_floor_factor: float = 10.0, verbose: bool = False,
             n_jobs: int = 1) -> dict:
@@ -406,8 +424,9 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
         Z, lengths: output of :func:`stitch_dataset`.
         k_range: candidate state counts.
         f_win: window sampling rate (Hz), for dwell seconds and the frequency map.
-        selection: ``"cv"`` (mean held-out LL over ``n_splits`` seeded video-wise
-            splits — the default), ``"loo"`` (leave-one-video-out), or ``"bic"``.
+        selection: ``"cv"`` (``n_splits``-fold partition over subjects, each
+            validated once — the default), ``"loo"`` (leave-one-video-out), or
+            ``"bic"``.
         cond_ceiling, occupancy_floor_factor: Guardrail 2.4 triggers.
 
     Returns:
@@ -441,12 +460,7 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
         if selection == "loo":
             return [np.array([v]) for v in range(n_videos)]
         if selection == "cv":
-            out = []
-            for s in range(n_splits):
-                perm = np.random.default_rng(seed + s).permutation(n_videos)
-                n_val = max(1, int(round(n_videos * val_fraction)))
-                out.append(perm[:n_val])
-            return out
+            return kfold_subject_splits(n_videos, n_splits, seed)
         return []                                    # bic: no held-out
 
     splits = make_splits()

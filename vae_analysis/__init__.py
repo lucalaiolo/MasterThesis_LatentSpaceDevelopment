@@ -16,7 +16,7 @@ __all__ = [
     "features", "masking", "dynamics", "generation", "information",
     "symmetry", "disentanglement", "two_sample", "screening", "honesty",
     "hmm_pipeline", "hmm_report", "arhmm", "synchrony",
-    "geodesic_interpolation",
+    "geodesic_interpolation", "latent_geometry",
 ]
 
 
@@ -24,7 +24,7 @@ _LAZY = {"posterior_geometry", "decoder_geometry", "encoder_geometry",
          "features", "masking", "dynamics", "generation", "information",
          "symmetry", "disentanglement", "two_sample", "screening", "honesty",
          "hmm_pipeline", "hmm_report", "arhmm", "synchrony",
-         "geodesic_interpolation"}
+         "geodesic_interpolation", "latent_geometry"}
 
 
 def __getattr__(name):

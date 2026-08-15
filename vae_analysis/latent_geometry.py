@@ -601,6 +601,135 @@ def _resample_path(Z, n_steps: int):
     return Z[idx], idx / max(Z.shape[0] - 1, 1)
 
 
+def sweep_curvature_ratio(interp, clips: np.ndarray,
+                          video_id: np.ndarray | None = None, *,
+                          mu: np.ndarray | None = None,
+                          n_pairs: int = 48, strategy: str = "spread",
+                          n_candidates: int = 4096,
+                          n_segments: int = 16, iters: int = 60,
+                          method: str = "lbfgs",
+                          pairs=None,
+                          rng: np.random.Generator | None = None,
+                          verbose: bool = True) -> dict:
+    """Curvature ratio over many candidate clip pairs, ranked.
+
+    The section reports ``rho`` for one pair, which cannot by itself say
+    whether ``rho ~ 1`` is a property of the latent or of the pair that
+    happened to be picked. This runs the same measurement over a set of pairs
+    and returns them sorted by ``rho`` ascending, so the flat claim can be
+    made against a distribution — and so a genuinely curved pair, if the
+    latent has one, can be found and shown.
+
+    Screening settings should be cheaper than reporting settings
+    (``n_segments = 16``, ``iters = 60`` here against 32 and 200), and the
+    screen is conservative in the right direction: the energy descent starts
+    at the straight segment and only ever shortens the curve, so an
+    under-converged run **overestimates** ``rho``. A pair that screens low
+    really is low; re-run the winners at full resolution with
+    :func:`latent_interpolation` before quoting a number. Both curves use the
+    same node count, so the polyline underestimate of length largely cancels
+    in the ratio.
+
+    Args:
+        interp: a :class:`~vae_analysis.geodesic_interpolation.VaeInterpolator`.
+        clips: the candidate clips, shape ``(N, T, J, D)``.
+        video_id: per-clip video labels; pairs are drawn across videos.
+        mu: posterior means ``(N, d)`` for the ``"spread"`` strategy's
+            distance ordering. Endpoint codes are always re-encoded through
+            ``interp`` regardless, so the sweep and the report agree.
+        n_pairs: how many pairs to measure.
+        strategy: ``"spread"`` (default) keeps ``n_pairs`` candidates evenly
+            spaced across the latent-distance range, which shows whether
+            ``rho`` depends on distance at all; ``"far"`` takes the most
+            distant pairs, the efficient hunt once that dependence is
+            established, since curvature between two codes has more room to
+            accumulate the further apart they are; ``"random"`` is the
+            unbiased sample, and the one to use if what you want is the
+            distribution of ``rho`` rather than its extremes.
+        n_candidates: candidate pairs drawn before the spread selection.
+        n_segments, iters, method: energy-descent settings for the screen.
+        pairs: explicit ``[(i, j), ...]`` to measure instead of sampling.
+        rng: seedable generator.
+        verbose: print progress every ten pairs.
+    Returns:
+        Dict with ``records`` (list of dicts, ``rho`` ascending), ``rho`` (the
+        array in that order), ``settings``, and ``n_pairs``.
+    """
+    from .geodesic_interpolation import (decoded_arclength, geodesic,
+                                         speed_profile, straight_path)
+
+    rng = np.random.default_rng() if rng is None else rng
+    clips = np.asarray(clips)
+    n = len(clips)
+    if n < 2:
+        raise ValueError("need at least two clips to sweep over.")
+
+    if pairs is None:
+        if strategy == "spread" and mu is None:
+            strategy = "random"                      # no distances to spread over
+        cand = {}
+        for _ in range(int(n_candidates if strategy == "spread"
+                           else n_pairs * 8)):
+            i, j = select_clip_pair(mu if mu is not None else np.zeros((n, 1)),
+                                    video_id, mode="random", rng=rng)
+            cand[(min(i, j), max(i, j))] = None      # de-duplicate unordered pairs
+        cand = list(cand)
+        if strategy == "random":
+            pairs = cand[:n_pairs]
+        elif strategy in ("spread", "far"):
+            dist = np.array([np.linalg.norm(mu[i] - mu[j]) for i, j in cand])
+            order = np.argsort(dist)
+            if strategy == "far":
+                pairs = [cand[k] for k in order[::-1][:n_pairs]]
+            else:
+                take = np.unique(np.linspace(0, len(order) - 1,
+                                             min(n_pairs, len(order))
+                                             ).round().astype(int))
+                pairs = [cand[order[k]] for k in take]
+        else:
+            raise ValueError(f"unknown strategy {strategy!r}; "
+                             "use 'spread', 'far', or 'random'.")
+
+    cache: dict[int, object] = {}
+
+    def code(idx: int):
+        if idx not in cache:
+            cache[idx] = interp.encode(clips[idx])
+        return cache[idx]
+
+    records = []
+    for k, (i, j) in enumerate(pairs):
+        z0, z1 = code(int(i)), code(int(j))
+        Zg = geodesic(interp.decode, z0, z1, T=n_segments, method=method,
+                      iters=iters)
+        Zl = straight_path(z0, z1, T=n_segments)
+        len_geo = float(decoded_arclength(interp.decode, Zg))
+        len_lin = float(decoded_arclength(interp.decode, Zl))
+        _, cv = speed_profile(interp.decode, Zg)
+        records.append({
+            "index_a": int(i), "index_b": int(j),
+            "video_a": None if video_id is None else int(video_id[i]),
+            "video_b": None if video_id is None else int(video_id[j]),
+            "curvature_ratio": len_geo / len_lin if len_lin > 0 else float("nan"),
+            "arclength_geodesic": len_geo,
+            "arclength_straight": len_lin,
+            "speed_cv": float(cv),
+            "latent_distance": float(np.linalg.norm(
+                z0.detach().cpu().numpy() - z1.detach().cpu().numpy())),
+        })
+        if verbose and (k + 1) % 10 == 0:
+            print(f"[sweep] {k + 1}/{len(pairs)} pairs")
+
+    records.sort(key=lambda r: r["curvature_ratio"])
+    return {
+        "records": records,
+        "rho": np.array([r["curvature_ratio"] for r in records]),
+        "n_pairs": len(records),
+        "settings": {"n_segments": int(n_segments), "iters": int(iters),
+                     "method": method, "strategy": strategy},
+    }
+
+
 def select_clip_pair(mu: np.ndarray, video_id: np.ndarray | None = None, *,
                      mode: str = "random", n_candidates: int = 4096,
                      rng: np.random.Generator | None = None
@@ -786,6 +915,56 @@ def plot_interpolation(clips: np.ndarray, t: np.ndarray, bones=None, plt=None, *
     if title:
         fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.94 if title else 0.97))
+    return fig
+
+
+def plot_rho_sweep(sweep: dict, plt=None, *, mark: float | None = None):
+    """The sweep's two views: how ``rho`` is distributed, and against distance.
+
+    Left, the histogram: if it piles up at 1 the flat reading is a property of
+    the latent rather than of the pair the section happened to report. Right,
+    ``rho`` against the endpoints' latent distance, which is where a
+    dependence shows up — curvature that only appears between far-apart codes
+    is the usual shape, and it is the argument for reporting the pair's
+    distance next to its ``rho``.
+
+    Args:
+        sweep: the dict from :func:`sweep_curvature_ratio`.
+        plt: pyplot module; imported (Agg) when None.
+        mark: optional ``rho`` to draw as a reference line (e.g. the pair the
+            section reports).
+    """
+    plt = plt or _import_matplotlib()
+    rho = np.asarray(sweep["rho"])
+    dist = np.array([r["latent_distance"] for r in sweep["records"]])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.0, 3.4))
+    ax1.hist(rho, bins=min(24, max(5, len(rho) // 3)), color="steelblue",
+             edgecolor="white")
+    ax1.axvline(1.0, color="black", linewidth=0.8,
+                label="$\\rho = 1$ (flat)")
+    if mark is not None:
+        ax1.axvline(mark, color="crimson", linewidth=1.2, linestyle="--",
+                    label=f"reported pair {mark:.3f}")
+    # Matplotlib's mathtext is not amsmath: no \lVert, and \mathrm over \rm.
+    ax1.set_xlabel(r"$\rho = \mathcal{L}_{\mathrm{geodesic}} / "
+                   r"\mathcal{L}_{\mathrm{straight}}$")
+    ax1.set_ylabel("pairs")
+    ax1.legend(frameon=False, fontsize=8)
+    ax1.grid(True, alpha=0.3, axis="y")
+
+    ax2.scatter(dist, rho, s=18, color="steelblue", alpha=0.75,
+                edgecolors="none")
+    ax2.axhline(1.0, color="black", linewidth=0.8)
+    ax2.set_xlabel(r"latent distance $\|z_1 - z_0\|$")
+    ax2.set_ylabel(r"$\rho$")
+    ax2.grid(True, alpha=0.3)
+
+    s = sweep["settings"]
+    fig.suptitle(f"curvature ratio over {sweep['n_pairs']} pairs "
+                 f"(screen: {s['n_segments']} segments, {s['iters']} iters, "
+                 f"{s['strategy']})", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     return fig
 
 

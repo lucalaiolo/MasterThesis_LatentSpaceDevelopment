@@ -563,8 +563,9 @@ def latent_interpolation(interp, x0: np.ndarray, x1: np.ndarray, *,
     len_lin = float(decoded_arclength(interp.decode, Z_lin))
     _, speed_cv = speed_profile(interp.decode, Z_geo)
 
-    # The geodesic sampled at the figure's t, for the optional comparison row.
-    geo_fig = _resample_path(Z_geo, n_steps)
+    # The geodesic sampled for the comparison figure. Its nodes land on whole
+    # indices of the finer discretisation, so they carry their own t.
+    geo_fig, t_geodesic = _resample_path(Z_geo, n_steps)
 
     out = {
         "curvature_ratio": len_geo / len_lin if len_lin > 0 else float("nan"),
@@ -575,6 +576,7 @@ def latent_interpolation(interp, x0: np.ndarray, x1: np.ndarray, *,
         "speed_cv": float(speed_cv),
         "n_segments": int(n_segments),
         "t": t,
+        "t_geodesic": t_geodesic,
         "straight_clips": straight_clips,
         "geodesic_clips": interp.decode_clips(geo_fig),
         "z0": z0.detach().cpu().numpy(),
@@ -588,9 +590,15 @@ def latent_interpolation(interp, x0: np.ndarray, x1: np.ndarray, *,
 
 
 def _resample_path(Z, n_steps: int):
-    """Pick ``n_steps`` evenly spaced nodes from a ``(P, d)`` path."""
+    """Pick ``n_steps`` roughly evenly spaced nodes from a ``(P, d)`` path.
+
+    Returns ``(nodes, t)`` with ``t`` the nodes' **true** curve parameter
+    ``i / (P - 1)``. The rounding to whole node indices means those values are
+    only approximately the ``n_steps`` evenly spaced ones, so the figure has to
+    label the columns with what it actually drew, not with what was asked for.
+    """
     idx = np.linspace(0, Z.shape[0] - 1, n_steps).round().astype(int)
-    return Z[idx]
+    return Z[idx], idx / max(Z.shape[0] - 1, 1)
 
 
 def select_clip_pair(mu: np.ndarray, video_id: np.ndarray | None = None, *,
@@ -1293,9 +1301,11 @@ def run_latent_geometry(checkpoint_path: str | Path,
                    "time_a": int(tix[i]), "time_b": int(tix[j]),
                    "selection": ("explicit" if clip_a is not None
                                  else pair_selection)})
+        # Keep both t vectors: they say which interpolation weight each column
+        # of the two figures actually shows.
         results["interpolation"] = _to_python(
             {k: v for k, v in ip.items()
-             if k not in ("straight_clips", "geodesic_clips", "t", "z0", "z1")})
+             if k not in ("straight_clips", "geodesic_clips", "z0", "z1")})
         log(f"  clips {i} / {j} (videos {vid[i]} / {vid[j]}), "
             f"rho = {ip['curvature_ratio']:.4f}, speed CV {ip['speed_cv']:.4f}")
         if ip["curvature_ratio"] > 1.0 + 1e-6:
@@ -1306,10 +1316,14 @@ def run_latent_geometry(checkpoint_path: str | Path,
                                 n_frame_rows=n_interp_frames, invert_y=invert_y,
                                 title="Latent interpolation (straight segment)"),
              "fig_interp")
-        save(plot_interpolation(ip["geodesic_clips"], ip["t"], bones, plt,
+        # The rho in the title is the run's single curvature ratio, measured on
+        # the finer n_segments discretisation — not the arc-length ratio of the
+        # few nodes drawn here.
+        save(plot_interpolation(ip["geodesic_clips"], ip["t_geodesic"], bones, plt,
                                 n_frame_rows=n_interp_frames, invert_y=invert_y,
                                 title=(f"Geodesic interpolation "
-                                       f"($\\rho$ = {ip['curvature_ratio']:.3f})")),
+                                       f"($\\rho$ = {ip['curvature_ratio']:.3f} "
+                                       f"over {ip['n_segments']} segments)")),
              "fig_interp_geodesic")
     else:
         log("interpolation skipped (include_interpolation=False)")

@@ -60,6 +60,48 @@ data; read it as a full worked example.
 | `two_sample`         | II §18, §20 | persistent homology, classifier two-sample test |
 | `screening`          | II §21, §23 | density typicality, attention entropy |
 | `honesty`            | I §12 | block bootstrap, permutation test |
+| `geodesic_interpolation` | Shao 2018 | discrete geodesic between two clips, morph videos |
+| `latent_geometry`    | thesis Ch. 3 | the three diagnostics the results chapter reports |
+
+## The results chapter's latent-space geometry (`latent_geometry`)
+
+One entry point runs exactly the three diagnostics the thesis section
+*Latent-space geometry* reports — TwoNN intrinsic dimension, the kernel
+prior-fit test, and latent interpolation with the curvature ratio — on the
+posterior means of the held-out clips, and writes the section's two figures
+and every number it quotes:
+
+```bash
+python -m vae_analysis.latent_geometry \
+    --checkpoint runs/temporal_conv/best.pt \
+    --csv data/keypoints.csv \
+    --out-dir outputs/latent_geometry \
+    --fill-tex chapter/results_geometry.tex
+```
+
+```python
+from vae_analysis.latent_geometry import run_latent_geometry
+out = run_latent_geometry("runs/temporal_conv/best.pt", videos)
+```
+
+Outputs: `fig_twonn.pdf`, `fig_interp.pdf` (plus `fig_interp_geodesic.pdf`
+and `fig_kl_per_dim.pdf`), `results.json`, `values.tex` with a `\newcommand`
+per placeholder, and `summary.md`. With `--fill-tex` the section source is
+copied with its `[d\_hat]`-style slots substituted.
+
+Two differences from `posterior_geometry` are deliberate, not accidental:
+the intrinsic dimension is the chapter's **least-squares-through-origin**
+slope rather than the maximum-likelihood estimate, and the two-sample test
+compares **posterior means** (the code the state model consumes) rather than
+reparameterised draws. Note also that the maximum-likelihood cross-check here
+is computed on the untrimmed ratios — that closed form is the MLE of the
+untruncated Pareto law, so applying it after a 10% discard, as
+`posterior_geometry.intrinsic_dimension_twonn` does, inflates it by ~34%.
+
+`latent_geometry_smoke_test.py` checks every estimator against a case with a
+known answer (exact Pareto ratios, an embedded plane, prior-vs-prior, a rigid
+skeleton) and runs the driver end to end on a random-weight
+`TemporalConvVAE`.
 
 ## Post-hoc CARE-PD analysis (`posthoc/`)
 

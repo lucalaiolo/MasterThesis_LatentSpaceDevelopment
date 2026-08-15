@@ -84,6 +84,10 @@ from vae_analysis.latent_geometry import run_latent_geometry
 out = run_latent_geometry("runs/temporal_conv/best.pt", videos)
 ```
 
+On Colab, paste `colab_latent_geometry.py` as one cell: edit its CONFIG block
+(checkpoint, data, output directory), run it, and it prints every number the
+section quotes and displays the figures inline.
+
 Outputs: `fig_twonn.pdf`, `fig_interp.pdf` (plus `fig_interp_geodesic.pdf`
 and `fig_kl_per_dim.pdf`), `results.json`, `values.tex` with a `\newcommand`
 per placeholder, and `summary.md`. With `--fill-tex` the section source is

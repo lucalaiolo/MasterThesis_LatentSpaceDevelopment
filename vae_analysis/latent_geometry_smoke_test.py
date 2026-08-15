@@ -14,6 +14,8 @@ rather than only against itself:
     5. KL        eq:klclosed is zero exactly at mu = 0, sigma^2 = 1, and
                  matches a hand-computed value elsewhere.
     6. Bones     a rigid synthetic skeleton reports zero variation and drift.
+    7c. Sweep     the pair sweep ranks by rho, keeps pairs cross-video, and
+                  its "far" strategy really does pick more distant pairs.
     7. End-to-end run_latent_geometry on a real (random-weight)
        TemporalConvVAE and synthetic videos: files land, rho <= 1, the
        section's placeholders are all filled.
@@ -313,6 +315,49 @@ def test_end_to_end(tmp_dir: Path | None = None):
           f"rho = {ip['curvature_ratio']:.4f})")
 
 
+def test_sweep_curvature_ratio():
+    """7c. The pair sweep ranks by rho, respects the strategies, stays <= 1."""
+    from vae_analysis.geodesic_interpolation import make_interpolator
+    from vae_analysis.latent_geometry import sweep_curvature_ratio
+
+    model, cfg, videos = _tiny_model_and_videos(seed=1)
+    interp = make_interpolator(model, config=cfg, device="cpu")
+
+    rng = np.random.default_rng(0)
+    X = np.stack([v[s:s + cfg.clip_length]
+                  for v in videos for s in (0, 40, 80)]).astype(np.float32)
+    vid = np.repeat(np.arange(len(videos)), 3)
+    mu = np.stack([interp.encode(x).numpy() for x in X])
+
+    sweep = sweep_curvature_ratio(interp, X, vid, mu=mu, n_pairs=6,
+                                  strategy="spread", n_candidates=120,
+                                  n_segments=4, iters=20, rng=rng,
+                                  verbose=False)
+    rho = sweep["rho"]
+    assert sweep["n_pairs"] == len(sweep["records"]) <= 6
+    assert (np.diff(rho) >= -1e-12).all(), "records are not sorted by rho"
+    assert (rho <= 1.0 + 1e-4).all(), rho.max()
+    for r in sweep["records"]:
+        assert r["index_a"] != r["index_b"]
+        assert r["video_a"] != r["video_b"]        # pairs are cross-video
+        assert r["arclength_geodesic"] <= r["arclength_straight"] * (1 + 1e-4)
+
+    # "far" must take pairs at least as distant as the spread selection.
+    far = sweep_curvature_ratio(interp, X, vid, mu=mu, n_pairs=4,
+                                strategy="far", n_candidates=120,
+                                n_segments=4, iters=20, rng=rng, verbose=False)
+    far_d = np.mean([r["latent_distance"] for r in far["records"]])
+    spread_d = np.mean([r["latent_distance"] for r in sweep["records"]])
+    assert far_d >= spread_d, (far_d, spread_d)
+
+    # Explicit pairs bypass the sampling entirely.
+    given = sweep_curvature_ratio(interp, X, vid, pairs=[(0, 5), (1, 9)],
+                                  n_segments=4, iters=20, verbose=False)
+    assert {(r["index_a"], r["index_b"]) for r in given["records"]} == {(0, 5), (1, 9)}
+    print("  [7c] curvature-ratio sweep OK "
+          f"(rho {rho.min():.4f}-{rho.max():.4f})")
+
+
 def test_pair_selection():
     """7b. Pair choice avoids same-video pairs and honours the mode."""
     rng = np.random.default_rng(7)
@@ -339,6 +384,7 @@ def main():
     test_per_dimension_kl()
     test_bone_length_report()
     test_pair_selection()
+    test_sweep_curvature_ratio()
     test_end_to_end()
     print("All latent-space-geometry checks passed.")
 

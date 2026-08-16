@@ -123,7 +123,7 @@ def encode_window_sequence(adapter, video: np.ndarray, *, clip_len: int = 64,
 
 def stitch_dataset(adapter, videos: list[np.ndarray], *, clip_len: int = 64,
                    stride: int = 32, keep: tuple[int, int] | None = None,
-                   stream: str = "pose", masks=None
+                   stream: str = "pose", masks=None, verbose: bool = False
                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Stitch every video and stack into the HMM's ``(Z, lengths, video_id)``.
 
@@ -131,24 +131,40 @@ def stitch_dataset(adapter, videos: list[np.ndarray], *, clip_len: int = 64,
     rather than concatenate windows across recording boundaries (§2.2). Videos
     too short for one clip are skipped.
 
+    Args:
+        verbose: print one line per recording as it is encoded — this pass runs
+            the VAE over every clip of every video, so on a long cohort it is
+            worth seeing move.
+
     Returns:
         Z: ``(sum M_v, d_z)`` stacked trajectories.
         lengths: ``(n_kept_videos,)`` window count per retained video.
         video_id: ``(sum M_v,)`` retained-video index per window.
     """
+    import time
     parts, lengths, ids = [], [], []
     kept_idx = 0
+    t0 = time.time()
+    n = len(videos)
     for v, video in enumerate(videos):
         m = None if masks is None else masks[v]
         traj = encode_window_sequence(adapter, video, clip_len=clip_len,
                                       stride=stride, keep=keep, stream=stream,
                                       mask=m)
         if len(traj) == 0:
+            if verbose:
+                print(f"[stitch]  {v + 1:>3}/{n}  skipped "
+                      f"({len(video)} frames < clip_len={clip_len})", flush=True)
             continue
         parts.append(traj)
         lengths.append(len(traj))
         ids.append(np.full(len(traj), kept_idx, dtype=np.int64))
         kept_idx += 1
+        if verbose:
+            el = time.time() - t0
+            print(f"[stitch]  {v + 1:>3}/{n}  {len(video):>6} frames -> "
+                  f"{len(traj):>5} windows | elapsed {_fmt_dur(el)} "
+                  f"eta {_fmt_dur(el / (v + 1) * (n - v - 1))}", flush=True)
     if not parts:
         raise ValueError("No windows stitched. Are all videos shorter than "
                          "clip_len?")
@@ -295,11 +311,20 @@ def _subset(Z: np.ndarray, lengths: np.ndarray, keep: np.ndarray
 
 
 def _fit_once(Z, lengths, k, covariance_type, min_covar, n_iter, seed):
-    """One GaussianHMM fit; returns (model, train_loglik) or (None, -inf)."""
+    """One GaussianHMM fit.
+
+    Returns ``(model, train_loglik, info)``, or ``(None, -inf, info)`` on a
+    degenerate init. ``info`` is the per-restart telemetry the progress log
+    prints: EM iterations actually run, whether the monitor declared
+    convergence (``False`` means it hit the ``n_iter`` cap), wall seconds, and
+    the exception type if the fit failed.
+    """
     from hmmlearn.hmm import GaussianHMM
-    import logging, warnings
+    import logging, warnings, time
     hmm_logger = logging.getLogger("hmmlearn")
     prev = hmm_logger.level
+    t0 = time.time()
+    info = {"n_iter": 0, "converged": False, "seconds": 0.0, "error": None}
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", module="hmmlearn")
@@ -309,25 +334,113 @@ def _fit_once(Z, lengths, k, covariance_type, min_covar, n_iter, seed):
                                 random_state=seed, init_params="stmc")
             model.fit(Z, lengths)
             ll = model.score(Z, lengths)
-    except Exception:  # noqa: BLE001 — degenerate init; caller retries/skips
-        return None, -np.inf
+        mon = getattr(model, "monitor_", None)
+        info["n_iter"] = int(getattr(mon, "iter", 0) or 0)
+        info["converged"] = bool(getattr(mon, "converged", False))
+    except Exception as e:  # noqa: BLE001 — degenerate init; caller retries/skips
+        info["error"] = type(e).__name__
+        info["seconds"] = time.time() - t0
+        return None, -np.inf, info
     finally:
         hmm_logger.setLevel(prev)
+    info["seconds"] = time.time() - t0
     if not np.isfinite(ll):
-        return None, -np.inf
-    return model, ll
+        info["error"] = "non-finite loglik"
+        return None, -np.inf, info
+    return model, ll, info
 
 
 def _best_of_restarts(Z, lengths, k, covariance_type, min_covar, n_iter,
                       n_restarts, seed):
-    """Best-training-loglik model over ``n_restarts`` k-means-seeded inits."""
-    best, best_ll = None, -np.inf
+    """Best-training-loglik model over ``n_restarts`` k-means-seeded inits.
+
+    Returns ``(model, train_loglik, restarts)`` with ``restarts`` the list of
+    per-restart ``info`` dicts from :func:`_fit_once`, in restart order.
+    """
+    best, best_ll, restarts = None, -np.inf, []
     for r in range(n_restarts):
-        model, ll = _fit_once(Z, lengths, k, covariance_type, min_covar,
-                              n_iter, seed + 1000 * r)
+        model, ll, info = _fit_once(Z, lengths, k, covariance_type, min_covar,
+                                    n_iter, seed + 1000 * r)
+        info["loglik"] = float(ll)
+        restarts.append(info)
         if ll > best_ll:
             best, best_ll = model, ll
-    return best, best_ll
+    return best, best_ll, restarts
+
+
+def _fmt_restarts(restarts) -> str:
+    """``"41,80*,fail"`` — EM iterations per restart, ``*`` = hit the cap."""
+    out = []
+    for r in restarts:
+        if r.get("error"):
+            out.append("fail")
+        else:
+            out.append(f"{r['n_iter']}{'' if r['converged'] else '*'}")
+    return ",".join(out)
+
+
+def _fmt_dur(seconds: float) -> str:
+    """``"48s"`` / ``"6.4m"`` / ``"1.2h"``."""
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _selection_job(Z, lengths, k, fold, val_videos, covariance_type, min_covar,
+                   n_iter, n_restarts, seed):
+    """One unit of K-selection work, sized so progress is reported often.
+
+    ``fold is None`` is the full-data fit that yields BIC; otherwise it is one
+    held-out fold, scored as validation log-likelihood **per window** so folds of
+    different size are comparable. Runs in a joblib worker, so it returns
+    telemetry rather than printing — worker stdout does not reach a notebook.
+    """
+    import time
+    t0 = time.time()
+    out = {"k": k, "fold": fold, "score": None, "bic": None, "train_ll": None,
+           "restarts": [], "n_val": 0, "error": None}
+    if fold is None:
+        model, ll, restarts = _best_of_restarts(Z, lengths, k, covariance_type,
+                                                min_covar, n_iter, n_restarts,
+                                                seed)
+        out["restarts"] = restarts
+        out["train_ll"] = float(ll)
+        out["bic"] = (float(-2 * ll + hmm_n_params(k, Z.shape[1],
+                                                   covariance_type)
+                            * np.log(len(Z)))
+                      if model is not None else np.inf)
+        if model is None:
+            out["error"] = "no restart converged"
+    else:
+        n_videos = len(lengths)
+        val_set = set(np.asarray(val_videos).tolist())
+        train_videos = np.array([v for v in range(n_videos) if v not in val_set])
+        if len(train_videos) < 1 or len(val_videos) < 1:
+            out["error"] = "empty split"
+        else:
+            Ztr, ltr = _subset(Z, lengths, train_videos)
+            Zva, lva = _subset(Z, lengths, np.asarray(val_videos))
+            model, _, restarts = _best_of_restarts(Ztr, ltr, k, covariance_type,
+                                                   min_covar, n_iter,
+                                                   n_restarts, seed)
+            out["restarts"] = restarts
+            out["n_val"] = int(len(Zva))
+            if model is None:
+                out["error"] = "no restart converged"
+            else:
+                try:
+                    ll = model.score(Zva, lva)
+                except Exception as e:  # noqa: BLE001
+                    out["error"] = f"score failed: {type(e).__name__}"
+                else:
+                    if np.isfinite(ll):
+                        out["score"] = float(ll / len(Zva))
+                    else:
+                        out["error"] = "non-finite held-out loglik"
+    out["seconds"] = time.time() - t0
+    return out
 
 
 def _state_condition_numbers(model) -> np.ndarray:
@@ -427,6 +540,16 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
             validated once — the default), ``"loo"`` (leave-one-video-out), or
             ``"bic"``.
         cond_ceiling, occupancy_floor_factor: Guardrail 2.4 triggers.
+        n_jobs: processes for the K sweep. Work is split one job per
+            ``(K, fold)``, so every core stays busy and progress is reported
+            many times per ``K``.
+        verbose: stream a progress log — one line per completed job with its
+            held-out log-likelihood per window, the EM iteration count of each
+            restart (``*`` marks a restart that hit the ``n_iter`` cap), wall
+            time, and a running ETA; then a summary line per ``K``, the
+            selection, and the final fit's escalation ladder. Lines are printed
+            from the **calling** process, so they appear in a notebook cell even
+            when the fits run in joblib workers.
 
     Returns:
         Dict with ``model``, ``k``, ``transition``, ``stationary``, ``means``,
@@ -465,64 +588,114 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
     splits = make_splits()
 
     # ---- select K -----------------------------------------------------------
+    # One job per (K, fold) rather than per K: the unit of parallel work is small
+    # enough to keep every core busy and, more importantly, to report progress
+    # many times per K instead of once. Job order is K-major so early lines cover
+    # a whole K rather than one fold of every K.
     import time as _time
-    n_fits_per_k = n_restarts * (1 + (len(splits) if selection != "bic" else 0))
+    jobs = []
+    for k in ks:
+        jobs.append((k, None, None))                  # full-data fit -> BIC
+        if selection != "bic":
+            for i, val_videos in enumerate(splits):
+                jobs.append((k, i, val_videos))
+    n_total = len(jobs)
+    t_start = _time.time()
+
     if verbose:
-        print(f"[fit_hmm] M={M} d={d} | K in {list(ks)} | selection={selection} "
-              f"| ~{n_fits_per_k} fits/K, {n_fits_per_k * len(ks)} total | "
-              f"n_jobs={n_jobs}", flush=True)
+        print(f"[fit_hmm] {M} windows, d={d}, {n_videos} videos | "
+              f"K in {list(ks)} | selection={selection}"
+              + (f" ({len(splits)} folds)" if splits else "")
+              + f" | n_jobs={n_jobs}", flush=True)
+        print(f"[fit_hmm] {n_total} jobs x {n_restarts} restarts x <={n_iter} EM "
+              f"iters = up to {n_total * n_restarts} fits. "
+              f"'iters' below lists EM iterations per restart; "
+              f"* = hit the {n_iter}-iteration cap.", flush=True)
 
-    def _eval_k(k):
-        """Score one K: full-data BIC + (for cv/loo) the held-out fold LL."""
-        _t0 = _time.time()
-        full, ll_full = _best_of_restarts(Z, lengths, k, covariance_type,
-                                          min_covar, n_iter, n_restarts, seed)
-        bic = (-2 * ll_full + hmm_n_params(k, d, covariance_type) * np.log(M)
-               if full is not None else np.inf)
-        if selection == "bic":
-            score = -bic
+    fold_scores = {k: [] for k in ks}
+    bics = {k: np.inf for k in ks}
+    pending = {k: sum(1 for j in jobs if j[0] == k) for k in ks}
+    done = 0
+
+    def _report(out):
+        """Print one completed job from the **parent** process, with an ETA."""
+        nonlocal done
+        done += 1
+        k, fold = out["k"], out["fold"]
+        if fold is None:
+            bics[k] = out["bic"]
+            what = "full"
+            val = (f"bic={out['bic']:.0f}" if np.isfinite(out["bic"])
+                   else "bic=inf")
         else:
-            fold_scores = []
-            for val_videos in splits:
-                val_set = set(val_videos.tolist())
-                train_videos = np.array([v for v in range(n_videos) if v not in val_set])
-                if len(train_videos) < 1 or len(val_videos) < 1:
-                    continue
-                Ztr, ltr = _subset(Z, lengths, train_videos)
-                Zva, lva = _subset(Z, lengths, val_videos)
-                model, _ = _best_of_restarts(Ztr, ltr, k, covariance_type,
-                                            min_covar, n_iter, n_restarts, seed)
-                if model is None:
-                    continue
-                try:
-                    ll = model.score(Zva, lva)
-                except Exception:  # noqa: BLE001
-                    continue
-                if np.isfinite(ll):
-                    fold_scores.append(ll / len(Zva))
-            score = float(np.mean(fold_scores)) if fold_scores else -np.inf
+            what = f"fold {fold + 1}/{len(splits)}"
+            if out["score"] is not None:
+                fold_scores[k].append(out["score"])
+                val = f"ll/win={out['score']:+.4f}"
+            else:
+                val = f"FAILED ({out['error']})"
+        pending[k] -= 1
         if verbose:
-            tag = (f"cv_ll/win={score:.3f} bic={bic:.0f}" if selection != "bic"
-                   else f"bic={bic:.0f}")
-            print(f"[fit_hmm]   K={k}: {tag}  ({_time.time()-_t0:.1f}s)", flush=True)
-        return k, score, bic
+            elapsed = _time.time() - t_start
+            eta = elapsed / done * (n_total - done)
+            print(f"[fit_hmm] {done:>3}/{n_total} "
+                  f"K={k:<2} {what:<12} {val:<22} "
+                  f"iters {_fmt_restarts(out['restarts']):<14} "
+                  f"{out['seconds']:5.1f}s | elapsed {_fmt_dur(elapsed)} "
+                  f"eta {_fmt_dur(eta)}", flush=True)
+            if pending[k] == 0:                        # this K is fully scored
+                sc = (float(np.mean(fold_scores[k])) if fold_scores[k]
+                      else -np.inf)
+                tag = (f"cv ll/win = {sc:+.4f} over {len(fold_scores[k])} folds"
+                       if selection != "bic" else "")
+                print(f"[fit_hmm]   -> K={k} complete: {tag}"
+                      f"{'  ' if tag else ''}bic={bics[k]:.0f}", flush=True)
 
-    # Fits across K are independent; parallelise them when n_jobs != 1. Each
-    # hmmlearn fit is single-threaded, so process parallelism is the real win.
+    # Each hmmlearn fit is single-threaded, so process parallelism is the real
+    # win. Results are consumed as they land (`generator_unordered`) so the
+    # progress log comes from this process — a worker's stdout never reaches a
+    # notebook cell, which is exactly where this is run.
+    _args = (covariance_type, min_covar, n_iter, n_restarts, seed)
     if n_jobs == 1:
-        results = [_eval_k(k) for k in ks]
+        for k, fold, val_videos in jobs:
+            _report(_selection_job(Z, lengths, k, fold, val_videos, *_args))
     else:
-        try:
-            from joblib import Parallel, delayed
-            results = Parallel(n_jobs=n_jobs, prefer="processes")(
-                delayed(_eval_k)(k) for k in ks)
-        except ImportError:
-            results = [_eval_k(k) for k in ks]
-    scores = {k: sc for k, sc, _ in results}
-    bics = {k: bic for k, _, bic in results}
+        from joblib import Parallel, delayed
+
+        def _tasks():
+            return (delayed(_selection_job)(Z, lengths, k, fold, val_videos,
+                                            *_args)
+                    for k, fold, val_videos in jobs)
+
+        try:                              # joblib >= 1.4 streams completions
+            runner = Parallel(n_jobs=n_jobs, prefer="processes",
+                              return_as="generator_unordered")
+        except (TypeError, ValueError):   # older joblib: collect, then report
+            runner = None
+        if runner is not None:
+            for out in runner(_tasks()):
+                _report(out)
+        else:
+            if verbose:
+                print("[fit_hmm] joblib<1.4: results arrive only at the end of "
+                      "the sweep, so no per-job progress below.", flush=True)
+            for out in Parallel(n_jobs=n_jobs, prefer="processes")(_tasks()):
+                _report(out)
+
+    if selection == "bic":
+        scores = {k: -bics[k] for k in ks}
+    else:
+        scores = {k: (float(np.mean(fold_scores[k])) if fold_scores[k]
+                      else -np.inf) for k in ks}
     if not scores or all(v == -np.inf for v in scores.values()):
         raise ValueError("No HMM converged for any candidate K.")
     k_best = max(scores, key=scores.get)
+    if verbose:
+        ranked = sorted(scores, key=scores.get, reverse=True)
+        runner_up = (f", runner-up K={ranked[1]} ({scores[ranked[1]]:+.4f})"
+                     if len(ranked) > 1 else "")
+        print(f"[fit_hmm] selection took {_fmt_dur(_time.time() - t_start)}; "
+              f"K*={k_best} ({scores[k_best]:+.4f}){runner_up}", flush=True)
 
     # ---- final fit at K*, with Guardrail 2.4 escalation --------------------
     reg = {"covariance_type": covariance_type, "min_covar": min_covar,
@@ -530,11 +703,23 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
     cov_type = covariance_type
     mc = min_covar
     for attempt in range(3):
-        model, _ = _best_of_restarts(Z, lengths, k_best, cov_type, mc, n_iter,
-                                    n_restarts, seed)
+        if verbose:
+            print(f"[fit_hmm] final fit at K={k_best} "
+                  f"(attempt {attempt + 1}/3, cov={cov_type}, "
+                  f"min_covar={mc:g}) ...", flush=True)
+        _t_final = _time.time()
+        model, ll_final, restarts = _best_of_restarts(
+            Z, lengths, k_best, cov_type, mc, n_iter, n_restarts, seed)
+        if verbose:
+            print(f"[fit_hmm]   iters {_fmt_restarts(restarts)}  "
+                  f"train ll={ll_final:.1f}  "
+                  f"({_time.time() - _t_final:.1f}s)", flush=True)
         if model is None:
             mc *= 10
             reg["escalations"].append(f"no-converge -> min_covar={mc:g}")
+            if verbose:
+                print(f"[fit_hmm]   no restart converged -> "
+                      f"min_covar={mc:g}", flush=True)
             continue
         summ = _viterbi_summary(model, Z, lengths, f_win)
         conds = _state_condition_numbers(model)
@@ -550,19 +735,23 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
         occ_triggered = occ_counts.min() < floor
         if cond_triggered and mc < 1e-1:             # rung 0: ridge floor
             mc *= 10
-            reg["escalations"].append(
-                f"ill-conditioned (cond={conds.max():.1e}) -> min_covar={mc:g}")
+            msg = (f"ill-conditioned (cond={conds.max():.1e}) -> "
+                   f"min_covar={mc:g}")
+            reg["escalations"].append(msg)
+            if verbose: print(f"[fit_hmm]   escalate: {msg}", flush=True)
             continue
         if occ_triggered and cov_type == "full":     # rung 1: tied covariance
             cov_type, mc = "tied", min_covar
-            reg["escalations"].append(
-                f"thin state (min_occ={occ_counts.min():.0f}<{floor:.0f}) -> "
-                f"covariance_type='tied' (fallback ladder §2.6)")
+            msg = (f"thin state (min_occ={occ_counts.min():.0f}<{floor:.0f}) -> "
+                   f"covariance_type='tied' (fallback ladder §2.6)")
+            reg["escalations"].append(msg)
+            if verbose: print(f"[fit_hmm]   escalate: {msg}", flush=True)
             continue
         if cond_triggered or occ_triggered:
-            reg["escalations"].append(
-                "trigger persists after ladder; accepting fit (see §2.6 rungs "
-                "semi-tied / factor-analysed for further reduction)")
+            msg = ("trigger persists after ladder; accepting fit (see §2.6 rungs "
+                   "semi-tied / factor-analysed for further reduction)")
+            reg["escalations"].append(msg)
+            if verbose: print(f"[fit_hmm]   {msg}", flush=True)
         break
     reg["final_covariance_type"] = cov_type
     reg["final_min_covar"] = mc

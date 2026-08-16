@@ -509,27 +509,42 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         (occupancy|dwell), ``seam``, ``clinical`` (or None), and ``figures``
         (name -> Figure).
     """
-    import os
+    import os, time
     import matplotlib.pyplot as plt
     stride = stride or clip_len // 2
     n_win = n_win or adapter.n_windows()
     l = clip_len // n_win
     f_win = fps / l
     figs = {}
+    t_run = time.time()
+
     def _save(name):
         return (os.path.join(out_dir, f"{name}.png") if out_dir else None)
+
+    def _stage(msg):
+        print(f"\n=== {msg}  [+{H._fmt_dur(time.time() - t_run)}] ===", flush=True)
+
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    print(f"[setup]  {len(videos)} videos | stream={stream} | clip_len={clip_len} "
+          f"stride={stride} n_win={n_win} | fps={fps} -> f_win={f_win:.3f} Hz "
+          f"(1 window = {1 / f_win:.3f} s) | model={model}", flush=True)
+
     # 1. stitch + seam
+    _stage(f"1/5  encode + stitch ({len(videos)} recordings through the VAE)")
     Z, lengths, vidid = H.stitch_dataset(adapter, videos, clip_len=clip_len,
-                                         stride=stride, stream=stream)
+                                         stride=stride, stream=stream,
+                                         verbose=True)
+    print(f"[stitch] {Z.shape} over {len(lengths)} videos "
+          f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
+          flush=True)
     seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win, f_win=f_win)
-    print(f"[stitch] {Z.shape} over {len(lengths)} videos (stream={stream})")
     print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
-          f"passed={seam['passed']}")
+          f"passed={seam['passed']}", flush=True)
 
     # 2. fit the state model (static HMM or autoregressive HMM) + dwell times
+    _stage(f"2/5  fit {model} and select K")
     if model == "arhmm":
         from . import arhmm as _arhmm
         ar_sel = "cv" if selection == "cv" else "none"
@@ -554,6 +569,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
               "fidgety-band flags")
 
     # 3. per-subject phenotype features
+    _stage("3/5  per-subject occupancy and dwell")
     occ, dwell, mean_dwell = _per_subject_occ_dwell(res["states"], lengths, K, f_win)
     feats = np.concatenate([occ, np.nan_to_num(dwell)], axis=1)
     band_states = [] if lab is None else lab["in_band_states"]
@@ -565,20 +581,29 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                  fps=fps, f_win=f_win, clip_len=clip_len, n_win=n_win)
 
     # 4. figures
-    figs["transition"] = plot_transition(res, save=_save("transition"))
-    figs["state_dwell"] = plot_state_dwell(dwl, save=_save("state_dwell"))
-    figs["occupancy_dwell"] = plot_occupancy_dwell(occ, dwell, save=_save("occupancy_dwell"))
+    _stage("4/5  figures")
+
+    def _fig(name, fn, *a, **kw):
+        """Draw one figure, timed, and never let a plot failure kill the run."""
+        t0 = time.time()
+        print(f"[plots]  {name} ...", end="", flush=True)
+        try:
+            figs[name] = fn(*a, save=_save(name), **kw)
+        except Exception as e:  # noqa: BLE001
+            print(f" skipped: {type(e).__name__}: {e}", flush=True)
+            return None
+        print(f" done ({time.time() - t0:.1f}s)", flush=True)
+        return figs[name]
+
+    _fig("transition", plot_transition, res)
+    _fig("state_dwell", plot_state_dwell, dwl)
+    _fig("occupancy_dwell", plot_occupancy_dwell, occ, dwell)
     # Decoded state appearance needs a per-state mean pose — pose stream, static
     # HMM only. AR states are dynamics (no single pose), delta states are changes.
     if stream == "pose" and model != "arhmm":
-        try:
-            figs["state_appearance"] = plot_state_appearances(
-                adapter, res, dwl, bones, save=_save("state_appearance"))
-        except Exception as e:  # noqa: BLE001
-            print(f"[plots] state_appearance skipped: {e}")
-    figs["movement_dynamics"] = plot_movement_dynamics(
-        videos, res, lengths, bones, clip_len=clip_len, stride=stride, n_win=n_win,
-        stream=stream, dwell=dwl, save=_save("movement_dynamics"))
+        _fig("state_appearance", plot_state_appearances, adapter, res, dwl, bones)
+    _fig("movement_dynamics", plot_movement_dynamics, videos, res, lengths, bones,
+         clip_len=clip_len, stride=stride, n_win=n_win, stream=stream, dwell=dwl)
 
     # velocity boxplot (Fig-3b): % high-velocity frames per body group per state
     try:
@@ -597,14 +622,17 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             vcolors = {"head": "#E8998D", "arms": "#EAD7A0", "legs": "#8FBF9F"}
             vhatch = None
             vtitle = "state movement dynamics — head / arms / legs"
+        print(f"[plots]  high-velocity frames per {velocity_grouping} group ...",
+              end="", flush=True)
+        _t0 = time.time()
         dyn = H.state_movement_dynamics(videos, res, lengths, groups=vgroups,
                                         clip_len=clip_len, stride=stride,
                                         n_win=n_win, top_frac=top_frac)
-        figs["velocity_boxplot"] = plot_velocity_boxplot(
-            dyn, group_colors=vcolors, group_hatch=vhatch, title=vtitle,
-            save=_save("velocity_boxplot"))
+        print(f" done ({time.time() - _t0:.1f}s)", flush=True)
+        _fig("velocity_boxplot", plot_velocity_boxplot, dyn,
+             group_colors=vcolors, group_hatch=vhatch, title=vtitle)
     except Exception as e:  # noqa: BLE001
-        print(f"[plots] velocity_boxplot skipped: {e}")
+        print(f"[plots] velocity_boxplot skipped: {e}", flush=True)
 
     # 5. clinical test (labels enter here only). Both features it tests are
     # fidgety-band quantities, so band=None leaves it nothing to test and the
@@ -661,19 +689,24 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             i = names.index(n)
             return (f"AUC {r['auc']:.2f}, p {r['p']:.3f} "
                     f"(Holm {p_adj[i]:.3f})") if r else "not testable"
-        figs["clinical_occupancy"] = plot_clinical(
-            [(f"state {s}", occ[:, s]) for s in range(K)], labels,
-            ylabel="occupancy", subtitles={s: _sub(f"occupancy_s{s}")
-                                           for s in range(K)},
-            suptitle="clinical contrast — per-state occupancy (exploratory)",
-            save=_save("clinical_occupancy"))
-        figs["clinical_dwell"] = plot_clinical(
-            [(f"state {s}", dwell[:, s]) for s in range(K)], labels,
-            ylabel="mean dwell (s)", subtitles={s: _sub(f"dwell_s{s}")
-                                                for s in range(K)},
-            suptitle="clinical contrast — per-state mean dwell time (exploratory)",
-            save=_save("clinical_dwell"))
-        print("[caveat] wide CIs at few positives; exploratory. LOO ranges show fragility.")
+        _fig("clinical_occupancy", plot_clinical,
+             [(f"state {s}", occ[:, s]) for s in range(K)], labels,
+             ylabel="occupancy",
+             subtitles={s: _sub(f"occupancy_s{s}") for s in range(K)},
+             suptitle="clinical contrast — per-state occupancy (exploratory)")
+        _fig("clinical_dwell", plot_clinical,
+             [(f"state {s}", dwell[:, s]) for s in range(K)], labels,
+             ylabel="mean dwell (s)",
+             subtitles={s: _sub(f"dwell_s{s}") for s in range(K)},
+             suptitle="clinical contrast — per-state mean dwell time (exploratory)")
+        print("[caveat] wide CIs at few positives; exploratory. LOO ranges show "
+              "fragility.", flush=True)
+    else:
+        print("[clinical] skipped (no labels / positive_ids given)", flush=True)
+
+    print(f"\n=== done in {H._fmt_dur(time.time() - t_run)} | "
+          f"{len(figs)} figures"
+          + (f" saved to {out_dir}" if out_dir else "") + " ===", flush=True)
 
     if show:
         for f in figs.values():

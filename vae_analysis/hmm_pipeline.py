@@ -315,16 +315,24 @@ def _fit_once(Z, lengths, k, covariance_type, min_covar, n_iter, seed):
 
     Returns ``(model, train_loglik, info)``, or ``(None, -inf, info)`` on a
     degenerate init. ``info`` is the per-restart telemetry the progress log
-    prints: EM iterations actually run, whether the monitor declared
-    convergence (``False`` means it hit the ``n_iter`` cap), wall seconds, and
-    the exception type if the fit failed.
+    prints: EM iterations actually run, whether EM met its tolerance, whether it
+    stopped only because it ran out of iterations, wall seconds, and the
+    exception type if the fit failed.
+
+    Convergence is judged here rather than read off ``monitor_.converged``:
+    hmmlearn defines that property as ``iter == n_iter or delta < tol``, so it
+    reports ``True`` precisely when the iteration cap is hit — a fit stopped
+    dead at ``n_iter`` with a log-likelihood still climbing by hundreds is
+    called "converged". The cap is the thing worth surfacing, so it is measured
+    directly.
     """
     from hmmlearn.hmm import GaussianHMM
     import logging, warnings, time
     hmm_logger = logging.getLogger("hmmlearn")
     prev = hmm_logger.level
     t0 = time.time()
-    info = {"n_iter": 0, "converged": False, "seconds": 0.0, "error": None}
+    info = {"n_iter": 0, "converged": False, "hit_cap": False,
+            "last_delta": np.nan, "seconds": 0.0, "error": None}
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", module="hmmlearn")
@@ -335,8 +343,17 @@ def _fit_once(Z, lengths, k, covariance_type, min_covar, n_iter, seed):
             model.fit(Z, lengths)
             ll = model.score(Z, lengths)
         mon = getattr(model, "monitor_", None)
-        info["n_iter"] = int(getattr(mon, "iter", 0) or 0)
-        info["converged"] = bool(getattr(mon, "converged", False))
+        ran = int(getattr(mon, "iter", 0) or 0)
+        hist = list(getattr(mon, "history", []) or [])
+        tol = float(getattr(mon, "tol", 0.0) or 0.0)
+        delta = (hist[-1] - hist[-2]) if len(hist) >= 2 else np.nan
+        tol_met = bool(len(hist) >= 2 and delta < tol)
+        info["n_iter"] = ran
+        info["last_delta"] = float(delta)
+        info["converged"] = tol_met
+        # Capped only when it used every iteration *and* still had not met tol;
+        # a fit that converges exactly on its last allowed step is not capped.
+        info["hit_cap"] = bool(ran >= n_iter and not tol_met)
     except Exception as e:  # noqa: BLE001 — degenerate init; caller retries/skips
         info["error"] = type(e).__name__
         info["seconds"] = time.time() - t0
@@ -369,13 +386,13 @@ def _best_of_restarts(Z, lengths, k, covariance_type, min_covar, n_iter,
 
 
 def _fmt_restarts(restarts) -> str:
-    """``"41,80*,fail"`` — EM iterations per restart, ``*`` = hit the cap."""
+    """``"41,80*,fail"`` — EM iterations per restart, ``*`` = stopped at the cap."""
     out = []
     for r in restarts:
         if r.get("error"):
             out.append("fail")
         else:
-            out.append(f"{r['n_iter']}{'' if r['converged'] else '*'}")
+            out.append(f"{r['n_iter']}{'*' if r.get('hit_cap') else ''}")
     return ",".join(out)
 
 
@@ -610,17 +627,22 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
         print(f"[fit_hmm] {n_total} jobs x {n_restarts} restarts x <={n_iter} EM "
               f"iters = up to {n_total * n_restarts} fits. "
               f"'iters' below lists EM iterations per restart; "
-              f"* = hit the {n_iter}-iteration cap.", flush=True)
+              f"* = stopped at the {n_iter}-iteration cap without meeting "
+              f"tolerance (raise n_iter).", flush=True)
 
     fold_scores = {k: [] for k in ks}
     bics = {k: np.inf for k in ks}
     pending = {k: sum(1 for j in jobs if j[0] == k) for k in ks}
     done = 0
+    n_restarts_run = 0
+    n_capped = 0
 
     def _report(out):
         """Print one completed job from the **parent** process, with an ETA."""
-        nonlocal done
+        nonlocal done, n_restarts_run, n_capped
         done += 1
+        n_restarts_run += len(out["restarts"])
+        n_capped += sum(1 for r in out["restarts"] if r.get("hit_cap"))
         k, fold = out["k"], out["fold"]
         if fold is None:
             bics[k] = out["bic"]
@@ -696,6 +718,14 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
                      if len(ranked) > 1 else "")
         print(f"[fit_hmm] selection took {_fmt_dur(_time.time() - t_start)}; "
               f"K*={k_best} ({scores[k_best]:+.4f}){runner_up}", flush=True)
+        if n_capped:
+            frac = n_capped / max(n_restarts_run, 1)
+            note = ("— K selection is comparing under-fitted models; raise "
+                    "n_iter" if frac > 0.25 else
+                    "— tolerable, but raise n_iter if K* sits near a capped K")
+            print(f"[fit_hmm] !! {n_capped}/{n_restarts_run} restarts "
+                  f"({frac:.0%}) stopped at the n_iter={n_iter} cap {note}.",
+                  flush=True)
 
     # ---- final fit at K*, with Guardrail 2.4 escalation --------------------
     reg = {"covariance_type": covariance_type, "min_covar": min_covar,

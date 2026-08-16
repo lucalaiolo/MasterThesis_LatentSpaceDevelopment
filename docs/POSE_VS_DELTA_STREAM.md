@@ -82,26 +82,28 @@ in active states, transition rate) map **directly** onto the diagnostic axis. Th
 pose-stream features only capture it indirectly, through whatever postural
 correlates the movement happens to have.
 
-There is also a **two-estimator symmetry** worth stating in the thesis: the
-headline clinical figure is the raw-keypoint **velocity** band-power ratio (FBR).
-The delta-stream HMM is the *latent-space* counterpart of that same velocity
-signal. Agreement between "raw-velocity FBR separates the groups" and
-"delta-state occupancy separates the groups" is strong evidence that the latent
-captured the clinically-defined *movement* dynamics — not a postural confound.
+There is also a **two-estimator symmetry** worth stating in the thesis: the raw
+keypoint velocities and the delta-stream latent are two views of the same
+underlying quantity, one measured directly on the pose and one through the
+encoder. The per-state velocity profile (raw velocities, model state labels) and
+the delta-state occupancy therefore corroborate each other: agreement is evidence
+that the latent captured the *movement* dynamics rather than a postural confound.
 
 ---
 
-## 4. The frequency argument actually fits delta *better*
+## 4. What the streams mean for dwell times
 
-The dwell$\to$frequency map (§4.2) assumes an oscillation visits two extremes per
-cycle, hence the factor of two:
-$A_{kk} = 1 - 2f/f_{\text{win}}$. On the **delta** stream this is natural: a
-periodic movement $z(t)$ has a velocity $\dot z(t)$ that points one way on the
-flexion half-cycle and the opposite way on the extension half-cycle, so a full
-cycle is two delta-states (a "$+\Delta z$" state and a "$-\Delta z$" state), each
-dwelling $\approx \tfrac{1}{2f}$. The self-transition of a delta-state therefore
-encodes the half-cycle dwell exactly as the frequency map assumes. The same
-`label_state_frequencies` call applies unchanged (same $f_{\text{win}}$).
+A dwell time means something slightly different on each stream, and the
+difference is worth stating explicitly. On the **pose** stream a dwell is how long
+the infant stays in a *configuration*. On the **delta** stream it is how long a
+*kind of change* persists — how long the latent keeps moving the same way before
+the movement changes character. The delta reading is the one closer to the
+clinical construct, which is about how movement unfolds rather than which posture
+is held.
+
+Neither reading licenses a rate: a dwell time says how long a state is held once
+entered, not how often it returns. `state_dwell_times` applies unchanged to both
+streams (same $f_{\text{win}}$).
 
 ---
 
@@ -155,15 +157,16 @@ the two looks.
 
 Expected outcome, stated as a hypothesis to test rather than a foregone
 conclusion: the delta stream should give a cleaner "stillness vs. movement"
-phenotype and a stronger raw-velocity-FBR / latent-dynamics agreement, at the
-cost of needing a smoother latent and a modified state-rendering panel.
+phenotype and stronger agreement between the raw-velocity profile and the latent
+dynamics, at the cost of needing a smoother latent and a modified state-rendering
+panel.
 
 ---
 
 ## 7. The knob
 
-Everything downstream (stitch $\to$ seam check $\to$ `fit_hmm` $\to$ frequency
-labels $\to$ occupancy/dwell phenotype $\to$ clinical test) runs identically for
+Everything downstream (stitch $\to$ seam check $\to$ `fit_hmm` $\to$ dwell times
+$\to$ occupancy/dwell phenotype $\to$ clinical test) runs identically for
 both streams; only the emitted sequence changes:
 
 ```python
@@ -172,10 +175,9 @@ Z, lengths, vidid = H.stitch_dataset(adapter, videos,
                                      clip_len=cfg.clip_length,
                                      stride=cfg.clip_length // 2,
                                      stream=STREAM)
-# fit_hmm / label_state_frequencies / occupancy / clinical test: unchanged.
+# fit_hmm / state_dwell_times / occupancy / clinical test: unchanged.
 # Only the state-*appearance* rendering must switch to integrated trajectories.
 ```
 
-`f_win` is unchanged (the delta is sampled at the same window rate), so the
-0.5–2 Hz band flags and the FBR comparison stay directly comparable across the
-two streams.
+`f_win` is unchanged (the delta is sampled at the same window rate), so dwell
+times in seconds stay directly comparable across the two streams.

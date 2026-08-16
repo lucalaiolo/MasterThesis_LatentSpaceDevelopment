@@ -36,7 +36,7 @@ Contributions, in the order the document develops them:
 3. An **HMM / AR-HMM interpretability layer** over the latent, with a
    full-covariance emission model justified by an affine-invariance argument, a
    seam-free stitching of clip-local latents into per-recording trajectories, and
-   a dwell-time→frequency map connecting HMM states to the fidgety band.
+   per-state dwell times read directly off the decoded path.
 4. A set of **interpretability figures** and an **exploratory clinical test**,
    with the statistical honesty the small cohort demands.
 
@@ -400,8 +400,8 @@ with no cross-clip memory, so two independently-encoded clips can place the same
 motion at different latent locations, and the last window of one clip need not
 join the first window of the next. Non-overlapping clips therefore inject a
 **periodic discontinuity every `T` frames** — a comb at `f_{\text{frame}}/T`
-(≈0.39 Hz at 25 fps) with harmonics, *inside* the fidgety band — which would
-create fake spectral power and a fake 16-window transition rhythm in the HMM.
+(≈0.39 Hz at 25 fps) with harmonics — which would create a fake 16-window
+transition rhythm in the HMM and cap every dwell estimate at 16 windows.
 
 ### 5.2 Overlap-crop stitching
 
@@ -435,56 +435,60 @@ held-out likelihood, never by the label.
 
 ---
 
-## 6. The fidgety-band frequency argument
+## 6. State timescales: dwell time
 
 ### 6.1 Rates
 
-`f_{\text{win}}=f_{\text{frame}}/l` (6.25 Hz at 25 fps, `l=4`); Nyquist
-`f_{\text{win}}/2≈3.1 Hz`, so the 0.5–2 Hz fidgety band is in range.
+`f_{\text{win}}=f_{\text{frame}}/l` (6.25 Hz at 25 fps, `l=4`), so one window is
+0.16 s. Dwell times are quoted in windows and in seconds; the conversion is a
+division by `f_{\text{win}}`.
 
-### 6.2 Dwell time → frequency (the factor of two)
+### 6.2 Dwell time
 
 In an HMM the dwell in state `k` is geometric with mean
-`\bar\tau_k=1/(1-A_{kk})` windows `= \bar\tau_k/f_{\text{win}}` seconds. An
-oscillatory movement visits **two** extremes per cycle (flexed and extended), so a
-full period is two dwells; with symmetric half-cycle dwells of `\bar\tau` windows
-the fundamental is
 
 $$
-f=\frac{f_{\text{win}}}{2\bar\tau}\quad\Longleftrightarrow\quad
-A_{kk}=1-\frac{2f}{f_{\text{win}}} .
+\bar\tau_k=\frac{1}{1-A_{kk}}\ \text{windows}
+=\frac{1}{(1-A_{kk})f_{\text{win}}}\ \text{seconds}.
 $$
 
-The factor of two is essential — a periodic motion reaches its extremes at rate
-`2f`. Each state's fitted `A_{kk}` is mapped through this relation and flagged if
-its implied frequency lies in 0.5–2 Hz (an `A_{kk}\ge 1`, a never-leaving state,
-maps to `∞`). The relation fits the **delta** stream especially naturally, since a
-periodic `z` has a velocity that points one way per half-cycle, so the two
-half-cycles are two delta-states.
+This is the only timescale a first-order chain asserts about a state: **how long
+the state is held once entered**. It follows from the transition matrix alone and
+says nothing about when the state recurs or whether the underlying movement is
+periodic.
 
-### 6.3 Fidgety-band ratio, on the raw signal first
+> **This is deliberately where the timescale argument stops.** An earlier version
+> of this work mapped `A_{kk}` to an oscillation frequency by treating each state
+> as one half-cycle of a periodic movement, `f=f_{\text{win}}/2\bar\tau`, and
+> flagged states whose implied frequency fell in a nominal 0.5–2 Hz band. That
+> map is not identified by the fit: the HMM never estimates a period, the decoded
+> states do not alternate in the regular two-state cycle the derivation assumes,
+> and the band edges had no empirical support in this cohort. Both the frequency
+> map and the band have been removed rather than re-tuned. A claim about
+> recurrence needs a construct that measures recurrence.
 
-Rather than infer frequency only from dwell times, measure it directly: with the
-Welch (1967) PSD `P(f)` of a signal,
+### 6.3 Measured versus implied dwell
 
-$$
-\mathrm{FBR}=\frac{\int_{0.5}^{2}P(f)\,df}{\int_{0}^{f_{\text{win}}/2}P(f)\,df}.
-$$
+`state_dwell_times` returns both:
 
-The **primary** FBR is computed on the **raw keypoint velocities** (frame
-differences of the pose), continuous across the whole recording with no encoder
-seams, at native 25 fps — so it can never be corrupted by a stitching artefact.
-The latent band power and the HMM dwell-frequency are **corroborating**
-estimators; agreement across the three is the informative result, disagreement is
-reported rather than resolved by selection.
+- the **measured** dwell — the mean run length of the Viterbi path, with runs
+  counted inside a recording and never stitched across a recording boundary;
+- the **implied** dwell `1/(1-A_{kk})` from the fitted transition matrix (a
+  never-leaving state, `A_{kk}\ge1`, maps to `∞`).
 
-### 6.4 Resolution caveat
+They coincide when the geometric holding-time model fits, and diverge when the
+decoded runs are more or less persistent than a first-order chain predicts. That
+divergence is a real property of the data, so the figure plots both — bars for
+measured, markers for implied — rather than reporting one number that hides it.
 
-Representing a switch rate `2f` needs `f_{\text{win}}\gg 4f`; at the top of the
-band (`f=2` Hz, `f_{\text{win}}=6.25` Hz) the ratio is only ~1.6, so dwell-based
-estimates near 2 Hz are weak and read alongside the spectral FBR. A future VAE at
-`l=2` (`f_{\text{win}}=12.5` Hz) would double the resolution — a design lever, not
-changed here.
+### 6.4 What the estimate needs
+
+Dwell times are run-length statistics: they need long trajectories and they need
+the seam gone. A three-minute recording at `f_{\text{win}}=6.25` Hz gives ~1,100
+windows, enough for a stable mean run length at any state with non-trivial
+occupancy; a single 16-window clip gives nothing. States with very high `A_{kk}`
+(past ≈0.95) sit on the steep part of `1/(1-A_{kk})`, where a small change in the
+fit moves the implied dwell by seconds — report those from the measured side.
 
 ---
 
@@ -505,8 +509,8 @@ delta stream. The AR order `P` (`lags`) is selected jointly with `K` by held-out
 predictive likelihood, so a higher order only wins if it generalises. EM is
 performed by the `ssm` package (Linderman et al.; the SLDS/AR-HMM library), not
 re-implemented. The AR-HMM returns the same `states`/`transition`/`occupancy`/
-`dwell` interface as the Gaussian HMM, so the frequency map, phenotype features,
-and every figure run unchanged; only the decoded-state-appearance panel is
+`dwell` interface as the Gaussian HMM, so the dwell-time summary, phenotype
+features, and every figure run unchanged; only the decoded-state-appearance panel is
 skipped (an AR state is dynamics, not a pose). It is slower (~5× per fit, and
 unparallelised), so the practical recipe is to pick `K` on the fast Gaussian HMM
 and then fit the AR-HMM at that `K` with a small lag sweep.
@@ -535,8 +539,8 @@ Viterbi path.
 
 3. **Decoded state appearance** (pose stream, Gaussian HMM only). Build a constant
    latent block `Z_k=[μ_k,\dots,μ_k]`, push it through the frozen decoder, and
-   render the mid-frame stick figure; the panel is titled with the state's implied
-   frequency. A state that decodes to nothing recognisable signals `K` too high.
+   render the mid-frame stick figure; the panel is titled with the state's mean
+   dwell time. A state that decodes to nothing recognisable signals `K` too high.
    Skipped for delta and AR states (which are changes/dynamics, not a pose).
 
 4. **State movement dynamics — quiver (Fig-3a analogue).** For each state, pool
@@ -560,7 +564,8 @@ Viterbi path.
    hatched by limb) for left–right **asymmetry**, or **side** (whole left vs
    right). A quiet state reads low everywhere, a whole-body state high everywhere,
    a limb- or side-specific state shows one group elevated. Velocities are raw, so
-   this figure — like the FBR — is immune to any latent/stitching artefact.
+   only the state *labels* come from the model and the figure is immune to any
+   latent/stitching artefact.
 
 6. **The window→frame map.** The frame span of every kept window is recomputed
    with the exact overlap-crop crop/keep logic, so each window's state maps to
@@ -579,9 +584,9 @@ range of `α`), and the **Jacobian panels** of §3.2.
 
 ### 9.1 Features
 
-Per recording: the `K`-dim occupancy histogram, the `K`-dim mean-dwell vector, and
-the scalar raw-velocity FBR — assembled from the Viterbi path and the raw signal,
-never touching the label. Optionally clustered (TwoNN intrinsic dimension first;
+Per recording: the `K`-dim occupancy histogram and the `K`-dim mean-dwell vector —
+assembled from the Viterbi path alone, never touching the label. Extra per-subject
+covariates can be appended. Optionally clustered (TwoNN intrinsic dimension first;
 if it exceeds the apparent cluster count the structure is treated as continuous
 rather than partitioned; then a Gaussian mixture by BIC, silhouette reported
 internally).
@@ -590,20 +595,26 @@ internally).
 
 Labels are aligned to the kept-recording order by parsing subject IDs, with a
 loud audit that the split is exactly 32/6 over 38 and that no positive subject was
-dropped. Two contrasts, each abnormal (`1`) vs. normal (`0`):
-- **Primary:** does the raw-velocity FBR separate the groups? **Mann–Whitney U**
-  (Mann & Whitney, 1947) with the AUC / rank-biserial effect size and an **exact**
-  permutation p-value (the exact rank-sum null; asymptotic only if ties force it).
-- **Secondary:** does fidgety-band-state occupancy separate them?
+dropped. Two families of contrast, each abnormal (`1`) vs. normal (`0`), both read
+straight off the Viterbi path:
+- **Per-state occupancy:** does the share of the recording spent in state `k`
+  separate the groups? **Mann–Whitney U** (Mann & Whitney, 1947) with the AUC /
+  rank-biserial effect size and an **exact** p-value (the exact rank-sum null;
+  asymptotic only if ties force it).
+- **Per-state mean dwell time:** does how long state `k` is held once entered
+  separate them? Same test. A state that too few subjects in either group ever
+  visit is reported as untestable rather than silently dropped.
 
-Both are reported with **leave-one-subject-out** stability (the p and effect size
+That is `2K` tests over one dataset, so **Holm** step-down adjusted p-values are
+reported next to the raw ones and every state is shown, not the best one. Each is
+reported with **leave-one-subject-out** stability (the p and effect size
 recomputed dropping each subject), and the plain caveat that with **6 positives**
 the confidence intervals are wide and the analysis is exploratory — no classifier
 accuracy is reported, and labels never enter any fit. **Polarity** (that `1`
 encodes abnormal/absent-fidgety) is stated to be confirmed against the dataset's
-own documentation; the output prints which group has higher FBR as a sanity check
-(fidgety-present normals should have *higher* in-band movement). A null result is
-reported as a finding, not hidden.
+own documentation, and the output prints the direction of every contrast. A null
+result is reported as a finding, not hidden; so is a single state surviving Holm
+out of `2K`, which is a lead rather than a result.
 
 ---
 
@@ -623,8 +634,8 @@ so the construct must report a **distribution over the recording**, not a single
 average.
 
 The measure uses **raw keypoint displacements only**, so it is independent of the
-encoder, the latent space, and the state model — a third, fully independent
-estimator alongside the raw-velocity FBR (§6.3) and the HMM dwell-frequency.
+encoder, the latent space, and the state model — a fully independent estimator
+alongside the HMM's occupancy and dwell times (§6).
 
 ### 9bis.2 Signed, midline-reflected limb displacement
 
@@ -654,7 +665,8 @@ would cancel the very oscillation it exists to detect.
 
 Recording `i` is partitioned into `E_i` consecutive **non-overlapping epochs** of
 `τ = 5` s, discarding any trailing remainder. At 25 fps an epoch holds 125 frames
-and spans between 2.5 and 10 cycles of the fidgety band. Within epoch `e` the
+— long enough that a single co-contraction does not fill an epoch, short enough to
+stay within one bout of activity. Within epoch `e` the
 frames are stacked into `W^{(i,e)}_L ∈ ℝ^{250}`, with energy
 `a^{(i,e)}_L = \|W^{(i,e)}_L\|^2` and normalisation
 `\widehat W = W/\|W\|`. The **co-movement matrix** is the cosine similarity
@@ -713,12 +725,12 @@ not (`p_corr = 0.84`).
 - **Repository layout.** `architectures/` (VAE models, config, training loop,
   losses, param counts); `youtube_motion/` (data loader, BODY-15 skeleton, sweep
   driver); `vae_analysis/` (`hmm_pipeline` — stitcher, seam diagnostic, HMM fit,
-  frequency map, movement-dynamics computation; `arhmm` — the ssm AR-HMM;
+  dwell-time summary, movement-dynamics computation; `arhmm` — the ssm AR-HMM;
   `hmm_report` — the one-call report and all figures; plus the latent-geometry
   toolkit).
 - **One-call report.** `run_hmm_report(adapter, videos, ..., model="hmm"|"arhmm",
   stream="pose"|"delta", velocity_grouping="regions"|"lateral"|"side")` runs
-  stitch → seam check → fit → frequency labels → phenotype features → all figures
+  stitch → seam check → fit → dwell times → phenotype features → all figures
   → optional clinical test, and saves a joblib bundle (`res`, `Z`, `lengths`, a
   version-proof `model_params` backup, and metadata) so a reload skips both the
   encode-stitch and the refit.
@@ -733,7 +745,11 @@ not (`p_corr = 0.84`).
 - **Small clinical cohort.** `n=38` with **6 positives**: every clinical result is
   exploratory, with wide CIs and reported LOO fragility. Window/clip counts are
   estimation resources, not sample size.
-- **Frequency resolution near 2 Hz** is marginal at `l=4` (§6.4).
+- **No rate or periodicity claim.** The state model supports dwell times and
+  transition structure only. The earlier dwell→frequency map and its 0.5–2 Hz
+  band are withdrawn (§6.2); nothing here measures recurrence.
+- **Dwell resolution.** One window is 0.16 s at `l=4`, and states with
+  `A_{kk}>0.95` sit where the implied dwell is very sensitive to the fit (§6.4).
 - **Two constant joints** (MidHip, Neck) by normalisation — read the motion
   statistics and Jacobian rows with that in mind.
 - **Unverified references:** the PRISM latent-motion work and the RVI-38

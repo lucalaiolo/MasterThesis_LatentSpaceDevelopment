@@ -424,19 +424,20 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
 
 
 # ---------------------------------------------------------------------------
-# raw-kinematic constructs (§8): inter-limb coordination and the fidgety band.
+# raw-kinematic constructs (§8): inter-limb coordination and per-state velocity.
 # These read raw keypoint displacements only, so they are independent of the
 # encoder, the latent and the state model -- a third estimator alongside
 # fluency and mixing, and the slow part of a run. Split out so
 # ``--skip-raw-kinematics`` can omit them for a fluency-only run.
 # ---------------------------------------------------------------------------
 def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
-    """WCLR-PP inter-limb coordination, the fidgety band ratio, and the
-    per-state velocity profiles. Populates ``results['wclrpp']``,
-    ``results['fbr']`` and the primary model's ``velocity_profile_*`` entries.
+    """WCLR-PP inter-limb coordination and the per-state velocity profiles.
+
+    Populates ``results['wclrpp']`` and the primary model's
+    ``velocity_profile_*`` entries.
     """
-    section("Raw kinematics: inter-limb coordination (WCLR-PP) and the "
-            "fidgety band")
+    section("Raw kinematics: inter-limb coordination (WCLR-PP) and per-state "
+            "velocity")
     vid_arrays = [pose[v] for v in vids]
 
     # WCLR-PP: the variance in one limb's future 2D velocity that the other
@@ -490,17 +491,6 @@ def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
           f"{np.nanmedian(wc['mean_F'][labels == 0]):.3f}; AUC "
           f"{agg['auc']:.3f}, p = {agg['p']:.4f}  [{agg['method']}]")
 
-    fbr = MV.fbr_dataset(vid_arrays, fps=geom.fps, band=cfg["band"])
-    fb = ST.mannwhitney(fbr[labels == 1], fbr[labels == 0])
-    lo, hi = ST.hanley_mcneil_ci(fb["auc"], fb["n1"], fb["n2"])
-    fb["ci"] = (lo, hi)
-    results["fbr"] = {"values": fbr, "band": cfg["band"], "test": fb}
-    print(f"  fidgety band ratio {cfg['band'][0]}-{cfg['band'][1]} Hz on raw "
-          f"velocities: abnormal median {np.nanmedian(fbr[labels == 1]):.4f} vs "
-          f"normal {np.nanmedian(fbr[labels == 0]):.4f}")
-    print(f"     AUC = {fb['auc']:.3f} [{lo:.3f}, {hi:.3f}], rank-biserial "
-          f"{fb['rank_biserial']:+.3f}, p = {fb['p']:.4f}  [{fb['method']}]")
-
     # per-state velocity profile: regions and the lateralised limbs
     r_res = results[primary]
     for name, groups in (("regions", MV.region_groups()),
@@ -547,9 +537,6 @@ def main(argv=None):
                     help="which latent stream the model was fitted on; 'auto' infers it from the stored lengths (§4.3)")
     ap.add_argument("--fast", action="store_true",
                     help="cut resampling counts ~20x for a smoke run")
-    ap.add_argument("--band", default="0.5,2.0",
-                    help="fidgety band in Hz as LOW,HIGH (default 0.5,2.0). "
-                         "Used for the raw-velocity fidgety band ratio.")
     ap.add_argument("--fluency-similarity",
                     choices=("separated", "concatenated", "scalar"),
                     default="separated",
@@ -577,10 +564,9 @@ def main(argv=None):
     ap.add_argument("--skip-raw-kinematics", action="store_true",
                     help="run the fluency (and mixing) analysis only: skip the "
                          "raw-kinematic block -- WCLR-PP inter-limb coordination "
-                         "(the synchrony construct, and the slow part of a run), "
-                         "the fidgety band ratio, and the per-state velocity "
-                         "profiles. The §5-§11 fluency and clinical layer are "
-                         "unaffected.")
+                         "(the synchrony construct, and the slow part of a run) "
+                         "and the per-state velocity profiles. The §5-§11 "
+                         "fluency and clinical layer are unaffected.")
     ap.add_argument("--wclr-w", type=int, default=50,
                     help="WCLR-PP window width in frames (default 50 = 2 s at "
                          "25 fps). Lean to 62-75 if the autocorrelation length "
@@ -639,7 +625,6 @@ def main(argv=None):
         "wclr_c": args.wclr_c, "wclr_ell_min": args.wclr_ell_min,
         "wclr_dtau": args.wclr_dtau,
         "wclr_limb_signal": args.wclr_limb_signal,
-        "band": tuple(float(x) for x in args.band.split(",")),
         "top_frac": 0.10,                    # high-velocity frame fraction
         "fluency_similarity": args.fluency_similarity,
         "fluency_omega": args.fluency_omega,
@@ -767,14 +752,13 @@ def main(argv=None):
               f"(p = {p:.3g})")
 
     # ---- raw-kinematic constructs (§8): WCLR-PP inter-limb coordination (the
-    # synchrony construct and the slow part of a run), the fidgety band ratio,
-    # and the per-state velocity profiles. A third estimator alongside fluency
-    # and mixing; omitted for a fluency-only run. See raw_kinematics().
+    # synchrony construct and the slow part of a run) and the per-state velocity
+    # profiles. A third estimator alongside fluency and mixing; omitted for a
+    # fluency-only run. See raw_kinematics().
     if cfg["skip_raw_kinematics"]:
         section("Raw kinematics: skipped (--skip-raw-kinematics)")
-        print("  WCLR-PP synchrony, fidgety band ratio and per-state velocity "
-              "profiles omitted; the fluency and clinical layers above are "
-              "unaffected.")
+        print("  WCLR-PP synchrony and per-state velocity profiles omitted; "
+              "the fluency and clinical layers above are unaffected.")
     else:
         raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg)
 

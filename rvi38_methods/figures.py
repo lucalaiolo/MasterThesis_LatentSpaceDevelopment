@@ -405,7 +405,7 @@ def fig_gates(res, results, outdir):
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# raw kinematics: limb co-movement and the fidgety band
+# raw kinematics: inter-limb coordination and per-state velocity
 # ---------------------------------------------------------------------------
 def _dot_column(ax, x, vals, color, half=0.30, rng=None):
     """A jittered dot strip with a median bar at horizontal position ``x``."""

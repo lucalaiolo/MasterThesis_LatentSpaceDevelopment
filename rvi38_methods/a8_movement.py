@@ -1,21 +1,25 @@
-"""Raw-kinematic constructs: the fidgety band ratio and per-state velocity.
+"""Raw-kinematic construct: the per-state velocity profile.
 
 Everything in this module reads **raw keypoint displacements only**. It never
-touches the encoder, the latent space, or the state model, so it is a genuinely
-independent estimator alongside the state-based quantities of A1 and A7. Only
-the per-state grouping of :func:`state_velocity_profile` consults the fitted
-model, and then only for the state labels.
+touches the encoder or the latent space, so it is a genuinely independent
+estimator alongside the state-based quantities of A1 and A7. Only the per-state
+grouping of :func:`state_velocity_profile` consults the fitted model, and then
+only for the state labels.
 
-The inter-limb coordination construct that once lived here (the cosine-Gram
-co-movement matrix) has been superseded by the vector-valued WCLR-PP measure in
-:mod:`a9_wclrpp`, which separates genuine coupling from shared autocorrelation
-and keeps lead-lag direction. What remains here:
+Two constructs that once lived here are gone:
 
-- **Fidgety band ratio** (FBR): the fraction of raw-velocity spectral power in
-  the 0.5-2 Hz fidgety band, the direct spectral counterpart of the dwell-time
-  frequency map.
-- **Per-state velocity profile**: the high-velocity fraction per body group and
-  state, the only construct that consults the model (for the state labels only).
+- the inter-limb coordination measure (the cosine-Gram co-movement matrix),
+  superseded by the vector-valued WCLR-PP measure in :mod:`a9_wclrpp`, which
+  separates genuine coupling from shared autocorrelation and keeps lead-lag
+  direction;
+- the band-power ratio of raw velocities, which scored a recording by the share
+  of its spectral power inside a fixed 0.5-2 Hz window. That window had no
+  empirical basis in this data, so the ratio measured nothing, and it has been
+  dropped rather than re-tuned.
+
+What remains is the **per-state velocity profile**: the high-velocity fraction
+per body group and state, the only construct that consults the model (for the
+state labels only).
 """
 
 from __future__ import annotations
@@ -36,54 +40,7 @@ LIMBS: dict[str, list[int]] = {
 
 
 # ---------------------------------------------------------------------------
-# fidgety band ratio on the raw velocities
-# ---------------------------------------------------------------------------
-_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
-
-
-def band_power_ratio(signal: np.ndarray, fs: float,
-                     band: tuple[float, float] = (0.5, 2.0),
-                     nperseg: int | None = None) -> float:
-    """Fraction of Welch spectral power inside ``band`` (channels averaged)."""
-    from scipy.signal import welch
-    x = np.asarray(signal, float)
-    if x.ndim == 1:
-        x = x[:, None]
-    if len(x) < 8:
-        return np.nan
-    f, P = welch(x, fs=fs, axis=0, nperseg=min(len(x), nperseg or 256))
-    P = P.mean(axis=1)
-    total = _trapz(P, f)
-    if not np.isfinite(total) or total <= 0:
-        return np.nan
-    m = (f >= band[0]) & (f <= band[1])
-    return float(_trapz(P[m], f[m]) / total)
-
-
-def raw_velocity_fbr(video: np.ndarray, fps: float = 25.0,
-                     band: tuple[float, float] = (0.5, 2.0),
-                     joints=None) -> float:
-    """FBR of the raw keypoint velocities of one recording.
-
-    Velocities are frame differences of the pose, continuous across the whole
-    recording with no encoder seams, so this figure cannot be corrupted by any
-    latent-stitching artefact. Constant joints contribute nothing and are
-    excluded by default via ``build_pose.FREE``.
-    """
-    from build_pose import FREE
-    x = np.asarray(video, float)[:, (FREE if joints is None else joints), :]
-    v = np.diff(x, axis=0).reshape(len(x) - 1, -1)
-    return band_power_ratio(v, fps, band)
-
-
-def fbr_dataset(vids, fps: float = 25.0,
-                band: tuple[float, float] = (0.5, 2.0)) -> np.ndarray:
-    """Per-recording raw-velocity FBR."""
-    return np.array([raw_velocity_fbr(v, fps, band) for v in vids], float)
-
-
-# ---------------------------------------------------------------------------
-# 5. per-state velocity profile (the only construct that reads the model)
+# per-state velocity profile (the only construct that reads the model)
 # ---------------------------------------------------------------------------
 def _window_frame_spans(n_frames: int, geom) -> list[tuple[int, int]]:
     """Frame span of every kept window, in the stitched trajectory's order."""

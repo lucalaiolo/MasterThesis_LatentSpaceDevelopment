@@ -11,16 +11,15 @@ Pipeline, in order:
 1. :func:`encode_window_sequence` / :func:`stitch_dataset` — the overlap-crop
    stitcher (§3, §5.1). The VAE sees only ``clip_len`` frames, so a recording
    becomes a run of clips; naive concatenation injects a seam every clip
-   (a comb at ``f_frame/clip_len`` inside the fidgety band). Encoding at 50%
-   overlap and keeping each clip's central windows tiles the recording with no
-   seam.
+   (a comb at ``f_frame/clip_len``). Encoding at 50% overlap and keeping each
+   clip's central windows tiles the recording with no seam.
 2. :func:`seam_diagnostic` — PSD check that the ``f_frame/clip_len`` comb is
    gone before per-video ``lengths`` are trusted (Guardrail 3.1).
 3. :func:`fit_hmm` — full-covariance Gaussian HMM with a ridge floor, shrinkage
    triggers, k-means restarts, subject-disjoint ``K`` selection, and a Viterbi
    decode (§2, §5.2; Guardrails 2.2, 2.4, 2.5).
-4. :func:`akk_from_frequency` / :func:`band_power_ratio` — the fidgety-band
-   frequency layer (§4), FBR on raw keypoint velocities as the headline.
+4. :func:`state_dwell_times` — the timescale of each state: how long the chain
+   holds it, empirically (Viterbi runs) and as implied by ``A_kk``.
 5. :func:`decode_state_appearance` / :func:`phenotype_features` — interpretability
    and per-video features for clustering (§5.3-5.5).
 
@@ -167,11 +166,11 @@ def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
     A clip boundary every ``clip_len`` frames is a boundary every
     ``clip_len/l = n_win`` windows, i.e. a spectral line at ``f_win/n_win`` Hz
     and its harmonics in the window-sampled trajectory. This is exactly the
-    ``f_frame/clip_len`` comb — inside the fidgety band — that naive
-    concatenation injects. The overlap-crop stitcher should leave no such line.
+    ``f_frame/clip_len`` comb that naive concatenation injects. The overlap-crop
+    stitcher should leave no such line.
 
-    The check compares band power in a narrow bin around the seam fundamental to
-    the median PSD level, per active dimension, averaged over videos.
+    The check compares the PSD in a narrow bin around the seam fundamental to the
+    median PSD level, per active dimension, averaged over videos.
 
     Args:
         Z, lengths: output of :func:`stitch_dataset`.
@@ -582,114 +581,43 @@ def fit_hmm(Z: np.ndarray, lengths: np.ndarray, *, k_range=range(2, 11),
 
 
 # ---------------------------------------------------------------------------
-# 4. Fidgety-band frequency layer  (§4; Guardrail 4.1)
+# 4. State timescales: mean dwell time
 # ---------------------------------------------------------------------------
-def akk_from_frequency(f: float, f_win: float) -> float:
-    """Self-transition ``A_kk`` implied by an oscillation at ``f`` Hz.
+def state_dwell_times(res: dict) -> dict:
+    """Mean dwell time of every fitted state, measured and model-implied.
 
-    A periodic movement reaches its two extremes at rate ``2f`` (one cycle is
-    two half-cycle dwells, §4.2), so the mean half-cycle dwell is
-    ``tau = f_win/(2f)`` windows and ``A_kk = 1 - 1/tau = 1 - 2f/f_win``.
-    """
-    return 1.0 - 2.0 * f / f_win
+    Dwell time is the only timescale a first-order HMM actually asserts about a
+    state. Under the fitted chain the holding time of state ``k`` is geometric
+    with parameter ``1 - A_kk``, so its mean is ``1/(1 - A_kk)`` windows — a
+    property of the transition matrix alone, carrying no assumption that the
+    state recurs, alternates, or oscillates. This is reported next to the
+    **measured** dwell, the mean run length of the Viterbi path (runs are counted
+    within a recording and never stitched across a boundary; see
+    :func:`_viterbi_summary`).
 
-
-def frequency_from_akk(a_kk: float, f_win: float) -> float:
-    """Oscillation frequency (Hz) implied by a fitted ``A_kk`` (inverse of above).
-
-    ``f = f_win (1 - A_kk) / 2``. Returns ``inf`` for the degenerate
-    ``A_kk >= 1`` (a never-leaving state).
-    """
-    if a_kk >= 1.0:
-        return np.inf
-    return f_win * (1.0 - a_kk) / 2.0
-
-
-def dwell_windows_from_frequency(f: float, f_win: float) -> float:
-    """Mean half-cycle dwell in windows for an oscillation at ``f`` Hz."""
-    return f_win / (2.0 * f)
-
-
-def label_state_frequencies(res: dict, band: tuple[float, float] = (0.5, 2.0)
-                            ) -> dict:
-    """Map every fitted state's ``A_kk`` to an implied frequency and flag in-band.
-
-    Uses the diagonal of the transition matrix from :func:`fit_hmm`. The band
-    edges default to a nominal fidgety window; take the exact clinical edges from
-    Einspieler and Prechtl for a thesis figure (§4.3).
-
-    Returns:
-        Dict with per-state ``implied_hz``, a boolean ``in_band`` mask, the
-        band, and the list of in-band state indices.
-    """
-    f_win = res["f_win"]
-    a = np.diag(res["transition"])
-    implied = np.array([frequency_from_akk(ak, f_win) for ak in a])
-    lo, hi = band
-    in_band = (implied >= lo) & (implied <= hi)
-    return {"implied_hz": implied, "in_band": in_band, "band": band,
-            "in_band_states": np.where(in_band)[0].tolist(),
-            "akk": a}
-
-
-def band_power_ratio(signal: np.ndarray, fs: float,
-                     band: tuple[float, float] = (0.5, 2.0),
-                     nperseg: int | None = None) -> float:
-    """Fidgety-band ratio: band power / total power of a multichannel signal.
-
-    ``FBR = (integral of P(f) over the band) / (integral over [0, fs/2])``,
-    with ``P`` the Welch PSD averaged over channels (§4.4). ``signal`` is
-    ``(N,)`` or ``(N, C)``.
-    """
-    from scipy.signal import welch
-
-    x = np.asarray(signal, float)
-    if x.ndim == 1:
-        x = x[:, None]
-    if len(x) < 8:
-        return np.nan
-    if nperseg is None:
-        nperseg = min(len(x), 256)
-    f, P = welch(x, fs=fs, axis=0, nperseg=nperseg)
-    P = P.mean(axis=1)
-    lo, hi = band
-    band_mask = (f >= lo) & (f <= hi)
-    total = np.trapezoid(P, f) if hasattr(np, "trapezoid") else np.trapz(P, f)
-    if total <= 0:
-        return np.nan
-    num = (np.trapezoid(P[band_mask], f[band_mask]) if hasattr(np, "trapezoid")
-           else np.trapz(P[band_mask], f[band_mask]))
-    return float(num / total)
-
-
-def raw_velocity_fbr(video: np.ndarray, fs: float,
-                     band: tuple[float, float] = (0.5, 2.0)) -> float:
-    """Headline fidgety-band ratio, on **raw keypoint velocities** (§4.4).
-
-    Velocities are frame differences of the pose, continuous across the whole
-    recording with no encoder seams — so this figure can never be corrupted by a
-    stitching artifact (Guardrail 4.1). Each joint-coordinate velocity series
-    contributes a channel; the FBR is their pooled band fraction.
+    The two agree when the geometric holding-time model fits, and diverge when
+    the decoded runs are more or less persistent than a first-order chain
+    predicts — a gap worth reading rather than hiding, so both are returned.
 
     Args:
-        video: one recording ``(F, J, D)``.
-        fs: native frame rate (Hz) — 25 for RVI-38, *not* the window rate.
-        band: fidgety band edges (Hz).
+        res: :func:`fit_hmm` output.
+
+    Returns:
+        Dict with ``akk`` (the transition diagonal), the implied dwell in
+        ``implied_windows`` / ``implied_seconds``, and the measured Viterbi
+        dwell in ``dwell_windows`` / ``dwell_seconds``. A never-leaving state
+        (``A_kk >= 1``) gets an infinite implied dwell.
     """
-    v = np.diff(np.asarray(video, float), axis=0)      # (F-1, J, D)
-    v = v.reshape(v.shape[0], -1)                        # (F-1, J*D) channels
-    return band_power_ratio(v, fs, band)
-
-
-def latent_band_power(trajectory: np.ndarray, f_win: float,
-                      band: tuple[float, float] = (0.5, 2.0)) -> float:
-    """Corroborating FBR on a seam-handled latent window trajectory (§4.4).
-
-    Read alongside :func:`raw_velocity_fbr`, never as the headline (Guardrail
-    4.1). ``trajectory`` is a per-video ``(M_v, d_z)`` block from the stitcher;
-    sampling rate is the window rate ``f_win``.
-    """
-    return band_power_ratio(trajectory, f_win, band)
+    f_win = res["f_win"]
+    a = np.asarray(np.diag(res["transition"]), float)
+    implied_win = np.where(a >= 1.0, np.inf,
+                           1.0 / np.clip(1.0 - a, 1e-12, None))
+    return {"akk": a,
+            "implied_windows": implied_win,
+            "implied_seconds": implied_win / f_win,
+            "dwell_windows": np.asarray(res["dwell_windows"], float),
+            "dwell_seconds": np.asarray(res["dwell_seconds"], float),
+            "f_win": f_win}
 
 
 # ---------------------------------------------------------------------------
@@ -717,31 +645,36 @@ def decode_state_appearance(adapter, res: dict, state: int) -> np.ndarray:
     return adapter.decode(z_flat)[0]                           # (T, J, D)
 
 
-def phenotype_features(res: dict, fbr_per_video: np.ndarray | None = None
+def phenotype_features(res: dict, extra: np.ndarray | None = None,
+                       extra_names: list[str] | None = None
                        ) -> tuple[np.ndarray, list[str]]:
     """Assemble one feature vector per video for phenotype clustering (§5.4).
 
-    Concatenates the ``K``-dim state-occupancy histogram, the ``K``-dim
-    mean-dwell vector (windows; absent states filled with 0 dwell), and,
-    optionally, the scalar raw-velocity FBR. Rows align with the stitched
-    ``video_id`` order.
+    Concatenates the ``K``-dim state-occupancy histogram and the ``K``-dim
+    mean-dwell vector (windows; absent states filled with 0 dwell). Rows align
+    with the stitched ``video_id`` order.
 
     Args:
         res: :func:`fit_hmm` output.
-        fbr_per_video: optional ``(n_videos,)`` raw-velocity FBR per retained
-            video (the headline frequency feature).
+        extra: optional ``(n_videos,)`` or ``(n_videos, C)`` block of extra
+            per-video covariates to append.
+        extra_names: column names for ``extra``; defaults to ``extra_0..``.
 
     Returns:
-        (features ``(n_videos, 2K[+1])``, column names).
+        (features ``(n_videos, 2K[+C])``, column names).
     """
     occ = res["per_video_occupancy"]                           # (n_vid, K)
     dwell = np.nan_to_num(res["per_video_dwell_windows"], nan=0.0)
     k = occ.shape[1]
     cols = [f"occ_s{s}" for s in range(k)] + [f"dwell_s{s}" for s in range(k)]
     feats = [occ, dwell]
-    if fbr_per_video is not None:
-        feats.append(np.asarray(fbr_per_video, float)[:, None])
-        cols.append("raw_velocity_fbr")
+    if extra is not None:
+        E = np.asarray(extra, float)
+        if E.ndim == 1:
+            E = E[:, None]
+        feats.append(E)
+        cols += (list(extra_names) if extra_names is not None
+                 else [f"extra_{c}" for c in range(E.shape[1])])
     return np.concatenate(feats, axis=1), cols
 
 
@@ -823,8 +756,9 @@ def body_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
 def lateral_groups(limbs: dict[str, list[int]]) -> dict[str, list[int]]:
     """Four lateralized limb groups: left_arm, right_arm, left_leg, right_leg.
 
-    For reading left/right movement **asymmetry** per state (fidgety movements
-    are roughly symmetric, so a consistent left-right gap is worth flagging).
+    For reading left/right movement **asymmetry** per state: typical spontaneous
+    movement is roughly symmetric, so a consistent left-right gap is worth
+    flagging.
     """
     out = {}
     for name in ("left_arm", "right_arm", "left_leg", "right_leg"):

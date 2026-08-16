@@ -503,6 +503,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    selection="cv", n_splits=5, n_restarts=5,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
                    model="hmm", lags=1, velocity_grouping="regions",
+                   anchor="auto",
                    video_names=None, labels=None, positive_ids=None,
                    out_dir=None, save_hmm_to=None, reuse=None,
                    show=True) -> dict:
@@ -528,6 +529,14 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             for the AR path, and ``n_jobs`` does not apply to it.
         lags: AR order for ``model="arhmm"`` — an int or a list to sweep
             (jointly selected with K). Ignored for ``model="hmm"``.
+        anchor: which pose the Fig-3a velocity clouds are drawn on.
+            ``"state"`` puts each state's cloud on that state's own mean pose,
+            so a panel shows both where the infant tends to be *and* how it
+            moves — at the cost that panels sit at different places and the
+            velocity patterns are harder to compare directly. ``"global"``
+            anchors every panel on the dataset mean pose, so the panels differ
+            only in their velocities. ``"auto"`` (default) picks ``"global"``
+            for the delta stream and ``"state"`` for the pose stream.
         velocity_grouping: body grouping for the Fig-3b velocity boxplot —
             ``"regions"`` (head/arms/legs, default), ``"lateral"`` (left_arm/
             right_arm/left_leg/right_leg, for left-vs-right asymmetry), or
@@ -685,7 +694,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     if stream == "pose" and model != "arhmm":
         _fig("state_appearance", plot_state_appearances, adapter, res, dwl, bones)
     _fig("movement_dynamics", plot_movement_dynamics, videos, res, lengths, bones,
-         clip_len=clip_len, stride=stride, n_win=n_win, stream=stream, dwell=dwl)
+         clip_len=clip_len, stride=stride, n_win=n_win, stream=stream, dwell=dwl,
+         anchor=anchor)
 
     # velocity boxplot (Fig-3b): % high-velocity frames per body group per state
     try:

@@ -2,12 +2,13 @@
 
 :func:`run_hmm_report` runs the whole Stage-4 pipeline from a frozen model and a
 list of videos: stitch the latent window trajectory (pose or delta stream),
-check the seam, fit the Gaussian HMM (video-wise K selection), label state
-frequencies, and render every figure — transition matrix + stationary
+check the seam, fit the Gaussian HMM (video-wise K selection), summarise each
+state's dwell time, and render every figure — transition matrix + stationary
 distribution, per-subject occupancy / dwell, decoded state appearances (pose
 stream), the Fig-3a state movement-dynamics panel, and, when labels are given,
-the clinical contrast (raw-velocity FBR and fidgety-band-state occupancy with
-Mann-Whitney U, effect size, exact permutation p, and leave-one-subject-out).
+the clinical contrast (per-state occupancy and per-state mean dwell time with
+Mann-Whitney U, effect size, exact p, Holm correction over the states, and
+leave-one-subject-out).
 
 The heavy lifting lives in :mod:`vae_analysis.hmm_pipeline`; this module only
 orchestrates it and draws. All figures optionally save to ``out_dir``.
@@ -141,11 +142,16 @@ def plot_state_appearances(adapter, res, lab, bones, *, n_cols=4, save=None):
 
 
 def plot_movement_dynamics(videos, res, lengths, bones, *, clip_len, stride,
-                           n_win, stream="pose", lab=None, anchor="auto",
+                           n_win, stream="pose", dwell=None, anchor="auto",
                            mean_arrows=True, n_sample=5000, alpha=0.05, lw=0.4,
                            clip_pctl=98, reach_bones=1.4, n_cols=4, seed=0,
                            invert_y=False, save=None):
-    """Fig-3a: per-state raw-velocity cloud on the (state or global) mean pose."""
+    """Fig-3a: per-state raw-velocity cloud on the (state or global) mean pose.
+
+    ``dwell`` is :func:`hmm_pipeline.state_dwell_times` output (or None); when
+    given, each panel's title carries the state's measured mean dwell time
+    alongside its occupancy.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
     import matplotlib.gridspec as gridspec
@@ -228,7 +234,8 @@ def plot_movement_dynamics(videos, res, lengths, bones, *, clip_len, stride,
         ax.set_xticks([]); ax.set_yticks([])
         if invert_y: ax.invert_yaxis()
         ttl = f"state {s}  (occ {res['occupancy'][s] * 100:.0f}%)"
-        if lab is not None: ttl += f"\n{lab['implied_hz'][s]:.2f} Hz"
+        d = _dwell_label(dwell, s)
+        if d: ttl += f"\n{d}"
         ax.set_title(ttl, fontsize=10)
     fig.suptitle(f"state movement dynamics  (stream: {stream}, anchor: {anchor})",
                  x=0.02, ha="left", fontsize=13, weight="bold")
@@ -308,6 +315,27 @@ def clinical_test(values, y):
                 n_pos=int(len(pos)), n_neg=int(len(neg)))
 
 
+def holm_bonferroni(pvals):
+    """Holm step-down adjusted p-values (monotone, same order as the input).
+
+    The per-state contrasts are ``2K`` tests over one dataset, so the raw p's are
+    not the whole story; Holm is uniformly more powerful than Bonferroni and
+    makes no independence assumption. ``NaN`` entries pass through untouched.
+    """
+    p = np.asarray(pvals, float)
+    out = np.full(p.shape, np.nan)
+    ok = np.where(np.isfinite(p))[0]
+    if not len(ok):
+        return out
+    order = ok[np.argsort(p[ok])]
+    m = len(order)
+    running = 0.0
+    for i, idx in enumerate(order):
+        running = max(running, min(1.0, (m - i) * p[idx]))
+        out[idx] = running
+    return out
+
+
 def _labels_from_names(names, positive_ids):
     import re
     pos = {str(p).zfill(4) for p in positive_ids}
@@ -317,20 +345,36 @@ def _labels_from_names(names, positive_ids):
     return y, (pos - found)
 
 
-def plot_clinical(panels, y, *, save=None):
+def plot_clinical(panels, y, *, n_cols=4, ylabel=None,
+                  suptitle="clinical contrast (labels; exploratory)",
+                  subtitles=None, save=None):
+    """Group contrast for each panel: one dot per subject, box = median + IQR.
+
+    ``panels`` is a list of ``(title, values)``; ``subtitles`` optionally maps a
+    panel index to a second title line (e.g. the test's AUC and p).
+    """
     import matplotlib.pyplot as plt
     y = np.asarray(y)
-    fig, ax = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 4), squeeze=False)
+    n = max(len(panels), 1)
+    n_cols = max(1, min(n_cols, n))
+    rows = int(np.ceil(n / n_cols))
+    fig, ax = plt.subplots(rows, n_cols, figsize=(3.5 * n_cols, 3.8 * rows),
+                           squeeze=False)
+    rng = np.random.default_rng(0)
     for k, (ttl, vals) in enumerate(panels):
-        a = ax[0][k]; vv = np.asarray(vals, float)
+        a = ax[k // n_cols][k % n_cols]; vv = np.asarray(vals, float)
         g0 = vv[(y == 0) & np.isfinite(vv)]; g1 = vv[(y == 1) & np.isfinite(vv)]
         a.boxplot([g0, g1], showfliers=False, widths=.5)
         a.set_xticks([1, 2]); a.set_xticklabels(["normal (0)", "abnormal (1)"])
         for xi, g in [(1, g0), (2, g1)]:
-            a.scatter(np.full(len(g), xi) + np.random.default_rng(0).uniform(-.08, .08, len(g)),
+            a.scatter(np.full(len(g), xi) + rng.uniform(-.08, .08, len(g)),
                       g, s=18, alpha=.6, color="crimson" if xi == 2 else "0.3", zorder=3)
-        a.set_title(ttl); a.set_ylabel(ttl)
-    fig.suptitle("clinical contrast (labels; exploratory)", weight="bold")
+        sub = (subtitles or {}).get(k)
+        a.set_title(f"{ttl}\n{sub}" if sub else ttl, fontsize=9)
+        a.set_ylabel(ylabel or ttl)
+    for k in range(len(panels), rows * n_cols):
+        ax[k // n_cols][k % n_cols].axis("off")
+    fig.suptitle(suptitle, weight="bold")
     fig.tight_layout()
     if save: fig.savefig(save, dpi=200, bbox_inches="tight")
     return fig
@@ -339,7 +383,7 @@ def plot_clinical(panels, y, *, save=None):
 # ---------------------------------------------------------------------------
 # persist / restore the fitted HMM (joblib bundle)
 # ---------------------------------------------------------------------------
-def save_hmm(path, res, Z, lengths, vidid, *, stream=None, band=None, fps=None,
+def save_hmm(path, res, Z, lengths, vidid, *, stream=None, fps=None,
              f_win=None, clip_len=None, n_win=None, compress=3):
     """Dump the fitted HMM + stitch outputs so nothing has to re-run.
 
@@ -369,7 +413,7 @@ def save_hmm(path, res, Z, lengths, vidid, *, stream=None, band=None, fps=None,
         "Z": Z, "lengths": lengths, "vidid": vidid,
         "model_params": model_params,
         "meta": {"k": res["k"], "hmmlearn": hmmlearn.__version__,
-                 "stream": stream, "band": band, "fps": fps, "f_win": f_win,
+                 "stream": stream, "fps": fps, "f_win": f_win,
                  "clip_len": clip_len, "n_win": n_win,
                  "lags": res.get("lags")},
     }, path, compress=compress)
@@ -412,7 +456,7 @@ def rebuild_hmm(model_params):
 # ---------------------------------------------------------------------------
 def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    stream="pose", n_win=None, k_range=range(2, 9), fps=25,
-                   band=(0.5, 2.0), selection="cv", n_splits=5, n_restarts=5,
+                   selection="cv", n_splits=5, n_restarts=5,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
                    model="hmm", lags=1, velocity_grouping="regions",
                    video_names=None, labels=None, positive_ids=None,
@@ -460,9 +504,10 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         show: call ``plt.show()`` on each figure (notebook display).
 
     Returns:
-        Dict with ``res``, ``lab``, ``occ``, ``dwell``, ``mean_dwell``,
-        ``feats`` (occupancy|dwell), ``band_states``, ``seam``, ``clinical``
-        (or None), and ``figures`` (name -> Figure).
+        Dict with ``res``, ``dwell_times`` (per-state mean dwell, measured and
+        ``A_kk``-implied), ``occ``, ``dwell``, ``mean_dwell``, ``feats``
+        (occupancy|dwell), ``seam``, ``clinical`` (or None), and ``figures``
+        (name -> Figure).
     """
     import os
     import matplotlib.pyplot as plt
@@ -484,7 +529,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
           f"passed={seam['passed']}")
 
-    # 2. fit the state model (static HMM or autoregressive HMM) + freq labels
+    # 2. fit the state model (static HMM or autoregressive HMM) + dwell times
     if model == "arhmm":
         from . import arhmm as _arhmm
         ar_sel = "cv" if selection == "cv" else "none"
@@ -516,23 +561,24 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
 
     # optional: persist the fitted HMM + stitch outputs (joblib bundle)
     if save_hmm_to:
-        save_hmm(save_hmm_to, res, Z, lengths, vidid, stream=stream, band=band,
+        save_hmm(save_hmm_to, res, Z, lengths, vidid, stream=stream,
                  fps=fps, f_win=f_win, clip_len=clip_len, n_win=n_win)
 
     # 4. figures
     figs["transition"] = plot_transition(res, save=_save("transition"))
+    figs["state_dwell"] = plot_state_dwell(dwl, save=_save("state_dwell"))
     figs["occupancy_dwell"] = plot_occupancy_dwell(occ, dwell, save=_save("occupancy_dwell"))
     # Decoded state appearance needs a per-state mean pose — pose stream, static
     # HMM only. AR states are dynamics (no single pose), delta states are changes.
     if stream == "pose" and model != "arhmm":
         try:
             figs["state_appearance"] = plot_state_appearances(
-                adapter, res, lab, bones, save=_save("state_appearance"))
+                adapter, res, dwl, bones, save=_save("state_appearance"))
         except Exception as e:  # noqa: BLE001
             print(f"[plots] state_appearance skipped: {e}")
     figs["movement_dynamics"] = plot_movement_dynamics(
         videos, res, lengths, bones, clip_len=clip_len, stride=stride, n_win=n_win,
-        stream=stream, lab=lab, save=_save("movement_dynamics"))
+        stream=stream, dwell=dwl, save=_save("movement_dynamics"))
 
     # velocity boxplot (Fig-3b): % high-velocity frames per body group per state
     try:
@@ -580,28 +626,59 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             print(f"[labels] !! positive IDs not found among kept subjects: {sorted(missing)}")
     if labels is not None:
         labels = np.asarray(labels)
-        kept_idx = [i for i, v in enumerate(videos) if len(v) >= clip_len]
-        fbr = np.array([H.raw_velocity_fbr(videos[i], fps, band) for i in kept_idx])
-        band_occ = occ[:, band_states].sum(1) if band_states else np.zeros(len(occ))
-        clinical = {"FBR": clinical_test(fbr, labels),
-                    "band_occupancy": (clinical_test(band_occ, labels)
-                                       if band_states else None)}
-        for name, r in clinical.items():
+        # Two per-state readouts, both straight off the Viterbi path: how much of
+        # a recording sits in a state, and how long the state is held when
+        # entered. 2K tests over one dataset, so Holm-corrected across them.
+        names, values = [], []
+        for s in range(K):
+            names.append(f"occupancy_s{s}"); values.append(occ[:, s])
+        for s in range(K):
+            names.append(f"dwell_s{s}"); values.append(dwell[:, s])
+        tests = {n: clinical_test(v, labels) for n, v in zip(names, values)}
+        p_adj = holm_bonferroni([tests[n]["p"] if tests[n] else np.nan
+                                 for n in names])
+        clinical = {"tests": tests,
+                    "p_holm": {n: (float(q) if np.isfinite(q) else None)
+                               for n, q in zip(names, p_adj)},
+                    "values": dict(zip(names, values))}
+        print(f"[clinical] {len(names)} per-state contrasts "
+              f"(occupancy and mean dwell), Holm-corrected:")
+        for n, q in zip(names, p_adj):
+            r = tests[n]
             if r is None:
-                print(f"[{name}] skipped"); continue
-            print(f"[{name}] AUC={r['auc']:.3f} rb={r['rank_biserial']:+.3f} "
-                  f"p={r['p']:.4f}({r['p_method']}) {r['direction']}  "
-                  f"LOO p[{min(r['loo_p']):.4f},{max(r['loo_p']):.4f}]")
-        panels = [("raw-velocity FBR", fbr)]
-        if band_states:
-            panels.append(("fidgety-band occupancy", band_occ))
-        figs["clinical"] = plot_clinical(panels, labels, save=_save("clinical"))
+                print(f"  {n:14s} skipped (a group has no finite value here)")
+                continue
+            # A state only one subject per group ever visits leaves no LOO fold
+            # with both groups populated — that emptiness is itself the finding.
+            loo = (f"LOO p[{min(r['loo_p']):.4f},{max(r['loo_p']):.4f}]"
+                   if r["loo_p"] else "LOO n/a (too few subjects visit it)")
+            print(f"  {n:14s} AUC={r['auc']:.3f} rb={r['rank_biserial']:+.3f} "
+                  f"p={r['p']:.4f}({r['p_method']}) p_holm={q:.4f} "
+                  f"{r['direction']}  n={r['n_pos']}/{r['n_neg']}  {loo}")
+
+        def _sub(n):
+            r = tests[n]
+            i = names.index(n)
+            return (f"AUC {r['auc']:.2f}, p {r['p']:.3f} "
+                    f"(Holm {p_adj[i]:.3f})") if r else "not testable"
+        figs["clinical_occupancy"] = plot_clinical(
+            [(f"state {s}", occ[:, s]) for s in range(K)], labels,
+            ylabel="occupancy", subtitles={s: _sub(f"occupancy_s{s}")
+                                           for s in range(K)},
+            suptitle="clinical contrast — per-state occupancy (exploratory)",
+            save=_save("clinical_occupancy"))
+        figs["clinical_dwell"] = plot_clinical(
+            [(f"state {s}", dwell[:, s]) for s in range(K)], labels,
+            ylabel="mean dwell (s)", subtitles={s: _sub(f"dwell_s{s}")
+                                                for s in range(K)},
+            suptitle="clinical contrast — per-state mean dwell time (exploratory)",
+            save=_save("clinical_dwell"))
         print("[caveat] wide CIs at few positives; exploratory. LOO ranges show fragility.")
 
     if show:
         for f in figs.values():
             plt.figure(f.number); plt.show()
 
-    return dict(res=res, lab=lab, occ=occ, dwell=dwell, mean_dwell=mean_dwell,
-                feats=feats, band_states=band_states, seam=seam,
+    return dict(res=res, dwell_times=dwl, occ=occ, dwell=dwell,
+                mean_dwell=mean_dwell, feats=feats, seam=seam,
                 clinical=clinical, lengths=lengths, figures=figs)

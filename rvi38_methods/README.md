@@ -2,8 +2,8 @@
 
 Implementation of `METHODS_3.md` — fluency (A1) and mixing structure (A7) on the
 RVI-38 cohort, plus the raw-kinematic constructs (WCLR-PP inter-limb
-coordination for cramped-synchronised movements, and the fidgety band ratio),
-with the §10 inference layer and the §11 pre-specified gates.
+coordination for cramped-synchronised movements, and the per-state velocity
+profiles), with the §10 inference layer and the §11 pre-specified gates.
 
 The metastable decomposition (PCCA+, implied timescales, the kinematic
 dendrogram and their agreement statistics) has been removed. The earlier
@@ -21,7 +21,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `fluency_curve.py` | exploratory temporal decomposition of `Φ`: the Gaussian-on-index curve `φ(t)` whose flat-kernel limit is `Φ` (reuses `S`, the visit sequence and the cached null) |
 | `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
 | `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
-| `a8_movement.py` | raw kinematics: fidgety band ratio, per-state velocity profiles |
+| `a8_movement.py` | raw kinematics: per-state velocity profiles |
 | `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, label-permutation and circular-shift surrogate inference |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
@@ -36,8 +36,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
         --hmm hmm_rvi38_stream_delta.pkl \
         --labels RVI_38_labels.mat --outdir rvi38_out
 
-`--fast` cuts every resampling count ~20x for a smoke run. `--band LOW,HIGH` sets
-the fidgety band (default `0.5,2.0`) used by the FBR.
+`--fast` cuts every resampling count ~20x for a smoke run.
 
 ### Direction-aware fluency (`DIRECTION_AWARE_KINEMATIC_SIMILARITY.md`)
 
@@ -102,7 +101,7 @@ axis — plus `<outdir>/results/fluency_curve.csv` (`id, label, Φ, n_transition
 **Fluency only.** `--skip-raw-kinematics` runs the fluency (and mixing)
 analysis and the whole §5–§11 clinical layer, but skips the raw-kinematic block
 — WCLR-PP inter-limb coordination (the synchrony construct, and the slow part
-of a run), the fidgety band ratio, and the per-state velocity profiles. Use it
+of a run) and the per-state velocity profiles. Use it
 for a fast fluency turnaround; the `Φ` result, its group contrast, the channel
 split, split-half reliability, the gates and the fluency figures are all
 unaffected. The WCLR-PP window and

@@ -4,10 +4,10 @@
 > interpretability layer on top of the temporal-latent motion VAE, run on the
 > RVI-38 neonatal dataset. It states the mathematics the implementation must
 > respect, the emission-covariance decision and its justification, the
-> clip-stitching correction the fixed 64-frame VAE input forces, the
-> fidgety-band frequency argument, and the guardrails that keep the statistics
-> honest. Claude Code implements the pipeline autonomously against this
-> document; the numbered guardrails in each section are binding.
+> clip-stitching correction the fixed 64-frame VAE input forces, the state
+> timescales the model can actually support, and the guardrails that keep the
+> statistics honest. Claude Code implements the pipeline autonomously against
+> this document; the numbered guardrails in each section are binding.
 >
 > **Implementation:** `vae_analysis/hmm_pipeline.py` implements this spec against
 > the frozen temporal VAE, model- and dataset-agnostic (any `temporal_conv` /
@@ -298,10 +298,10 @@ can place the same motion at different latent locations, and window 16 of one cl
 need not join smoothly to window 1 of the next. With non-overlapping 64-frame
 clips this places a discontinuity every 64 frames, a periodic artifact at
 $f_{\text{frame}}/64$ with harmonics. At 30 fps that comb sits at 0.47, 0.94,
-1.41, and 1.88 Hz; at 25 fps at 0.39, 0.78, 1.17, 1.56, and 1.95 Hz. Both land
-inside the 0.5-to-2 Hz fidgety band. Naive concatenation therefore injects fake
-spectral power exactly where the band-ratio of Section 4 reads, and a fake
-transition into the HMM exactly every 16 windows.
+1.41, and 1.88 Hz; at 25 fps at 0.39, 0.78, 1.17, 1.56, and 1.95 Hz. Naive
+concatenation therefore injects a fake transition into the HMM exactly every 16
+windows, which truncates every dwell run at the same period and biases the
+dwell times of Section 4 towards that period.
 
 **The fix: overlap-tile with centre-crop.** Encode clips at stride 32 frames (50%
 overlap) and from each clip keep only the central eight windows (indices 4 to 11),
@@ -325,97 +325,79 @@ or its harmonics. This check gates the per-video `lengths` construction.
 
 ---
 
-## 4. The fidgety-band frequency argument
+## 4. State timescales: dwell time
 
 ### 4.1 Rates
 
 From Section 0, $f_{\text{win}} = f_{\text{frame}}/l$, one window spanning
-$l/f_{\text{frame}}$ seconds. The Nyquist ceiling of the window trajectory is
-$f_{\text{win}}/2$, which is 3.75 Hz at 30 fps and 3.1 Hz at 25 fps, so the
-0.5-to-2 Hz band lies in range at either rate.
+$l/f_{\text{frame}}$ seconds. At 25 fps with $l = 4$ a window is 0.16 s, so the
+shortest resolvable dwell is one window and the longest is the recording itself.
+Every timescale below is quoted in windows and in seconds; the conversion is
+division by $f_{\text{win}}$ and nothing more.
 
-### 4.2 Dwell time to frequency
+### 4.2 Dwell time
 
-In an HMM the time in state $k$ before leaving is geometric,
+In an HMM the time spent in state $k$ before leaving is geometric,
 $\Pr(\text{dwell} = m) = A_{kk}^{m-1}(1 - A_{kk})$, with mean
 
 $$
-\bar\tau_k = \frac{1}{1 - A_{kk}} \ \text{windows} = \frac{\bar\tau_k}{f_{\text{win}}}
-\ \text{seconds}.
+\bar\tau_k = \frac{1}{1 - A_{kk}} \ \text{windows}
+= \frac{1}{(1 - A_{kk})\,f_{\text{win}}} \ \text{seconds}.
 $$
 
-An oscillatory movement swings between two configurations, a flexed state and an
-extended state, so a full period visits both and one cycle is two dwells, not
-one. With symmetric half-cycle dwells of mean $\bar\tau$ windows the fundamental
-frequency is
+This is the whole of what a first-order chain asserts about a state's timescale,
+and it follows from the transition matrix alone. It says how long the state is
+held once entered. It says nothing about when the state recurs, whether it
+alternates with another state, or whether the underlying movement is periodic.
 
-$$
-f = \frac{f_{\text{win}}}{2\,\bar\tau} \quad\Longleftrightarrow\quad
-\bar\tau = \frac{f_{\text{win}}}{2f}, \qquad
-A_{kk} = 1 - \frac{2f}{f_{\text{win}}}.
-$$
-
-The factor of two is the correction: a periodic motion reaches its extremes at
-rate $2f$, so state switches occur at $2f$ and dwell scales as $1/(2f)$.
+> **Guardrail 4.1 (a dwell time is not a rate).** Do not convert $A_{kk}$ into an
+> oscillation frequency. Doing so requires assuming that the state is one
+> half-cycle of a periodic movement that reliably returns — an assumption this
+> model does not make, this data does not support, and the fit cannot test. The
+> reported per-state quantity is the mean dwell time, in seconds. A recurrence
+> claim needs a construct that measures recurrence, not a relabelled dwell.
 
 ### 4.3 The $A_{kk}$ map
 
-Mapping the band edges and the midpoint through
-$A_{kk} = 1 - 2f/f_{\text{win}}$:
+Reading the self-transition as a holding time, at 25 fps with $l = 4$
+($f_{\text{win}} = 6.25$ Hz):
 
-| motion $f$ | $\bar\tau$, 30 fps (win) | $A_{kk}$, 30 fps | $\bar\tau$, 25 fps (win) | $A_{kk}$, 25 fps |
-|---|---|---|---|---|
-| 0.5 Hz | 7.50 | 0.87 | 6.25 | 0.84 |
-| 1.0 Hz | 3.75 | 0.73 | 3.13 | 0.68 |
-| 2.0 Hz | 1.88 | 0.47 | 1.56 | 0.36 |
+| $A_{kk}$ | $\bar\tau_k$ (windows) | $\bar\tau_k$ (s) |
+|---|---|---|
+| 0.50 | 2.0 | 0.32 |
+| 0.75 | 4.0 | 0.64 |
+| 0.90 | 10.0 | 1.60 |
+| 0.95 | 20.0 | 3.20 |
+| 0.99 | 100.0 | 16.00 |
 
-A state whose fitted self-transition sits in the band's range (roughly 0.47 to
-0.87 at 30 fps, 0.36 to 0.84 at 25 fps) has a dwell distribution consistent with
-fidgety-band motion. Take the exact clinical band edges from Einspieler and
-Prechtl, not from this table; the table supplies the map, not the cut-offs.
+The curve is steep at the top: past $A_{kk} \approx 0.95$ a small change in the
+fitted self-transition moves the implied dwell by seconds, so a state in that
+regime should be reported with its measured dwell rather than its implied one.
 
-### 4.4 The band-power ratio, on the raw signal first
+### 4.4 Measured dwell versus implied dwell
 
-Rather than infer frequency only from dwell times, measure it directly. Compute
-the power spectral density $P(f)$ of the motion signal by Welch's method and
-define a fidgety-band ratio
+Report both, from `state_dwell_times`:
 
-$$
-\text{FBR} = \frac{\int_{0.5}^{2} P(f)\,df}{\int_{0}^{f_{\text{win}}/2} P(f)\,df}.
-$$
+- the **measured** dwell, the mean run length of the Viterbi path, with runs
+  counted inside a recording and never stitched across a boundary;
+- the **implied** dwell $1/(1 - A_{kk})$ from the fitted transition matrix.
 
-Compute the primary FBR on the **raw keypoint velocities**, which are continuous
-across the whole recording with no encoder seams, at native 25 fps. Then, as
-corroboration, compute band power on the seam-handled latent trajectory. The two
-paths are independent: a seam artifact in the latent can never silently corrupt
-the headline figure, because the headline figure comes from the raw signal.
-Agreement between the two is the informative result, since it shows the latent
-captured the clinically defined dynamics rather than the analysis having imposed
-them. This is the same two-estimator logic used elsewhere in the thesis, placed
-where it protects the primary number.
+They agree when the geometric holding-time model fits. They diverge when the
+decoded runs are more or less persistent than a first-order chain predicts —
+usually because the true holding time is not geometric, which is a real property
+of the data and belongs in the write-up rather than being averaged away. The
+divergence is plotted directly (bars for measured, markers for implied), so a
+reader sees the gap instead of a single number that hides it.
 
-> **Guardrail 4.1 (decouple the clinical frequency from the latent).** The
-> reported fidgety-band frequency feature is the raw-velocity FBR. The latent
-> band power and the HMM dwell-frequency are corroborating estimators, not the
-> headline. If they disagree, report the disagreement rather than selecting the
-> favourable one.
+### 4.5 What the dwell estimate needs
 
-### 4.5 Resolution
-
-Representing a switch rate of $2f$ needs $f_{\text{win}} \gg 4f$. At the top of
-the band, $f = 2$ Hz with $f_{\text{win}} = 7.5$ Hz gives a ratio of 1.9, which
-is marginal, so dwell-based estimates near 2 Hz are weak and should be read
-alongside the spectral FBR rather than alone. If fidgety fidelity at the top of
-the band becomes critical, a future VAE at $l = 2$ ($f_{\text{win}} = 15$ Hz)
-doubles the windows per cycle; note this as a design lever, do not retrain here.
-
-The periodogram resolution of a single 16-window clip is
-$\Delta f = f_{\text{win}}/W \approx 0.47$ Hz, far too coarse to resolve the band.
-This is why the frequency analysis runs on the concatenated per-video trajectory,
-where a three-minute recording gives on the order of 1,600 windows and
-$\Delta f \approx 0.005$ Hz. Long trajectories are what make both the spectral and
-the dwell estimators trustworthy, and RVI-38 supplies them where short clips did
-not.
+Dwell estimates are run-length statistics, so they need long trajectories and
+they need the seam gone. A three-minute recording at $f_{\text{win}} = 6.25$ Hz
+gives on the order of 1,100 windows, which supports a stable mean run length for
+any state with non-trivial occupancy; a single 16-window clip supports nothing.
+This is why the analysis runs on the concatenated per-video trajectory, and why
+Guardrail 3.1 gates it: a seam every 16 windows truncates every long run at 16
+windows and silently caps every dwell estimate at that value.
 
 ---
 
@@ -469,13 +451,13 @@ For each retained model produce, in order of value:
    in dwell times and transition structure, not in the state means.
 3. **Per-video state-occupancy histogram and mean dwell time per state**, from
    the Viterbi path. These are the phenotype features of Section 5.4.
-4. **Frequency labelling.** Map each state's fitted $A_{kk}$ through Section 4.3
-   and flag the states whose implied frequency lies in band.
+4. **Dwell-time summary.** Per state, the measured dwell against the dwell
+   implied by $A_{kk}$ (Section 4.4), in seconds.
 
 ### 5.4 Phenotype clustering
 
 Build one feature vector per video: the $K$-dimensional state-occupancy
-histogram, the $K$-dimensional mean-dwell vector, and the scalar raw-velocity FBR.
+histogram and the $K$-dimensional mean-dwell vector.
 Run TwoNN on the 38 vectors first; if the intrinsic dimension exceeds the number
 of apparent clusters, treat the structure as continuous rather than forcing a
 partition. Then cluster (GMM or k-means, with spectral clustering on an
@@ -489,17 +471,19 @@ ARI or AMI against the fidgety label post hoc.
 
 ### 5.5 Clinical validation
 
-The label is fidgety presence itself, so it is the direct test of the frequency
-work. Primary test: does the raw-velocity FBR separate normal from abnormal
-videos (Mann-Whitney U, effect size, permutation null)? Secondary: does
-fidgety-band-state occupancy separate them? The headline result is the agreement
-of the three estimators, raw-velocity FBR, latent band power, and HMM
-dwell-frequency, on which videos carry in-band motion.
+The label is the GMA classification itself, so it tests the state model directly.
+The two per-state readouts both come straight off the Viterbi path: **occupancy**
+(how much of a recording sits in each state) and **mean dwell time** (how long
+each state is held once entered). Test each state on each, by Mann-Whitney U with
+effect size and an exact p, and correct across the $2K$ tests with Holm. Report
+every state, not the best one, and report leave-one-subject-out ranges alongside
+each p so the fragility at $n = 38$ is visible.
 
-> **Guardrail 5.2 (report the negative).** If the FBR and the fidgety-band states
-> do not separate the two label groups, report it as a finding. The thesis frames
-> what works and states the limits of what does not; a null clinical
-> correspondence is a result, not a failure to be hidden.
+> **Guardrail 5.2 (report the negative).** If neither occupancy nor dwell
+> separates the two label groups, report it as a finding. The thesis frames what
+> works and states the limits of what does not; a null clinical correspondence is
+> a result, not a failure to be hidden. Equally, a single state surviving Holm out
+> of $2K$ tests is a lead, not a result.
 
 ---
 
@@ -509,12 +493,12 @@ dwell-frequency, on which videos carry in-band motion.
 - Marginal-argmax decoding instead of Viterbi for dwell statistics
   (Guardrail 2.2).
 - Naive clip concatenation with per-video `lengths`, injecting a 16-window rhythm
-  and a $f_{\text{frame}}/64$ spectral comb in the fidgety band (Guardrail 3.1).
+  that caps every dwell estimate at 16 windows (Guardrail 3.1).
 - Clip-level train/test splits, leaking subjects (Guardrail 2.5).
 - Treating window or clip counts as sample size; $n = 38$ for inference
   (Guardrail 1.1, 5.1).
-- Reading the latent band power as the headline frequency figure instead of the
-  raw-velocity FBR (Guardrail 4.1).
+- Converting a state's $A_{kk}$ into an oscillation frequency, which asserts a
+  periodicity the model never fits (Guardrail 4.1).
 - Presenting the full-covariance choice as tuned rather than fixed a priori on
   Proposition 2.3 (Guardrail 2.4).
 - Reducing dimensionality by top variance if any reduction is attempted; variance

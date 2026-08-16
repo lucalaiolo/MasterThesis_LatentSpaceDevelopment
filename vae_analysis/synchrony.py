@@ -28,7 +28,8 @@ The construct lives at frame rate — averaging signed displacements would cance
 the very oscillation it exists to detect.
 
 A recording is partitioned into ``E_i`` consecutive non-overlapping epochs of
-``tau = 5`` s (125 frames at 25 fps, spanning 2.5-10 cycles of the fidgety band),
+``tau = 5`` s (125 frames at 25 fps — long enough that a single co-contraction
+does not fill an epoch, short enough to stay within one bout of activity),
 discarding any trailing remainder. Within an epoch the frames are stacked into
 ``W_L in R^{2n}``, with energy ``a_L = ||W_L||^2``, and normalised
 ``\\widehat W_L = W_L/||W_L||``. The **co-movement matrix** is the cosine

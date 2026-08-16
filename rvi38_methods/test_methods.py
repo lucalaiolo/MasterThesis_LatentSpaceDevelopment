@@ -649,25 +649,6 @@ def test_wclrpp_coupling():
           f"min p = {tn['p_corrected'].min():.3f}")
 
 
-def test_fbr():
-    print("\nfidgety band ratio")
-    from build_pose import JOINTS
-    J, fps, T = len(JOINTS), 25.0, 2000
-    t = np.arange(T)
-    v1 = np.zeros((T, J, 2))
-    for j in MV.LIMBS["RA"]:
-        v1[:, j, 0] = np.sin(2 * np.pi * 1.0 * t / fps)      # 1 Hz: in band
-    r1 = MV.raw_velocity_fbr(v1, fps)
-    check("motion at 1 Hz puts almost all power in the 0.5-2 Hz band",
-          r1 > 0.9, f"FBR = {r1:.3f}")
-    v2 = np.zeros((T, J, 2))
-    for j in MV.LIMBS["RA"]:
-        v2[:, j, 0] = np.sin(2 * np.pi * 8.0 * t / fps)      # 8 Hz: out of band
-    r2 = MV.raw_velocity_fbr(v2, fps)
-    check("motion at 8 Hz puts almost none in the band", r2 < 0.05,
-          f"FBR = {r2:.3f}")
-
-
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -687,7 +668,6 @@ def main():
     test_wclrpp_peakpick()
     test_wclrpp_reduction()
     test_wclrpp_coupling()
-    test_fbr()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

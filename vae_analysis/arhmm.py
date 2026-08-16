@@ -21,7 +21,7 @@ Usage::
 
     from vae_analysis.arhmm import fit_arhmm
     res = fit_arhmm(Z, lengths, k_range=range(4, 10), f_win=F_WIN, lags=1)
-    # res drops into the hmm_report figures + label_state_frequencies unchanged:
+    # res drops into the hmm_report figures + state_dwell_times unchanged:
     from vae_analysis import hmm_report as HR
     HR.plot_transition(res); HR.plot_movement_dynamics(videos, res, lengths, bones,
         clip_len=cfg.clip_length, stride=cfg.clip_length//2, n_win=adapter.n_windows(),
@@ -134,7 +134,7 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
             model only wins if it generalises). Each extra lag adds ``D`` columns
             to every state's dynamics matrix, so higher orders need more windows
             per state and cost more per fit.
-        f_win: window sampling rate (Hz), for dwell seconds / the frequency map.
+        f_win: window sampling rate (Hz), for the dwell times in seconds.
         selection: ``"cv"`` (``n_splits``-fold partition over subjects, each
             validated once) or ``"none"`` (fit each K on all data, pick best
             train LL).
@@ -142,8 +142,8 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
 
     Returns:
         A ``res`` dict compatible with :mod:`vae_analysis.hmm_report` and
-        :func:`label_state_frequencies` — plus ``ar_As`` / ``ar_bs`` /
-        ``ar_Sigmas`` (the per-state dynamics), ``selection_scores``.
+        :func:`~vae_analysis.hmm_pipeline.state_dwell_times` — plus ``ar_As`` /
+        ``ar_bs`` / ``ar_Sigmas`` (the per-state dynamics), ``selection_scores``.
     """
     import time as _time
     Z = np.asarray(Z, float); D = Z.shape[1]

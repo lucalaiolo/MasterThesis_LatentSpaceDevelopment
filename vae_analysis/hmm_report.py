@@ -635,7 +635,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             res = _arhmm.fit_arhmm(Z, lengths, k_range=k_range, lags=lags,
                                    f_win=f_win, selection=ar_sel,
                                    n_splits=n_splits, n_restarts=n_restarts,
-                                   n_iters=n_iter, seed=seed, verbose=True)
+                                   n_iters=n_iter, seed=seed, n_jobs=n_jobs,
+                                   verbose=True)
         else:
             res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win,
                             selection=selection, n_splits=n_splits,

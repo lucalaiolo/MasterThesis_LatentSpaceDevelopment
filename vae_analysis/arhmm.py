@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .hmm_pipeline import kfold_subject_splits
+from .hmm_pipeline import kfold_subject_splits, _fmt_dur
 
 
 def _split(Z, lengths):
@@ -65,31 +65,128 @@ _ERRBOX = {"msg": None}
 
 
 def _fit_one(datas, K, D, lags, n_iters, tol, seed):
-    """One ssm AR-HMM EM fit; returns (model, train_loglik) or (None, -inf)."""
-    import ssm
+    """One ssm AR-HMM EM fit.
+
+    Returns ``(model, train_loglik, info)``; ``(None, -inf, info)`` on a
+    degenerate init. ``info`` carries the telemetry the progress log prints —
+    EM iterations run, whether the ``n_iters`` cap was reached, wall seconds,
+    and the error text. The error travels **in the return value**, not only in
+    ``_ERRBOX``: this runs in a joblib worker, whose module globals are a
+    separate copy the parent never sees.
+    """
+    import ssm, time
     np.random.seed(seed)
+    t0 = time.time()
+    info = {"n_iter": 0, "hit_cap": False, "seconds": 0.0, "error": None,
+            "loglik": -np.inf}
     try:
         model = ssm.HMM(K, D, observations="ar",
                         observation_kwargs=dict(lags=lags))
         lls = model.fit(datas, method="em", num_iters=n_iters, tolerance=tol,
                         verbose=0)
     except Exception as e:  # noqa: BLE001 — degenerate init; caller retries/skips
-        _ERRBOX["msg"] = f"{type(e).__name__}: {e}"
-        return None, -np.inf
+        info["error"] = f"{type(e).__name__}: {e}"
+        info["seconds"] = time.time() - t0
+        _ERRBOX["msg"] = info["error"]
+        return None, -np.inf, info
+    lls = np.asarray(lls, float)
+    info["n_iter"] = int(len(lls))
+    # ssm's EM returns one entry per iteration and stops early on tolerance, so
+    # a full-length trace means it ran out rather than converged.
+    info["hit_cap"] = bool(len(lls) >= n_iters)
+    info["seconds"] = time.time() - t0
     ll = float(lls[-1])
+    info["loglik"] = ll
     if not np.isfinite(ll):
-        _ERRBOX["msg"] = f"train log-likelihood was {ll} (non-finite)"
-        return None, -np.inf
-    return model, ll
+        info["error"] = f"train log-likelihood was {ll} (non-finite)"
+        _ERRBOX["msg"] = info["error"]
+        return None, -np.inf, info
+    return model, ll, info
 
 
 def _best_of_restarts(datas, K, D, lags, n_iters, tol, n_restarts, seed):
-    best, best_ll = None, -np.inf
+    """Best-training-loglik model over ``n_restarts`` inits, plus telemetry."""
+    best, best_ll, restarts = None, -np.inf, []
     for r in range(n_restarts):
-        m, ll = _fit_one(datas, K, D, lags, n_iters, tol, seed + 1000 * r)
+        m, ll, info = _fit_one(datas, K, D, lags, n_iters, tol, seed + 1000 * r)
+        restarts.append(info)
         if ll > best_ll:
             best, best_ll = m, ll
-    return best, best_ll
+    return best, best_ll, restarts
+
+
+def _selection_job(Z, lengths, k, lags, fold, val_videos, n_iters, tol,
+                   n_restarts, seed):
+    """One unit of ``(K, lags, fold)`` selection work, sized for frequent progress.
+
+    Returns **only picklable scalars and telemetry** — never the fitted ssm
+    model. ssm objects carry autograd closures that do not round-trip through
+    joblib reliably, so the winning model is refitted once in the parent at
+    ``(K*, lags*)`` instead of being shipped back from a worker.
+
+    ``fold is None`` scores on all data (``selection="none"``); otherwise it
+    trains on the complement of ``val_videos`` and scores the held-out fold as
+    log-likelihood **per window**, so folds of different size are comparable.
+    """
+    import time
+    t0 = time.time()
+    out = {"k": k, "lags": lags, "fold": fold, "score": None, "restarts": [],
+           "n_val": 0, "error": None}
+    datas = _split(Z, lengths)
+    D = np.asarray(Z).shape[1]
+    n_videos = len(lengths)
+    if fold is None:
+        model, ll, restarts = _best_of_restarts(datas, k, D, lags, n_iters, tol,
+                                                n_restarts, seed)
+        out["restarts"] = restarts
+        if model is None:
+            out["error"] = _first_error(restarts)
+        else:
+            out["score"] = float(ll)
+    else:
+        val = set(np.asarray(val_videos).tolist())
+        tr = [datas[i] for i in range(n_videos) if i not in val]
+        va = [datas[i] for i in range(n_videos) if i in val]
+        if not tr or not va:
+            out["error"] = "empty split"
+        else:
+            model, _, restarts = _best_of_restarts(tr, k, D, lags, n_iters, tol,
+                                                   n_restarts, seed)
+            out["restarts"] = restarts
+            out["n_val"] = int(sum(len(v) for v in va))
+            if model is None:
+                out["error"] = _first_error(restarts)
+            else:
+                try:
+                    ll = model.log_likelihood(va)
+                except Exception as e:  # noqa: BLE001
+                    out["error"] = f"log_likelihood raised {type(e).__name__}: {e}"
+                else:
+                    if np.isfinite(ll):
+                        out["score"] = float(ll / max(out["n_val"], 1))
+                    else:
+                        out["error"] = f"held-out log-likelihood was {ll}"
+    out["seconds"] = time.time() - t0
+    return out
+
+
+def _first_error(restarts):
+    """The first real error text across restarts, for the all--inf diagnosis."""
+    for r in restarts:
+        if r.get("error"):
+            return r["error"]
+    return "no restart converged"
+
+
+def _fmt_restarts(restarts) -> str:
+    """``"41,200*,fail"`` — EM iterations per restart, ``*`` = hit the cap."""
+    out = []
+    for r in restarts:
+        if r.get("error"):
+            out.append("fail")
+        else:
+            out.append(f"{r['n_iter']}{'*' if r.get('hit_cap') else ''}")
+    return ",".join(out)
 
 
 def _res_from_model(model, datas, lengths, K, f_win):
@@ -119,7 +216,7 @@ def _res_from_model(model, datas, lengths, K, f_win):
 
 def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
               n_iters=50, tol=1e-4, n_restarts=1, selection="cv", n_splits=5,
-              seed=0, verbose=True) -> dict:
+              seed=0, n_jobs=1, verbose=True) -> dict:
     """Fit an autoregressive HMM and select K, mirroring :func:`fit_hmm`.
 
     Args:
@@ -139,6 +236,17 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
             validated once) or ``"none"`` (fit each K on all data, pick best
             train LL).
         n_restarts: EM restarts per fit (best train LL kept).
+        n_jobs: processes for the sweep. Work is split one job per
+            ``(K, lags, fold)``, so a candidate no longer has to finish before
+            anything is reported. Workers return scores only — the model at
+            ``(K*, lags*)`` is refitted once here, since ssm objects do not
+            round-trip through joblib reliably.
+        verbose: stream a progress log — one line per completed job with its
+            held-out log-likelihood per window, the EM iterations of each
+            restart (``*`` = hit the ``n_iters`` cap), wall time and a running
+            ETA, then a summary per candidate. Printed from the **calling**
+            process, so it reaches a notebook cell even when fits run in
+            workers.
 
     Returns:
         A ``res`` dict compatible with :mod:`vae_analysis.hmm_report` and
@@ -171,41 +279,92 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
             f"or drop the short recordings.")
     _ERRBOX["msg"] = None
 
+    splits = (kfold_subject_splits(n_videos, n_splits, seed)
+              if selection == "cv" else [])
+
+    # One job per (K, lags, fold): small enough to keep every core busy and to
+    # report progress many times per candidate rather than once at its end.
+    jobs = []
+    for k, p in candidates:
+        if selection == "cv":
+            for i, val_videos in enumerate(splits):
+                jobs.append((k, p, i, val_videos))
+        else:
+            jobs.append((k, p, None, None))
+    n_total = len(jobs)
+    t_start = _time.time()
+
     if verbose:
         print(f"[arhmm] M={len(Z)} d={D} | K in {ks} | lags in {lag_list} | "
-              f"selection={selection} | {len(candidates)} candidates", flush=True)
+              f"selection={selection} | {len(candidates)} candidates, "
+              f"{n_total} jobs | n_jobs={n_jobs}", flush=True)
+        print(f"[arhmm] up to {n_total * n_restarts} EM fits "
+              f"({n_restarts} restarts x <={n_iters} iters each). 'iters' below "
+              f"is per restart; * = hit the {n_iters}-iteration cap.", flush=True)
 
-    def video_splits():
-        return [set(fold.tolist())
-                for fold in kfold_subject_splits(n_videos, n_splits, seed)]
+    fold_scores = {c: [] for c in candidates}
+    pending = {c: sum(1 for j in jobs if (j[0], j[1]) == c) for c in candidates}
+    done = 0
 
-    scores = {}
-    for k, p in candidates:
-        t0 = _time.time()
-        if selection == "cv":
-            fold = []
-            for val_set in video_splits():
-                tr = [datas_all[i] for i in range(n_videos) if i not in val_set]
-                va = [datas_all[i] for i in range(n_videos) if i in val_set]
-                m, _ = _best_of_restarts(tr, k, D, p, n_iters, tol, n_restarts, seed)
-                if m is None:
-                    continue
-                try:
-                    ll = m.log_likelihood(va); nva = sum(len(v) for v in va)
-                    if np.isfinite(ll):
-                        fold.append(ll / max(nva, 1))
-                    else:
-                        _ERRBOX["msg"] = f"held-out log-likelihood was {ll}"
-                except Exception as e:  # noqa: BLE001
-                    _ERRBOX["msg"] = f"log_likelihood raised {type(e).__name__}: {e}"
-            scores[(k, p)] = float(np.mean(fold)) if fold else -np.inf
+    def _report(out):
+        """Print one completed job from the **parent** process, with an ETA."""
+        nonlocal done
+        done += 1
+        c = (out["k"], out["lags"])
+        if out["score"] is not None:
+            fold_scores[c].append(out["score"])
+            val = (f"ll/win={out['score']:+.4f}" if out["fold"] is not None
+                   else f"train ll={out['score']:.1f}")
         else:
-            _, ll = _best_of_restarts(datas_all, k, D, p, n_iters, tol,
-                                      n_restarts, seed)
-            scores[(k, p)] = ll
+            val = f"FAILED ({out['error']})"
+            if out["error"]:
+                _ERRBOX["msg"] = out["error"]     # workers cannot set ours
+        pending[c] -= 1
         if verbose:
-            print(f"[arhmm]   K={k} lags={p}: score={scores[(k, p)]:.3f}  "
-                  f"({_time.time()-t0:.1f}s)", flush=True)
+            what = ("all data" if out["fold"] is None
+                    else f"fold {out['fold'] + 1}/{len(splits)}")
+            elapsed = _time.time() - t_start
+            eta = elapsed / done * (n_total - done)
+            print(f"[arhmm] {done:>3}/{n_total} K={out['k']:<2} "
+                  f"lags={out['lags']} {what:<11} {val:<24} "
+                  f"iters {_fmt_restarts(out['restarts']):<14} "
+                  f"{out['seconds']:6.1f}s | elapsed {_fmt_dur(elapsed)} "
+                  f"eta {_fmt_dur(eta)}", flush=True)
+            if pending[c] == 0:
+                sc = float(np.mean(fold_scores[c])) if fold_scores[c] else -np.inf
+                print(f"[arhmm]   -> K={c[0]} lags={c[1]} complete: "
+                      f"score={sc:+.4f} over {len(fold_scores[c])} fits",
+                      flush=True)
+
+    _args = (n_iters, tol, n_restarts, seed)
+    if n_jobs == 1:
+        for k, p, fold, val_videos in jobs:
+            _report(_selection_job(Z, lengths, k, p, fold, val_videos, *_args))
+    else:
+        from joblib import Parallel, delayed
+
+        def _tasks():
+            return (delayed(_selection_job)(Z, lengths, k, p, fold, val_videos,
+                                            *_args)
+                    for k, p, fold, val_videos in jobs)
+
+        try:                              # joblib >= 1.4 streams completions
+            runner = Parallel(n_jobs=n_jobs, prefer="processes",
+                              return_as="generator_unordered")
+        except (TypeError, ValueError):   # older joblib: collect, then report
+            runner = None
+        if runner is not None:
+            for out in runner(_tasks()):
+                _report(out)
+        else:
+            if verbose:
+                print("[arhmm] joblib<1.4: results arrive only at the end of "
+                      "the sweep, so no per-job progress below.", flush=True)
+            for out in Parallel(n_jobs=n_jobs, prefer="processes")(_tasks()):
+                _report(out)
+
+    scores = {c: (float(np.mean(fold_scores[c])) if fold_scores[c] else -np.inf)
+              for c in candidates}
 
     if not scores or all(v == -np.inf for v in scores.values()):
         why = _ERRBOX["msg"] or "unknown (no exception captured)"
@@ -218,12 +377,29 @@ def fit_arhmm(Z, lengths, *, k_range=range(2, 9), lags=1, f_win=6.25,
             f"from git and RESTART the runtime. Otherwise check Z for degenerate "
             f"(near-constant) dimensions.")
     k_best, lag_best = max(scores, key=scores.get)
+    if verbose:
+        ranked = sorted(scores, key=scores.get, reverse=True)
+        runner_up = (f", runner-up K={ranked[1][0]} lags={ranked[1][1]} "
+                     f"({scores[ranked[1]]:+.4f})" if len(ranked) > 1 else "")
+        print(f"[arhmm] selection took {_fmt_dur(_time.time() - t_start)}; "
+              f"K*={k_best} lags*={lag_best} ({scores[(k_best, lag_best)]:+.4f})"
+              f"{runner_up}", flush=True)
+        print(f"[arhmm] final fit at K={k_best} lags={lag_best} on all "
+              f"{n_videos} recordings ...", flush=True)
 
-    # final fit on ALL data at the chosen (K*, lags*)
-    model, _ = _best_of_restarts(datas_all, k_best, D, lag_best, n_iters, tol,
-                                 max(n_restarts, 2), seed)
+    # Final fit on ALL data at (K*, lags*). Done here rather than reused from a
+    # worker: the sweep deliberately returns scores only, never ssm models.
+    _t_final = _time.time()
+    model, ll_final, restarts = _best_of_restarts(
+        datas_all, k_best, D, lag_best, n_iters, tol, max(n_restarts, 2), seed)
+    if verbose:
+        print(f"[arhmm]   iters {_fmt_restarts(restarts)}  "
+              f"train ll={ll_final:.1f}  "
+              f"({_time.time() - _t_final:.1f}s)", flush=True)
     if model is None:
-        raise ValueError("final AR-HMM fit failed at (K*, lags*).")
+        raise ValueError(
+            "final AR-HMM fit failed at (K*, lags*): "
+            f"{_first_error(restarts)}")
     res = _res_from_model(model, datas_all, lengths, k_best, f_win)
     res["selection"] = selection
     res["selection_scores"] = scores        # keyed by (K, lags)

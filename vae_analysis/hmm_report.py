@@ -105,13 +105,56 @@ def plot_occupancy_dwell(occ, dwell, *, save=None):
     return fig
 
 
-def plot_state_appearances(adapter, res, lab, bones, *, n_cols=4, save=None):
+def _dwell_label(dwell, s):
+    """``"1.23 s dwell"`` for state ``s``, or ``""`` when no dwell is available."""
+    if dwell is None:
+        return ""
+    d = np.asarray(dwell["dwell_seconds"], float)
+    if s >= len(d) or not np.isfinite(d[s]):
+        return ""
+    return f"{d[s]:.2f} s dwell"
+
+
+def plot_state_dwell(dwell, *, save=None):
+    """Mean dwell time per state: measured (Viterbi runs) vs implied by ``A_kk``.
+
+    The bars are the mean run length of the decoded path; the markers are the
+    geometric holding time ``1/(1-A_kk)`` the fitted chain implies. A state whose
+    marker sits well below its bar is more persistent than a first-order chain
+    predicts. ``dwell`` is :func:`hmm_pipeline.state_dwell_times` output.
+    """
+    import matplotlib.pyplot as plt
+    meas = np.asarray(dwell["dwell_seconds"], float)
+    impl = np.asarray(dwell["implied_seconds"], float)
+    K = len(meas)
+    fig, ax = plt.subplots(figsize=(1.0 * K + 2.6, 4.0))
+    ax.bar(range(K), np.nan_to_num(meas), color="0.55", width=0.66,
+           label="measured (Viterbi runs)")
+    finite = np.isfinite(impl)
+    ax.scatter(np.arange(K)[finite], impl[finite], s=46, color="crimson",
+               zorder=3, label="implied by $A_{kk}$")
+    for s in range(K):
+        if np.isfinite(meas[s]):
+            ax.annotate(f"{meas[s]:.2f}", (s, meas[s]), ha="center",
+                        va="bottom", fontsize=8, xytext=(0, 2),
+                        textcoords="offset points")
+    ax.set_xticks(range(K)); ax.set_xticklabels([f"state {s}" for s in range(K)])
+    ax.set_ylabel("mean dwell time (s)")
+    top = np.nanmax(np.r_[meas[np.isfinite(meas)], impl[finite], 1e-6])
+    ax.set_ylim(0, top * 1.32)                      # headroom for the legend
+    ax.set_title("state dwell time")
+    ax.legend(frameon=False, fontsize=8, loc="upper right", ncol=2)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    if save: fig.savefig(save, dpi=200, bbox_inches="tight")
+    return fig
+
+
+def plot_state_appearances(adapter, res, dwell, bones, *, n_cols=4, save=None):
     """Decoded appearance of each state (pose stream only).
 
-    ``lab`` is the frequency labelling from
-    :func:`vae_analysis.hmm_pipeline.label_state_frequencies`; pass ``None``
-    to title the panels by state index alone, with no implied frequency and
-    no fidgety-band flag.
+    ``dwell`` is :func:`hmm_pipeline.state_dwell_times` output (or None); each
+    panel is titled with the state's measured mean dwell time.
     """
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
@@ -131,9 +174,10 @@ def plot_state_appearances(adapter, res, lab, bones, *, n_cols=4, save=None):
                     "-", lw=2)
         ax.scatter(pose[f, :, 0], pose[f, :, 1], s=10)
         ax.set_aspect("equal"); ax.axis("off")
-        ttl = (f"state {s}" if lab is None else
-               f"state {s}\n{lab['implied_hz'][s]:.2f}Hz"
-               f"{' band' if lab['in_band'][s] else ''}")
+        ttl = f"state {s}"
+        d = _dwell_label(dwell, s)
+        if d:
+            ttl += f"\n{d}"
         ax.set_title(ttl, fontsize=9)
     fig.suptitle("decoded state appearance", weight="bold", x=0.02, ha="left")
     fig.tight_layout()
@@ -460,7 +504,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
                    model="hmm", lags=1, velocity_grouping="regions",
                    video_names=None, labels=None, positive_ids=None,
-                   out_dir=None, save_hmm_to=None, show=True) -> dict:
+                   out_dir=None, save_hmm_to=None, reuse=None,
+                   show=True) -> dict:
     """Fit the HMM and render every figure in one call.
 
     Args:
@@ -471,16 +516,6 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         stream: ``"pose"`` or ``"delta"``.
         k_range / selection / n_splits / n_restarts: passed to :func:`fit_hmm`.
         fps: native frame rate; ``f_win = fps / (clip_len / n_windows)``.
-        band: fidgety band for the frequency flags, or ``None`` to leave the
-            fidgety-band argument out of the run altogether. ``None`` skips the
-            dwell-time-to-frequency mapping, the in-band state flags, the
-            per-state Hz annotations on the figures, and the clinical test —
-            the last because both features it tests (the raw-velocity
-            fidgety-band ratio and band occupancy) are band quantities, so
-            there is nothing left for it to test. Everything else is
-            unaffected: the fit, selection, occupancy and dwell times,
-            transitions, state appearances, movement dynamics, and the seam
-            diagnostic all run as usual.
         video_names / labels / positive_ids: supply either an explicit ``labels``
             array (aligned to kept-video order) or ``video_names`` + a set of
             ``positive_ids`` to derive labels; omit all three to skip the
@@ -501,6 +536,15 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         save_hmm_to: if set, the fitted model + stitch outputs are dumped there as
             a joblib bundle (see :func:`save_hmm`) so a reload skips both the
             encode-stitch and the refit. Works for both model types.
+        reuse: a :func:`save_hmm` bundle — its path, or the already-loaded dict —
+            to rebuild the report from. Skips the encode-stitch **and** the K
+            sweep entirely and redraws every figure from the stored fit, which
+            turns an hours-long run into seconds. ``videos`` is still needed for
+            the raw-velocity figures (they read the recordings, not the latent),
+            and the stored geometry wins over the arguments passed here so the
+            Viterbi states stay aligned to the frames they came from; any
+            disagreement is printed. ``k_range`` / ``selection`` / ``n_restarts``
+            / ``n_iter`` / ``n_jobs`` / ``seed`` are unused in this mode.
         show: call ``plt.show()`` on each figure (notebook display).
 
     Returns:
@@ -511,6 +555,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     """
     import os, time
     import matplotlib.pyplot as plt
+    stride_arg = stride            # kept so a reused bundle can re-derive it
     stride = stride or clip_len // 2
     n_win = n_win or adapter.n_windows()
     l = clip_len // n_win
@@ -531,49 +576,86 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
           f"stride={stride} n_win={n_win} | fps={fps} -> f_win={f_win:.3f} Hz "
           f"(1 window = {1 / f_win:.3f} s) | model={model}", flush=True)
 
-    # 1. stitch + seam
-    _stage(f"1/5  encode + stitch ({len(videos)} recordings through the VAE)")
-    Z, lengths, vidid = H.stitch_dataset(adapter, videos, clip_len=clip_len,
-                                         stride=stride, stream=stream,
-                                         verbose=True)
-    print(f"[stitch] {Z.shape} over {len(lengths)} videos "
-          f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
-          flush=True)
-    seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win, f_win=f_win)
-    print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
-          f"passed={seam['passed']}", flush=True)
-
-    # 2. fit the state model (static HMM or autoregressive HMM) + dwell times
-    _stage(f"2/5  fit {model} and select K")
-    if model == "arhmm":
-        from . import arhmm as _arhmm
-        ar_sel = "cv" if selection == "cv" else "none"
-        res = _arhmm.fit_arhmm(Z, lengths, k_range=k_range, lags=lags, f_win=f_win,
-                               selection=ar_sel, n_splits=n_splits,
-                               n_restarts=n_restarts, n_iters=n_iter, seed=seed,
-                               verbose=True)
+    if reuse is not None:
+        # 1-2. reload a finished fit instead of redoing the encode and the sweep.
+        _stage("1/5  reuse a saved fit (no encode, no refit)")
+        bundle = (reuse if isinstance(reuse, dict) else load_hmm(reuse))
+        try:
+            res = bundle["res"]; Z = bundle["Z"]
+            lengths = bundle["lengths"]; vidid = bundle["vidid"]
+        except (KeyError, TypeError) as e:
+            raise ValueError(
+                "reuse must be a save_hmm bundle (or its path) carrying "
+                f"'res'/'Z'/'lengths'/'vidid'; got {type(bundle).__name__} "
+                f"missing {e}.") from None
+        # The window->frame map of every figure depends on this geometry, so
+        # take it from the bundle and say so when the call disagrees: silently
+        # honouring the caller would misalign states against frames.
+        meta = bundle.get("meta") or {}
+        for name, passed in (("stream", stream), ("clip_len", clip_len),
+                             ("n_win", n_win), ("fps", fps)):
+            stored = meta.get(name)
+            if stored is not None and stored != passed:
+                print(f"[reuse]  !! {name}={passed!r} in this call but "
+                      f"{stored!r} in the bundle — using the bundle's value "
+                      f"so the states line up with the frames.", flush=True)
+        stream = meta.get("stream", stream)
+        clip_len = meta.get("clip_len", clip_len)
+        n_win = meta.get("n_win", n_win)
+        fps = meta.get("fps", fps)
+        l = clip_len // n_win
+        f_win = meta.get("f_win") or fps / l
+        # re-derive from the bundle's clip_len unless the caller named a stride
+        stride = stride_arg or clip_len // 2
+        print(f"[reuse]  {Z.shape} over {len(lengths)} videos | K={res['k']} | "
+              f"stream={stream} f_win={f_win:.3f} Hz "
+              f"(hmmlearn {meta.get('hmmlearn', '?')})", flush=True)
+        seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
+                                 f_win=f_win)
+        _stage("2/5  fit reused")
     else:
-        res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
-                        n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter,
-                        seed=seed, n_jobs=n_jobs, verbose=True)
-    lab = H.label_state_frequencies(res, band=band) if band is not None else None
+        # 1. stitch + seam
+        _stage(f"1/5  encode + stitch ({len(videos)} recordings through the VAE)")
+        Z, lengths, vidid = H.stitch_dataset(adapter, videos, clip_len=clip_len,
+                                             stride=stride, stream=stream,
+                                             verbose=True)
+        print(f"[stitch] {Z.shape} over {len(lengths)} videos "
+              f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
+              flush=True)
+        seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
+                                 f_win=f_win)
+        print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
+              f"passed={seam['passed']}", flush=True)
+
+        # 2. fit the state model (static HMM or autoregressive HMM)
+        _stage(f"2/5  fit {model} and select K")
+        if model == "arhmm":
+            from . import arhmm as _arhmm
+            ar_sel = "cv" if selection == "cv" else "none"
+            res = _arhmm.fit_arhmm(Z, lengths, k_range=k_range, lags=lags,
+                                   f_win=f_win, selection=ar_sel,
+                                   n_splits=n_splits, n_restarts=n_restarts,
+                                   n_iters=n_iter, seed=seed, n_jobs=n_jobs,
+                                   verbose=True)
+        else:
+            res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win,
+                            selection=selection, n_splits=n_splits,
+                            n_restarts=n_restarts, n_iter=n_iter, seed=seed,
+                            n_jobs=n_jobs, verbose=True)
+    dwl = H.state_dwell_times(res)
     K = res["k"]
     print(f"[{model}]  K={K} "
           f"cov={res.get('regularisation', {}).get('final_covariance_type', '?')} "
-          f"occ={np.round(res['occupancy'], 2)}")
-    if lab is not None:
-        print(f"[freq]   implied Hz={np.round(lab['implied_hz'], 2)} "
-              f"band states={lab['in_band_states']}")
-    else:
-        print("[freq]   band=None: no dwell-time frequency mapping, no "
-              "fidgety-band flags")
+          f"occ={np.round(res['occupancy'], 2)}", flush=True)
+    print(f"[dwell]  mean dwell (s)={np.round(dwl['dwell_seconds'], 2)} "
+          f"| implied by A_kk={np.round(dwl['implied_seconds'], 2)}", flush=True)
 
     # 3. per-subject phenotype features
     _stage("3/5  per-subject occupancy and dwell")
     occ, dwell, mean_dwell = _per_subject_occ_dwell(res["states"], lengths, K, f_win)
     feats = np.concatenate([occ, np.nan_to_num(dwell)], axis=1)
-    band_states = [] if lab is None else lab["in_band_states"]
-    print(f"[pheno]  feature matrix {feats.shape} (occupancy K + dwell K)")
+    print(f"[pheno]  feature matrix {feats.shape} (occupancy K + dwell K)",
+          flush=True)
 
     # optional: persist the fitted HMM + stitch outputs (joblib bundle)
     if save_hmm_to:
@@ -634,15 +716,9 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     except Exception as e:  # noqa: BLE001
         print(f"[plots] velocity_boxplot skipped: {e}", flush=True)
 
-    # 5. clinical test (labels enter here only). Both features it tests are
-    # fidgety-band quantities, so band=None leaves it nothing to test and the
-    # labels are dropped here rather than silently ignored further down.
+    # 5. clinical test (labels enter here only)
+    _stage("5/5  clinical contrast")
     clinical = None
-    if band is None and (labels is not None or positive_ids is not None):
-        print("[clinical] skipped with the fidgety band: both features it "
-              "tests (raw-velocity FBR, band occupancy) are band quantities. "
-              "Pass a band to run it.")
-        labels, positive_ids = None, None
     if labels is None and positive_ids is not None and video_names is not None:
         kept_idx = [i for i, v in enumerate(videos)
                     if len(v) >= clip_len]

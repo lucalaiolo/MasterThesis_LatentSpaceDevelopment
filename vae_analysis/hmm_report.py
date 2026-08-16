@@ -105,56 +105,13 @@ def plot_occupancy_dwell(occ, dwell, *, save=None):
     return fig
 
 
-def _dwell_label(dwell, s):
-    """``"1.23 s dwell"`` for state ``s``, or ``""`` when no dwell is available."""
-    if dwell is None:
-        return ""
-    d = np.asarray(dwell["dwell_seconds"], float)
-    if s >= len(d) or not np.isfinite(d[s]):
-        return ""
-    return f"{d[s]:.2f} s dwell"
-
-
-def plot_state_dwell(dwell, *, save=None):
-    """Mean dwell time per state: measured (Viterbi runs) vs implied by ``A_kk``.
-
-    The bars are the mean run length of the decoded path; the markers are the
-    geometric holding time ``1/(1-A_kk)`` the fitted chain implies. A state whose
-    marker sits well below its bar is more persistent than a first-order chain
-    predicts. ``dwell`` is :func:`hmm_pipeline.state_dwell_times` output.
-    """
-    import matplotlib.pyplot as plt
-    meas = np.asarray(dwell["dwell_seconds"], float)
-    impl = np.asarray(dwell["implied_seconds"], float)
-    K = len(meas)
-    fig, ax = plt.subplots(figsize=(1.0 * K + 2.6, 4.0))
-    ax.bar(range(K), np.nan_to_num(meas), color="0.55", width=0.66,
-           label="measured (Viterbi runs)")
-    finite = np.isfinite(impl)
-    ax.scatter(np.arange(K)[finite], impl[finite], s=46, color="crimson",
-               zorder=3, label="implied by $A_{kk}$")
-    for s in range(K):
-        if np.isfinite(meas[s]):
-            ax.annotate(f"{meas[s]:.2f}", (s, meas[s]), ha="center",
-                        va="bottom", fontsize=8, xytext=(0, 2),
-                        textcoords="offset points")
-    ax.set_xticks(range(K)); ax.set_xticklabels([f"state {s}" for s in range(K)])
-    ax.set_ylabel("mean dwell time (s)")
-    top = np.nanmax(np.r_[meas[np.isfinite(meas)], impl[finite], 1e-6])
-    ax.set_ylim(0, top * 1.32)                      # headroom for the legend
-    ax.set_title("state dwell time")
-    ax.legend(frameon=False, fontsize=8, loc="upper right", ncol=2)
-    ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
-    if save: fig.savefig(save, dpi=200, bbox_inches="tight")
-    return fig
-
-
-def plot_state_appearances(adapter, res, dwell, bones, *, n_cols=4, save=None):
+def plot_state_appearances(adapter, res, lab, bones, *, n_cols=4, save=None):
     """Decoded appearance of each state (pose stream only).
 
-    ``dwell`` is :func:`hmm_pipeline.state_dwell_times` output (or None); each
-    panel is titled with the state's measured mean dwell time.
+    ``lab`` is the frequency labelling from
+    :func:`vae_analysis.hmm_pipeline.label_state_frequencies`; pass ``None``
+    to title the panels by state index alone, with no implied frequency and
+    no fidgety-band flag.
     """
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
@@ -174,10 +131,9 @@ def plot_state_appearances(adapter, res, dwell, bones, *, n_cols=4, save=None):
                     "-", lw=2)
         ax.scatter(pose[f, :, 0], pose[f, :, 1], s=10)
         ax.set_aspect("equal"); ax.axis("off")
-        ttl = f"state {s}"
-        d = _dwell_label(dwell, s)
-        if d:
-            ttl += f"\n{d}"
+        ttl = (f"state {s}" if lab is None else
+               f"state {s}\n{lab['implied_hz'][s]:.2f}Hz"
+               f"{' band' if lab['in_band'][s] else ''}")
         ax.set_title(ttl, fontsize=9)
     fig.suptitle("decoded state appearance", weight="bold", x=0.02, ha="left")
     fig.tight_layout()
@@ -515,6 +471,16 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         stream: ``"pose"`` or ``"delta"``.
         k_range / selection / n_splits / n_restarts: passed to :func:`fit_hmm`.
         fps: native frame rate; ``f_win = fps / (clip_len / n_windows)``.
+        band: fidgety band for the frequency flags, or ``None`` to leave the
+            fidgety-band argument out of the run altogether. ``None`` skips the
+            dwell-time-to-frequency mapping, the in-band state flags, the
+            per-state Hz annotations on the figures, and the clinical test —
+            the last because both features it tests (the raw-velocity
+            fidgety-band ratio and band occupancy) are band quantities, so
+            there is nothing left for it to test. Everything else is
+            unaffected: the fit, selection, occupancy and dwell times,
+            transitions, state appearances, movement dynamics, and the seam
+            diagnostic all run as usual.
         video_names / labels / positive_ids: supply either an explicit ``labels``
             array (aligned to kept-video order) or ``video_names`` + a set of
             ``positive_ids`` to derive labels; omit all three to skip the
@@ -590,20 +556,24 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
                         n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter,
                         seed=seed, n_jobs=n_jobs, verbose=True)
-    dwl = H.state_dwell_times(res)
+    lab = H.label_state_frequencies(res, band=band) if band is not None else None
     K = res["k"]
     print(f"[{model}]  K={K} "
           f"cov={res.get('regularisation', {}).get('final_covariance_type', '?')} "
-          f"occ={np.round(res['occupancy'], 2)}", flush=True)
-    print(f"[dwell]  mean dwell (s)={np.round(dwl['dwell_seconds'], 2)} "
-          f"| implied by A_kk={np.round(dwl['implied_seconds'], 2)}", flush=True)
+          f"occ={np.round(res['occupancy'], 2)}")
+    if lab is not None:
+        print(f"[freq]   implied Hz={np.round(lab['implied_hz'], 2)} "
+              f"band states={lab['in_band_states']}")
+    else:
+        print("[freq]   band=None: no dwell-time frequency mapping, no "
+              "fidgety-band flags")
 
     # 3. per-subject phenotype features
     _stage("3/5  per-subject occupancy and dwell")
     occ, dwell, mean_dwell = _per_subject_occ_dwell(res["states"], lengths, K, f_win)
     feats = np.concatenate([occ, np.nan_to_num(dwell)], axis=1)
-    print(f"[pheno]  feature matrix {feats.shape} (occupancy K + dwell K)",
-          flush=True)
+    band_states = [] if lab is None else lab["in_band_states"]
+    print(f"[pheno]  feature matrix {feats.shape} (occupancy K + dwell K)")
 
     # optional: persist the fitted HMM + stitch outputs (joblib bundle)
     if save_hmm_to:
@@ -664,9 +634,15 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     except Exception as e:  # noqa: BLE001
         print(f"[plots] velocity_boxplot skipped: {e}", flush=True)
 
-    # 5. clinical test (labels enter here only)
-    _stage("5/5  clinical contrast")
+    # 5. clinical test (labels enter here only). Both features it tests are
+    # fidgety-band quantities, so band=None leaves it nothing to test and the
+    # labels are dropped here rather than silently ignored further down.
     clinical = None
+    if band is None and (labels is not None or positive_ids is not None):
+        print("[clinical] skipped with the fidgety band: both features it "
+              "tests (raw-velocity FBR, band occupancy) are band quantities. "
+              "Pass a band to run it.")
+        labels, positive_ids = None, None
     if labels is None and positive_ids is not None and video_names is not None:
         kept_idx = [i for i, v in enumerate(videos)
                     if len(v) >= clip_len]

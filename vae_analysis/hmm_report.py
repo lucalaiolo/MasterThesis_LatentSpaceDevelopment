@@ -504,7 +504,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
                    model="hmm", lags=1, velocity_grouping="regions",
                    video_names=None, labels=None, positive_ids=None,
-                   out_dir=None, save_hmm_to=None, show=True) -> dict:
+                   out_dir=None, save_hmm_to=None, reuse=None,
+                   show=True) -> dict:
     """Fit the HMM and render every figure in one call.
 
     Args:
@@ -535,6 +536,15 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         save_hmm_to: if set, the fitted model + stitch outputs are dumped there as
             a joblib bundle (see :func:`save_hmm`) so a reload skips both the
             encode-stitch and the refit. Works for both model types.
+        reuse: a :func:`save_hmm` bundle — its path, or the already-loaded dict —
+            to rebuild the report from. Skips the encode-stitch **and** the K
+            sweep entirely and redraws every figure from the stored fit, which
+            turns an hours-long run into seconds. ``videos`` is still needed for
+            the raw-velocity figures (they read the recordings, not the latent),
+            and the stored geometry wins over the arguments passed here so the
+            Viterbi states stay aligned to the frames they came from; any
+            disagreement is printed. ``k_range`` / ``selection`` / ``n_restarts``
+            / ``n_iter`` / ``n_jobs`` / ``seed`` are unused in this mode.
         show: call ``plt.show()`` on each figure (notebook display).
 
     Returns:
@@ -545,6 +555,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     """
     import os, time
     import matplotlib.pyplot as plt
+    stride_arg = stride            # kept so a reused bundle can re-derive it
     stride = stride or clip_len // 2
     n_win = n_win or adapter.n_windows()
     l = clip_len // n_win
@@ -565,31 +576,71 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
           f"stride={stride} n_win={n_win} | fps={fps} -> f_win={f_win:.3f} Hz "
           f"(1 window = {1 / f_win:.3f} s) | model={model}", flush=True)
 
-    # 1. stitch + seam
-    _stage(f"1/5  encode + stitch ({len(videos)} recordings through the VAE)")
-    Z, lengths, vidid = H.stitch_dataset(adapter, videos, clip_len=clip_len,
-                                         stride=stride, stream=stream,
-                                         verbose=True)
-    print(f"[stitch] {Z.shape} over {len(lengths)} videos "
-          f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
-          flush=True)
-    seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win, f_win=f_win)
-    print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
-          f"passed={seam['passed']}", flush=True)
-
-    # 2. fit the state model (static HMM or autoregressive HMM) + dwell times
-    _stage(f"2/5  fit {model} and select K")
-    if model == "arhmm":
-        from . import arhmm as _arhmm
-        ar_sel = "cv" if selection == "cv" else "none"
-        res = _arhmm.fit_arhmm(Z, lengths, k_range=k_range, lags=lags, f_win=f_win,
-                               selection=ar_sel, n_splits=n_splits,
-                               n_restarts=n_restarts, n_iters=n_iter, seed=seed,
-                               verbose=True)
+    if reuse is not None:
+        # 1-2. reload a finished fit instead of redoing the encode and the sweep.
+        _stage("1/5  reuse a saved fit (no encode, no refit)")
+        bundle = (reuse if isinstance(reuse, dict) else load_hmm(reuse))
+        try:
+            res = bundle["res"]; Z = bundle["Z"]
+            lengths = bundle["lengths"]; vidid = bundle["vidid"]
+        except (KeyError, TypeError) as e:
+            raise ValueError(
+                "reuse must be a save_hmm bundle (or its path) carrying "
+                f"'res'/'Z'/'lengths'/'vidid'; got {type(bundle).__name__} "
+                f"missing {e}.") from None
+        # The window->frame map of every figure depends on this geometry, so
+        # take it from the bundle and say so when the call disagrees: silently
+        # honouring the caller would misalign states against frames.
+        meta = bundle.get("meta") or {}
+        for name, passed in (("stream", stream), ("clip_len", clip_len),
+                             ("n_win", n_win), ("fps", fps)):
+            stored = meta.get(name)
+            if stored is not None and stored != passed:
+                print(f"[reuse]  !! {name}={passed!r} in this call but "
+                      f"{stored!r} in the bundle — using the bundle's value "
+                      f"so the states line up with the frames.", flush=True)
+        stream = meta.get("stream", stream)
+        clip_len = meta.get("clip_len", clip_len)
+        n_win = meta.get("n_win", n_win)
+        fps = meta.get("fps", fps)
+        l = clip_len // n_win
+        f_win = meta.get("f_win") or fps / l
+        # re-derive from the bundle's clip_len unless the caller named a stride
+        stride = stride_arg or clip_len // 2
+        print(f"[reuse]  {Z.shape} over {len(lengths)} videos | K={res['k']} | "
+              f"stream={stream} f_win={f_win:.3f} Hz "
+              f"(hmmlearn {meta.get('hmmlearn', '?')})", flush=True)
+        seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
+                                 f_win=f_win)
+        _stage("2/5  fit reused")
     else:
-        res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win, selection=selection,
-                        n_splits=n_splits, n_restarts=n_restarts, n_iter=n_iter,
-                        seed=seed, n_jobs=n_jobs, verbose=True)
+        # 1. stitch + seam
+        _stage(f"1/5  encode + stitch ({len(videos)} recordings through the VAE)")
+        Z, lengths, vidid = H.stitch_dataset(adapter, videos, clip_len=clip_len,
+                                             stride=stride, stream=stream,
+                                             verbose=True)
+        print(f"[stitch] {Z.shape} over {len(lengths)} videos "
+              f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
+              flush=True)
+        seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
+                                 f_win=f_win)
+        print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
+              f"passed={seam['passed']}", flush=True)
+
+        # 2. fit the state model (static HMM or autoregressive HMM)
+        _stage(f"2/5  fit {model} and select K")
+        if model == "arhmm":
+            from . import arhmm as _arhmm
+            ar_sel = "cv" if selection == "cv" else "none"
+            res = _arhmm.fit_arhmm(Z, lengths, k_range=k_range, lags=lags,
+                                   f_win=f_win, selection=ar_sel,
+                                   n_splits=n_splits, n_restarts=n_restarts,
+                                   n_iters=n_iter, seed=seed, verbose=True)
+        else:
+            res = H.fit_hmm(Z, lengths, k_range=k_range, f_win=f_win,
+                            selection=selection, n_splits=n_splits,
+                            n_restarts=n_restarts, n_iter=n_iter, seed=seed,
+                            n_jobs=n_jobs, verbose=True)
     dwl = H.state_dwell_times(res)
     K = res["k"]
     print(f"[{model}]  K={K} "

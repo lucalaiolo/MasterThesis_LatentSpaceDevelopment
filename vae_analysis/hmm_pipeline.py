@@ -176,31 +176,50 @@ def stitch_dataset(adapter, videos: list[np.ndarray], *, clip_len: int = 64,
 # 2. Seam diagnostic  (§3; Guardrail 3.1)
 # ---------------------------------------------------------------------------
 def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
-                    n_win: int, f_win: float, tol: float = 3.0) -> dict:
-    """Check the stitched trajectory for the ``f_frame/clip_len`` seam comb.
+                    n_win: int, f_win: float, stride: int | None = None,
+                    tol: float = 3.0) -> dict:
+    """Check the stitched trajectory for a spectral line at the clip boundary.
 
-    A clip boundary every ``clip_len`` frames is a boundary every
-    ``clip_len/l = n_win`` windows, i.e. a spectral line at ``f_win/n_win`` Hz
-    and its harmonics in the window-sampled trajectory. This is exactly the
-    ``f_frame/clip_len`` comb that naive concatenation injects. The overlap-crop
-    stitcher should leave no such line.
+    Each clip contributes ``stride/l`` windows to the stitched trajectory, so
+    clip boundaries recur with that period and would show as a line at
+    ``f_win * l / stride`` and its harmonics. For naive non-overlapping tiling
+    (``stride == clip_len``) that reduces to the familiar ``f_win/n_win``, i.e.
+    the ``f_frame/clip_len`` comb. **The default overlap-crop stitcher runs at
+    ``stride = clip_len/2``, where boundaries recur every ``n_win/2`` windows —
+    one octave above ``f_win/n_win``**, so probing ``f_win/n_win`` looks in the
+    wrong bin. Pass the ``stride`` you stitched with.
 
-    The check compares the PSD in a narrow bin around the seam fundamental to the
-    median PSD level, per active dimension, averaged over videos.
+    The bin is compared against a **local** baseline — the neighbouring bins,
+    excluding the harmonics themselves — not the median of the whole spectrum.
+    A latent motion trajectory is strongly autocorrelated, so its PSD is red;
+    against a global median any low-frequency bin scores an order of magnitude
+    high whether or not a seam exists, which makes such a test fire on every
+    real recording and separate nothing.
+
+    This is the spectral half of :func:`seam_gate`, which is the gate to trust:
+    it pairs this with a time-domain boundary-jump test that detects a seam
+    whose energy is spread rather than concentrated in a line.
 
     Args:
         Z, lengths: output of :func:`stitch_dataset`.
         clip_len, n_win: VAE geometry.
         f_win: window sampling rate (Hz) = ``f_frame / l``.
-        tol: pass threshold — flag when seam-bin power exceeds ``tol`` x median.
+        stride: the stride used when stitching. Defaults to ``clip_len``
+            (naive tiling), which is the only case where the boundary period is
+            ``n_win``.
+        tol: pass threshold — flag when the boundary bin exceeds ``tol`` x its
+            local baseline.
 
     Returns:
-        Dict with the seam frequency, the per-video ratio, the max ratio, and a
-        boolean ``passed`` (max ratio below ``tol``).
+        Dict with the boundary frequency, the per-video ratio, the max ratio,
+        and a boolean ``passed`` (max ratio below ``tol``).
     """
     from scipy.signal import welch
 
-    f_seam = f_win / n_win                          # == f_frame / clip_len
+    l = clip_len // n_win
+    step_win = max(1, (stride // l) if stride else n_win)   # windows per clip
+    f_seam = f_win / step_win
+    harm = f_seam * np.arange(1, 6)
     ratios = []
     offset = 0
     for L in lengths:
@@ -211,19 +230,35 @@ def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
         nper = min(L, 4 * n_win)
         f, P = welch(seg, fs=f_win, axis=0, nperseg=nper)
         P = P.mean(axis=1)                          # average PSD over dims
-        med = np.median(P[1:]) + 1e-12
-        # power in the bin nearest the seam fundamental
         j = int(np.argmin(np.abs(f - f_seam)))
-        ratios.append(P[j] / med)
+        # local baseline: nearby bins, minus the harmonic bins themselves
+        hbins = {int(np.argmin(np.abs(f - h))) for h in harm if h < f_win / 2}
+        nb = [i for i in range(max(1, j - 3), min(len(f), j + 4))
+              if i != j and i not in hbins]
+        if not nb:
+            continue
+        ratios.append(P[j] / (np.median(P[nb]) + 1e-12))
     ratios = np.asarray(ratios) if ratios else np.array([np.nan])
     max_ratio = float(np.nanmax(ratios))
     return {"f_seam": f_seam, "per_video_ratio": ratios,
             "max_ratio": max_ratio, "passed": bool(max_ratio < tol),
-            "tol": tol}
+            "tol": tol, "boundary_period_windows": step_win}
 
 # === SOUND seam gate — replaces `assert seam["passed"]` =====================
-def seam_gate(Z, lengths, *, n_win, l, f_win, stride,
+def seam_gate(Z, lengths, *, n_win, l, f_win, stride, stream="pose",
               jump_tol=1.5, comb_tol=3.0, min_harm=2):
+    """Seam gate: boundary-jump test plus a locally-baselined comb test.
+
+    ``stream`` must match what ``Z`` holds. On the **pose** stream the step
+    across a clip boundary is ``z_i - z_{i-1}``, obtained by differencing. On
+    the **delta** stream that step is already an element — ``Z[m] = z_{m+1} -
+    z_m``, so the element straddling a boundary is ``Z[c*step - 1]`` — and
+    differencing again would measure *second* differences, a different and
+    noisier quantity in which a level jump splits into an adjacent +/- pair
+    that the boundary mask only half catches. Reading the element magnitudes
+    directly makes the delta gate return exactly the pose gate's statistic, as
+    it must: the two select the same vectors.
+    """
     import numpy as np
     from scipy.signal import welch
     step, blocks = stride // l, np.cumsum(np.r_[0, lengths])
@@ -232,8 +267,12 @@ def seam_gate(Z, lengths, *, n_win, l, f_win, stride,
     for a, b in zip(blocks[:-1], blocks[1:]):
         seg = Z[a:b]
         if len(seg) < 2: continue
-        d = np.linalg.norm(np.diff(seg, axis=0), axis=1)
-        m = (np.arange(1, len(seg)) % step == 0)
+        if stream == "delta":
+            d = np.linalg.norm(seg, axis=1)          # already the step itself
+            m = ((np.arange(len(seg)) + 1) % step == 0)
+        else:
+            d = np.linalg.norm(np.diff(seg, axis=0), axis=1)
+            m = (np.arange(1, len(seg)) % step == 0)
         bnd.append(d[m]); itr.append(d[~m])
     jump = np.concatenate(bnd).mean() / np.concatenate(itr).mean()
     # (b) local-baseline comb test at the seam harmonics
@@ -1018,6 +1057,29 @@ def _kept_window_frame_spans(F: int, clip_len: int, stride: int, n_win: int,
     return spans
 
 
+def _check_delta_alignment(spans, *, f0: int, l: int) -> None:
+    """Assert the delta blocks are centred on ``tau_m = f0 + (m+1)*l``.
+
+    Each block must be ``l`` frames wide, tile without overlap, and sit centred
+    on the pose-window boundary the velocity belongs to. Half a frame of slack
+    absorbs the residual bias when ``l`` is odd.
+    """
+    for m, (a, b) in enumerate(spans):
+        if b - a != l:
+            raise ValueError(
+                f"delta block {m} is {b - a} frames wide, expected l={l}.")
+        centre = (a + b) / 2.0
+        tau = f0 + (m + 1) * l
+        if abs(centre - tau) > 0.5:
+            raise ValueError(
+                f"delta block {m} centred at {centre} but its velocity instant "
+                f"is tau_{m}={tau} (off by {centre - tau:+.1f} frames).")
+    starts = [a for a, _ in spans]
+    if any(s2 - s1 != l for s1, s2 in zip(starts, starts[1:])):
+        raise ValueError("delta blocks do not tile at stride l — a frame would "
+                         "be labelled twice or left unlabelled.")
+
+
 def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.ndarray,
                             *, groups: dict[str, list[int]], clip_len: int,
                             stride: int, n_win: int, keep: tuple[int, int] | None = None,
@@ -1031,9 +1093,21 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
     metric is **the percentage of that state's frames that are high-velocity,
     averaged over the group's body points** — one value per video.
 
-    Requires the **pose** stream (window state ~ pose window). ``videos`` must be
-    the same list passed to :func:`stitch_dataset`; videos too short for one clip
-    are skipped identically here so the blocks line up with ``lengths``.
+    Handles **both** streams, which differ in how a state maps to frames and is
+    detected from the state count:
+
+    * **pose** — one state per window, so window ``w`` maps to exactly its ``l``
+      frames ``[f0 + w*l, f0 + (w+1)*l)``. No shift; this is exact.
+    * **delta** — one state fewer, since state ``m`` is the velocity
+      ``z_{m+1} - z_m``. Its evidence is pose windows ``m`` and ``m+1``, whose
+      centres straddle the boundary ``tau_m = f0 + (m+1)*l``, so the state is
+      mapped to the ``l`` frames **centred on** ``tau_m`` — window ``m``'s block
+      shifted by ``+l//2``. Attributing it to window ``m`` alone would put every
+      delta state ``l/2`` frames early.
+
+    ``videos`` must be the same list passed to :func:`stitch_dataset`; videos too
+    short for one clip are skipped identically here so the blocks line up with
+    ``lengths``.
 
     Returns:
         Dict ``{state: {group: np.ndarray of per-video percentages}}`` (NaN for a
@@ -1041,6 +1115,7 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
     """
     states = np.asarray(res["states"])
     K = res["k"]
+    l = clip_len // n_win                   # frames per window (for the delta shift)
     kept = [v for v in videos
             if len(_clip_starts(len(v), clip_len, stride)) > 0]
     if len(kept) != len(lengths):
@@ -1054,12 +1129,21 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
         st = states[offset:offset + L]
         offset += L
         spans = _kept_window_frame_spans(len(video), clip_len, stride, n_win, keep)
-        # A pose stream has one state per window (len(spans) == L); the delta
-        # stream has one fewer (Δz between consecutive windows, L == n_win-1), so
-        # map each state to the first L window spans (the "from" window).
+        # A pose stream has one state per window (len(spans) == L) and window w
+        # already covers exactly its l frames — no shift. The delta stream has
+        # one state fewer (Δz between consecutive windows), and state m is the
+        # velocity centred on the window m | m+1 boundary tau_m = f0 + (m+1)*l,
+        # which is l//2 frames later than window m's own block.
         if len(spans) < L:
             raise ValueError(f"fewer frame spans ({len(spans)}) than states ({L}).")
-        spans = spans[:L]
+        if len(spans) == L:                 # pose: one state per window, no shift
+            spans = spans[:L]
+        else:                               # delta: centre state m on the m | m+1 boundary
+            # Odd l leaves a residual half-frame bias; l = 4 in this build, exact.
+            h = l // 2
+            f0 = spans[0][0]                # first kept window starts the tiling
+            spans = [(a + h, b + h) for (a, b) in spans[:L]]
+            _check_delta_alignment(spans, f0=f0, l=l)
         # per-frame, per-joint speed; high-velocity = top `top_frac` per joint.
         speed = np.linalg.norm(np.diff(np.asarray(video, float), axis=0), axis=-1)
         speed = np.vstack([speed, speed[-1:]])           # pad to F frames
@@ -1070,7 +1154,10 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
             frames_s = []
             for (a, b), ws in zip(spans, st):
                 if ws == s:
-                    frames_s.extend(range(a, min(b, F)))
+                    # Clamp to this recording: the delta shift can push the last
+                    # block past the end, and no frame may be borrowed from a
+                    # neighbouring recording.
+                    frames_s.extend(range(max(0, a), min(b, F)))
             for g, joints in groups.items():
                 if frames_s:
                     pct = 100.0 * hv[np.ix_(np.asarray(frames_s), joints)].mean()

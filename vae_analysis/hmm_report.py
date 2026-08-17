@@ -70,6 +70,44 @@ def _runs(seq, K):
     return runs
 
 
+def _seam_report(Z, lengths, *, clip_len, n_win, f_win, stride, l,
+                 stream="pose", quiet=False):
+    """Run the seam check and print both of its parts.
+
+    The verdict comes from :func:`hmm_pipeline.seam_gate`, which pairs a
+    time-domain boundary-jump test with a locally-baselined comb test. The jump
+    ratio is the one to read: it compares the mean step size *across* clip
+    boundaries to the mean step size inside a clip, so 1.0 means a boundary
+    looks exactly like any other step — no seam — and there is nothing about a
+    red spectrum that can inflate it.
+    """
+    gate = H.seam_gate(Z, lengths, n_win=n_win, l=l, f_win=f_win, stride=stride,
+                       stream=stream)
+    comb = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
+                             f_win=f_win, stride=stride)
+    out = dict(gate)
+    out.update({"comb": comb, "f_seam": comb["f_seam"],
+                "max_ratio": comb["max_ratio"]})
+    if not quiet:
+        print(f"[seam]   boundary every {comb['boundary_period_windows']} windows "
+              f"({comb['f_seam']:.3f} Hz) | jump={gate['jump']:.3f} "
+              f"(1.0 = no seam, tol 1.5) | comb lines "
+              f"{gate['n_comb_lines']}/{len(gate['local_harmonic'])} "
+              f"| passed={gate['passed']}", flush=True)
+        if not gate["passed"]:
+            why = []
+            if gate["jump"] >= 1.5:
+                why.append(f"steps across clip boundaries are "
+                           f"{gate['jump']:.2f}x the within-clip step")
+            if gate["n_comb_lines"] >= 2:
+                why.append(f"{gate['n_comb_lines']} harmonics stand above their "
+                           f"local baseline")
+            print(f"[seam]   !! {'; '.join(why)} — the stitch is injecting a "
+                  f"boundary artifact; dwell times will be capped at the "
+                  f"boundary period.", flush=True)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # figures
 # ---------------------------------------------------------------------------
@@ -214,9 +252,15 @@ def plot_movement_dynamics(videos, res, lengths, bones, *, clip_len, stride,
         F, Li = len(vp), lengths[i]
         if Li == 0: continue
         vel = np.diff(vp, axis=0)
-        fr = np.arange(f0, f0 + l * Li)
+        # A pose window w covers exactly its l frames, so it needs no shift. A
+        # delta state m is the velocity z_{m+1} - z_m, whose evidence is pose
+        # windows m and m+1; it is centred on their midpoint
+        # tau_m = f0 + (m+1)*l, which is l//2 frames later than window m's block.
+        # (Odd l leaves a residual half-frame bias; l = 4 here, so exact.)
+        shift = (l // 2) if stream == "delta" else 0   # centre delta state on tau_m
+        fr = np.arange(f0 + shift, f0 + shift + l * Li)
         flab = np.repeat(states[offs[i]:offs[i + 1]], l)
-        m = fr < F - 1; fr, flab = fr[m], flab[m]
+        m = (fr >= 0) & (fr < F - 1); fr, flab = fr[m], flab[m]
         vsel, psel = vel[fr], vp[fr]
         ok = np.isfinite(vsel).all(axis=(1, 2))
         fr, flab, vsel, psel = fr[ok], flab[ok], vsel[ok], psel[ok]
@@ -503,6 +547,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
                    selection="cv", n_splits=5, n_restarts=5,
                    n_iter=200, n_jobs=1, seed=0, top_frac=0.10,
                    model="hmm", lags=1, velocity_grouping="regions",
+                   anchor="auto",
                    video_names=None, labels=None, positive_ids=None,
                    out_dir=None, save_hmm_to=None, reuse=None,
                    show=True) -> dict:
@@ -528,6 +573,14 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
             for the AR path, and ``n_jobs`` does not apply to it.
         lags: AR order for ``model="arhmm"`` — an int or a list to sweep
             (jointly selected with K). Ignored for ``model="hmm"``.
+        anchor: which pose the Fig-3a velocity clouds are drawn on.
+            ``"state"`` puts each state's cloud on that state's own mean pose,
+            so a panel shows both where the infant tends to be *and* how it
+            moves — at the cost that panels sit at different places and the
+            velocity patterns are harder to compare directly. ``"global"``
+            anchors every panel on the dataset mean pose, so the panels differ
+            only in their velocities. ``"auto"`` (default) picks ``"global"``
+            for the delta stream and ``"state"`` for the pose stream.
         velocity_grouping: body grouping for the Fig-3b velocity boxplot —
             ``"regions"`` (head/arms/legs, default), ``"lateral"`` (left_arm/
             right_arm/left_leg/right_leg, for left-vs-right asymmetry), or
@@ -610,8 +663,9 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         print(f"[reuse]  {Z.shape} over {len(lengths)} videos | K={res['k']} | "
               f"stream={stream} f_win={f_win:.3f} Hz "
               f"(hmmlearn {meta.get('hmmlearn', '?')})", flush=True)
-        seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
-                                 f_win=f_win)
+        seam = _seam_report(Z, lengths, clip_len=clip_len, n_win=n_win,
+                            f_win=f_win, stride=stride, l=l, stream=stream,
+                            quiet=True)
         _stage("2/5  fit reused")
     else:
         # 1. stitch + seam
@@ -622,10 +676,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
         print(f"[stitch] {Z.shape} over {len(lengths)} videos "
               f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
               flush=True)
-        seam = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
-                                 f_win=f_win)
-        print(f"[seam]   f={seam['f_seam']:.3f}Hz ratio={seam['max_ratio']:.1f} "
-              f"passed={seam['passed']}", flush=True)
+        seam = _seam_report(Z, lengths, clip_len=clip_len, n_win=n_win,
+                            f_win=f_win, stride=stride, l=l, stream=stream)
 
         # 2. fit the state model (static HMM or autoregressive HMM)
         _stage(f"2/5  fit {model} and select K")
@@ -685,7 +737,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
     if stream == "pose" and model != "arhmm":
         _fig("state_appearance", plot_state_appearances, adapter, res, dwl, bones)
     _fig("movement_dynamics", plot_movement_dynamics, videos, res, lengths, bones,
-         clip_len=clip_len, stride=stride, n_win=n_win, stream=stream, dwell=dwl)
+         clip_len=clip_len, stride=stride, n_win=n_win, stream=stream, dwell=dwl,
+         anchor=anchor)
 
     # velocity boxplot (Fig-3b): % high-velocity frames per body group per state
     try:

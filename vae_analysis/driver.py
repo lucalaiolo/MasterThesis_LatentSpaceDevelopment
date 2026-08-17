@@ -942,7 +942,12 @@ def _plot_ou_timescales(ts_s, plt):
 
 
 def _plot_hmm_states(traj, hmm, plt):
-    """Trajectory PC1 coloured by predicted HMM state."""
+    """Trajectory PC1 coloured by predicted HMM state.
+
+    Plotted against **window index**, not frame index, so the delta-stream
+    centring shift of :func:`hmm_pipeline.state_movement_dynamics` does not
+    apply here — there is no window-to-frame mapping to centre.
+    """
     tc = traj - traj.mean(axis=0, keepdims=True)
     Vt = np.linalg.svd(tc, full_matrices=False)[2]
     pc1 = tc @ Vt[0]

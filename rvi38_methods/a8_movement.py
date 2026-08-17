@@ -79,9 +79,17 @@ def state_velocity_profile(st, vid, vids, geom, groups: dict[str, list[int]],
         spans = _window_frame_spans(len(video), geom)
         if not spans or len(seq) == 0:
             continue
-        # The delta stream has one state fewer than windows; map each state to
-        # the "from" window of its transition.
-        spans = spans[:len(seq)]
+        # Pose: one state per window, and window w already covers exactly its l
+        # frames — no shift. Delta: one state fewer, and state m is the velocity
+        # dz_m centred on the window m | m+1 boundary tau_m = f0 + (m+1)*l, so
+        # window m's block is shifted by +l//2. Attributing it to the "from"
+        # window alone would put every delta state l/2 frames early.
+        # (Odd l leaves a residual half-frame bias; l = 4 in this build, exact.)
+        if len(seq) < len(spans):                      # delta
+            h = geom.l // 2
+            spans = [(a + h, b + h) for (a, b) in spans[:len(seq)]]
+        else:                                          # pose
+            spans = spans[:len(seq)]
         seq = seq[:len(spans)]
         x = np.asarray(video, float)
         speed = np.linalg.norm(np.diff(x, axis=0), axis=-1)
@@ -91,7 +99,7 @@ def state_velocity_profile(st, vid, vids, geom, groups: dict[str, list[int]],
         F = len(video)
         for s in range(K):
             fr = [t for (a, b), ws in zip(spans, seq) if ws == s
-                  for t in range(a, min(b, F))]
+                  for t in range(max(0, a), min(b, F))]
             for g, joints in groups.items():
                 out[s][g].append(100.0 * hv[np.ix_(np.asarray(fr), joints)].mean()
                                  if fr else np.nan)

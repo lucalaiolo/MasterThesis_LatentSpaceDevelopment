@@ -70,7 +70,8 @@ def _runs(seq, K):
     return runs
 
 
-def _seam_report(Z, lengths, *, clip_len, n_win, f_win, stride, l, quiet=False):
+def _seam_report(Z, lengths, *, clip_len, n_win, f_win, stride, l,
+                 stream="pose", quiet=False):
     """Run the seam check and print both of its parts.
 
     The verdict comes from :func:`hmm_pipeline.seam_gate`, which pairs a
@@ -80,7 +81,8 @@ def _seam_report(Z, lengths, *, clip_len, n_win, f_win, stride, l, quiet=False):
     looks exactly like any other step — no seam — and there is nothing about a
     red spectrum that can inflate it.
     """
-    gate = H.seam_gate(Z, lengths, n_win=n_win, l=l, f_win=f_win, stride=stride)
+    gate = H.seam_gate(Z, lengths, n_win=n_win, l=l, f_win=f_win, stride=stride,
+                       stream=stream)
     comb = H.seam_diagnostic(Z, lengths, clip_len=clip_len, n_win=n_win,
                              f_win=f_win, stride=stride)
     out = dict(gate)
@@ -662,7 +664,8 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
               f"stream={stream} f_win={f_win:.3f} Hz "
               f"(hmmlearn {meta.get('hmmlearn', '?')})", flush=True)
         seam = _seam_report(Z, lengths, clip_len=clip_len, n_win=n_win,
-                            f_win=f_win, stride=stride, l=l, quiet=True)
+                            f_win=f_win, stride=stride, l=l, stream=stream,
+                            quiet=True)
         _stage("2/5  fit reused")
     else:
         # 1. stitch + seam
@@ -674,7 +677,7 @@ def run_hmm_report(adapter, videos, *, bones, limbs, clip_len, stride=None,
               f"({np.sum(lengths) / f_win / 60:.1f} min of windowed motion)",
               flush=True)
         seam = _seam_report(Z, lengths, clip_len=clip_len, n_win=n_win,
-                            f_win=f_win, stride=stride, l=l)
+                            f_win=f_win, stride=stride, l=l, stream=stream)
 
         # 2. fit the state model (static HMM or autoregressive HMM)
         _stage(f"2/5  fit {model} and select K")

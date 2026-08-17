@@ -245,8 +245,20 @@ def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
             "tol": tol, "boundary_period_windows": step_win}
 
 # === SOUND seam gate — replaces `assert seam["passed"]` =====================
-def seam_gate(Z, lengths, *, n_win, l, f_win, stride,
+def seam_gate(Z, lengths, *, n_win, l, f_win, stride, stream="pose",
               jump_tol=1.5, comb_tol=3.0, min_harm=2):
+    """Seam gate: boundary-jump test plus a locally-baselined comb test.
+
+    ``stream`` must match what ``Z`` holds. On the **pose** stream the step
+    across a clip boundary is ``z_i - z_{i-1}``, obtained by differencing. On
+    the **delta** stream that step is already an element — ``Z[m] = z_{m+1} -
+    z_m``, so the element straddling a boundary is ``Z[c*step - 1]`` — and
+    differencing again would measure *second* differences, a different and
+    noisier quantity in which a level jump splits into an adjacent +/- pair
+    that the boundary mask only half catches. Reading the element magnitudes
+    directly makes the delta gate return exactly the pose gate's statistic, as
+    it must: the two select the same vectors.
+    """
     import numpy as np
     from scipy.signal import welch
     step, blocks = stride // l, np.cumsum(np.r_[0, lengths])
@@ -255,8 +267,12 @@ def seam_gate(Z, lengths, *, n_win, l, f_win, stride,
     for a, b in zip(blocks[:-1], blocks[1:]):
         seg = Z[a:b]
         if len(seg) < 2: continue
-        d = np.linalg.norm(np.diff(seg, axis=0), axis=1)
-        m = (np.arange(1, len(seg)) % step == 0)
+        if stream == "delta":
+            d = np.linalg.norm(seg, axis=1)          # already the step itself
+            m = ((np.arange(len(seg)) + 1) % step == 0)
+        else:
+            d = np.linalg.norm(np.diff(seg, axis=0), axis=1)
+            m = (np.arange(1, len(seg)) % step == 0)
         bnd.append(d[m]); itr.append(d[~m])
     jump = np.concatenate(bnd).mean() / np.concatenate(itr).mean()
     # (b) local-baseline comb test at the seam harmonics

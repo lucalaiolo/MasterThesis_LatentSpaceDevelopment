@@ -176,31 +176,50 @@ def stitch_dataset(adapter, videos: list[np.ndarray], *, clip_len: int = 64,
 # 2. Seam diagnostic  (§3; Guardrail 3.1)
 # ---------------------------------------------------------------------------
 def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
-                    n_win: int, f_win: float, tol: float = 3.0) -> dict:
-    """Check the stitched trajectory for the ``f_frame/clip_len`` seam comb.
+                    n_win: int, f_win: float, stride: int | None = None,
+                    tol: float = 3.0) -> dict:
+    """Check the stitched trajectory for a spectral line at the clip boundary.
 
-    A clip boundary every ``clip_len`` frames is a boundary every
-    ``clip_len/l = n_win`` windows, i.e. a spectral line at ``f_win/n_win`` Hz
-    and its harmonics in the window-sampled trajectory. This is exactly the
-    ``f_frame/clip_len`` comb that naive concatenation injects. The overlap-crop
-    stitcher should leave no such line.
+    Each clip contributes ``stride/l`` windows to the stitched trajectory, so
+    clip boundaries recur with that period and would show as a line at
+    ``f_win * l / stride`` and its harmonics. For naive non-overlapping tiling
+    (``stride == clip_len``) that reduces to the familiar ``f_win/n_win``, i.e.
+    the ``f_frame/clip_len`` comb. **The default overlap-crop stitcher runs at
+    ``stride = clip_len/2``, where boundaries recur every ``n_win/2`` windows —
+    one octave above ``f_win/n_win``**, so probing ``f_win/n_win`` looks in the
+    wrong bin. Pass the ``stride`` you stitched with.
 
-    The check compares the PSD in a narrow bin around the seam fundamental to the
-    median PSD level, per active dimension, averaged over videos.
+    The bin is compared against a **local** baseline — the neighbouring bins,
+    excluding the harmonics themselves — not the median of the whole spectrum.
+    A latent motion trajectory is strongly autocorrelated, so its PSD is red;
+    against a global median any low-frequency bin scores an order of magnitude
+    high whether or not a seam exists, which makes such a test fire on every
+    real recording and separate nothing.
+
+    This is the spectral half of :func:`seam_gate`, which is the gate to trust:
+    it pairs this with a time-domain boundary-jump test that detects a seam
+    whose energy is spread rather than concentrated in a line.
 
     Args:
         Z, lengths: output of :func:`stitch_dataset`.
         clip_len, n_win: VAE geometry.
         f_win: window sampling rate (Hz) = ``f_frame / l``.
-        tol: pass threshold — flag when seam-bin power exceeds ``tol`` x median.
+        stride: the stride used when stitching. Defaults to ``clip_len``
+            (naive tiling), which is the only case where the boundary period is
+            ``n_win``.
+        tol: pass threshold — flag when the boundary bin exceeds ``tol`` x its
+            local baseline.
 
     Returns:
-        Dict with the seam frequency, the per-video ratio, the max ratio, and a
-        boolean ``passed`` (max ratio below ``tol``).
+        Dict with the boundary frequency, the per-video ratio, the max ratio,
+        and a boolean ``passed`` (max ratio below ``tol``).
     """
     from scipy.signal import welch
 
-    f_seam = f_win / n_win                          # == f_frame / clip_len
+    l = clip_len // n_win
+    step_win = max(1, (stride // l) if stride else n_win)   # windows per clip
+    f_seam = f_win / step_win
+    harm = f_seam * np.arange(1, 6)
     ratios = []
     offset = 0
     for L in lengths:
@@ -211,15 +230,19 @@ def seam_diagnostic(Z: np.ndarray, lengths: np.ndarray, *, clip_len: int,
         nper = min(L, 4 * n_win)
         f, P = welch(seg, fs=f_win, axis=0, nperseg=nper)
         P = P.mean(axis=1)                          # average PSD over dims
-        med = np.median(P[1:]) + 1e-12
-        # power in the bin nearest the seam fundamental
         j = int(np.argmin(np.abs(f - f_seam)))
-        ratios.append(P[j] / med)
+        # local baseline: nearby bins, minus the harmonic bins themselves
+        hbins = {int(np.argmin(np.abs(f - h))) for h in harm if h < f_win / 2}
+        nb = [i for i in range(max(1, j - 3), min(len(f), j + 4))
+              if i != j and i not in hbins]
+        if not nb:
+            continue
+        ratios.append(P[j] / (np.median(P[nb]) + 1e-12))
     ratios = np.asarray(ratios) if ratios else np.array([np.nan])
     max_ratio = float(np.nanmax(ratios))
     return {"f_seam": f_seam, "per_video_ratio": ratios,
             "max_ratio": max_ratio, "passed": bool(max_ratio < tol),
-            "tol": tol}
+            "tol": tol, "boundary_period_windows": step_win}
 
 # === SOUND seam gate — replaces `assert seam["passed"]` =====================
 def seam_gate(Z, lengths, *, n_win, l, f_win, stride,

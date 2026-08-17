@@ -250,9 +250,15 @@ def plot_movement_dynamics(videos, res, lengths, bones, *, clip_len, stride,
         F, Li = len(vp), lengths[i]
         if Li == 0: continue
         vel = np.diff(vp, axis=0)
-        fr = np.arange(f0, f0 + l * Li)
+        # A pose window w covers exactly its l frames, so it needs no shift. A
+        # delta state m is the velocity z_{m+1} - z_m, whose evidence is pose
+        # windows m and m+1; it is centred on their midpoint
+        # tau_m = f0 + (m+1)*l, which is l//2 frames later than window m's block.
+        # (Odd l leaves a residual half-frame bias; l = 4 here, so exact.)
+        shift = (l // 2) if stream == "delta" else 0   # centre delta state on tau_m
+        fr = np.arange(f0 + shift, f0 + shift + l * Li)
         flab = np.repeat(states[offs[i]:offs[i + 1]], l)
-        m = fr < F - 1; fr, flab = fr[m], flab[m]
+        m = (fr >= 0) & (fr < F - 1); fr, flab = fr[m], flab[m]
         vsel, psel = vel[fr], vp[fr]
         ok = np.isfinite(vsel).all(axis=(1, 2))
         fr, flab, vsel, psel = fr[ok], flab[ok], vsel[ok], psel[ok]

@@ -1041,6 +1041,29 @@ def _kept_window_frame_spans(F: int, clip_len: int, stride: int, n_win: int,
     return spans
 
 
+def _check_delta_alignment(spans, *, f0: int, l: int) -> None:
+    """Assert the delta blocks are centred on ``tau_m = f0 + (m+1)*l``.
+
+    Each block must be ``l`` frames wide, tile without overlap, and sit centred
+    on the pose-window boundary the velocity belongs to. Half a frame of slack
+    absorbs the residual bias when ``l`` is odd.
+    """
+    for m, (a, b) in enumerate(spans):
+        if b - a != l:
+            raise ValueError(
+                f"delta block {m} is {b - a} frames wide, expected l={l}.")
+        centre = (a + b) / 2.0
+        tau = f0 + (m + 1) * l
+        if abs(centre - tau) > 0.5:
+            raise ValueError(
+                f"delta block {m} centred at {centre} but its velocity instant "
+                f"is tau_{m}={tau} (off by {centre - tau:+.1f} frames).")
+    starts = [a for a, _ in spans]
+    if any(s2 - s1 != l for s1, s2 in zip(starts, starts[1:])):
+        raise ValueError("delta blocks do not tile at stride l — a frame would "
+                         "be labelled twice or left unlabelled.")
+
+
 def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.ndarray,
                             *, groups: dict[str, list[int]], clip_len: int,
                             stride: int, n_win: int, keep: tuple[int, int] | None = None,
@@ -1054,9 +1077,21 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
     metric is **the percentage of that state's frames that are high-velocity,
     averaged over the group's body points** — one value per video.
 
-    Requires the **pose** stream (window state ~ pose window). ``videos`` must be
-    the same list passed to :func:`stitch_dataset`; videos too short for one clip
-    are skipped identically here so the blocks line up with ``lengths``.
+    Handles **both** streams, which differ in how a state maps to frames and is
+    detected from the state count:
+
+    * **pose** — one state per window, so window ``w`` maps to exactly its ``l``
+      frames ``[f0 + w*l, f0 + (w+1)*l)``. No shift; this is exact.
+    * **delta** — one state fewer, since state ``m`` is the velocity
+      ``z_{m+1} - z_m``. Its evidence is pose windows ``m`` and ``m+1``, whose
+      centres straddle the boundary ``tau_m = f0 + (m+1)*l``, so the state is
+      mapped to the ``l`` frames **centred on** ``tau_m`` — window ``m``'s block
+      shifted by ``+l//2``. Attributing it to window ``m`` alone would put every
+      delta state ``l/2`` frames early.
+
+    ``videos`` must be the same list passed to :func:`stitch_dataset`; videos too
+    short for one clip are skipped identically here so the blocks line up with
+    ``lengths``.
 
     Returns:
         Dict ``{state: {group: np.ndarray of per-video percentages}}`` (NaN for a
@@ -1064,6 +1099,7 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
     """
     states = np.asarray(res["states"])
     K = res["k"]
+    l = clip_len // n_win                   # frames per window (for the delta shift)
     kept = [v for v in videos
             if len(_clip_starts(len(v), clip_len, stride)) > 0]
     if len(kept) != len(lengths):
@@ -1077,12 +1113,21 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
         st = states[offset:offset + L]
         offset += L
         spans = _kept_window_frame_spans(len(video), clip_len, stride, n_win, keep)
-        # A pose stream has one state per window (len(spans) == L); the delta
-        # stream has one fewer (Δz between consecutive windows, L == n_win-1), so
-        # map each state to the first L window spans (the "from" window).
+        # A pose stream has one state per window (len(spans) == L) and window w
+        # already covers exactly its l frames — no shift. The delta stream has
+        # one state fewer (Δz between consecutive windows), and state m is the
+        # velocity centred on the window m | m+1 boundary tau_m = f0 + (m+1)*l,
+        # which is l//2 frames later than window m's own block.
         if len(spans) < L:
             raise ValueError(f"fewer frame spans ({len(spans)}) than states ({L}).")
-        spans = spans[:L]
+        if len(spans) == L:                 # pose: one state per window, no shift
+            spans = spans[:L]
+        else:                               # delta: centre state m on the m | m+1 boundary
+            # Odd l leaves a residual half-frame bias; l = 4 in this build, exact.
+            h = l // 2
+            f0 = spans[0][0]                # first kept window starts the tiling
+            spans = [(a + h, b + h) for (a, b) in spans[:L]]
+            _check_delta_alignment(spans, f0=f0, l=l)
         # per-frame, per-joint speed; high-velocity = top `top_frac` per joint.
         speed = np.linalg.norm(np.diff(np.asarray(video, float), axis=0), axis=-1)
         speed = np.vstack([speed, speed[-1:]])           # pad to F frames
@@ -1093,7 +1138,10 @@ def state_movement_dynamics(videos: list[np.ndarray], res: dict, lengths: np.nda
             frames_s = []
             for (a, b), ws in zip(spans, st):
                 if ws == s:
-                    frames_s.extend(range(a, min(b, F)))
+                    # Clamp to this recording: the delta shift can push the last
+                    # block past the end, and no frame may be borrowed from a
+                    # neighbouring recording.
+                    frames_s.extend(range(max(0, a), min(b, F)))
             for g, joints in groups.items():
                 if frames_s:
                     pct = 100.0 * hv[np.ix_(np.asarray(frames_s), joints)].mean()

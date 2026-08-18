@@ -593,6 +593,12 @@ internally).
 
 ### 9.2 The clinical test (labels enter only here)
 
+> This section is the **per-state screen** of the HMM report — `2K` occupancy
+> and dwell contrasts, one per state — which is a different family from the
+> clinical **endpoints** of §9quater (`Φ`, `𝒦`, synchrony, FidgetyFind). The
+> Holm adjustment below belongs to this screen; the endpoint contrasts are
+> reported uncorrected, as §9quater states.
+
 Labels are aligned to the kept-recording order by parsing subject IDs, with a
 loud audit that the split is exactly 32/6 over 38 and that no positive subject was
 dropped. Two families of contrast, each abnormal (`1`) vs. normal (`0`), both read
@@ -716,7 +722,10 @@ over label permutations, and each pair's corrected p-value is the tail of *that*
 distribution at its observed statistic (so the corrected p is always ≥ the
 uncorrected one). **The result is reported for all six pairs whatever any one
 shows.** Because all six statistics live on the same `[-1,1]` scale, the maximum
-is taken without standardisation. Validated on synthetic data: a planted
+is taken without standardisation. Each pair is *also* an endpoint in the sense
+of §9quater — one scalar per recording — and is reported with the same exact
+Mann–Whitney AUC, interval and p as every other endpoint; the maximum-statistic
+p is printed beside those, not in place of them. Validated on synthetic data: a planted
 synchrony effect is recovered (`p_corr = 0.0025`) while a label-shuffled control is
 not (`p_corr = 0.84`).
 
@@ -814,16 +823,118 @@ a few frames and slightly above the band to survive it.
 
 ### 9ter.4 Inference and reporting
 
-The per-recording score is contrasted between groups by the same exact
-Mann-Whitney enumeration used for `Φ` and the Kemeny constant, and the six
-chains are tested together under the same maximum-statistic (Westfall–Young)
-correction as the six limb pairs of §9bis.6, with **every chain reported
-whatever any one shows**. FidgetyFind is *not* added to the confirmatory family
-`{Φ, 𝒦}`: it is a comparison construct, reported descriptively alongside the
-Spearman correlations between it, `Φ`, the Kemeny constant and whole-body
-coupling. Validated on synthetic data: a planted fidgety signal is recovered
-with the right sign on every recording, and the chain-level test finds it
+The per-recording score is an endpoint like any other and is contrasted by the
+exact Mann–Whitney procedure of §9quater; so is each of the six chains
+separately, with **every chain reported whatever any one shows**, and a
+maximum-statistic p over the six printed beside them as in §9bis.6. Nothing is
+corrected across constructs: FidgetyFind is a comparison construct, read
+alongside the Spearman correlations between it, `Φ`, the Kemeny constant and
+whole-body coupling, and those correlations are the point of running it.
+Validated on synthetic data: a planted fidgety signal is recovered with the
+right sign on every recording, and the chain-level test finds it
 (`p_corr = 0.035` at the hips on a 12-recording check).
+
+---
+
+## 9quater. Inference on the clinical endpoints
+
+### 9quater.1 One scalar per recording, one test
+
+Every clinical endpoint — fluency `Φ`, the Kemeny constant `𝒦`, whole-body
+synchrony `mean F` (and each of its six pairs), the FidgetyFind score (and each
+of its six chains) — is a **single scalar per recording**, contrasted between
+the `n1 = 6` abnormal and `n0 = 32` normal recordings with the Mann–Whitney `U`
+test. The null is equality of the two distributions,
+
+$$H_0 : F_X = F_Y,$$
+
+which renders the group labels exchangeable and thereby makes the permutation
+law below the true null law of `U`. Pool the `n = 38` values, rank them with
+**mid-ranks** for ties, and let `R_1` be the summed rank of the abnormal group:
+
+$$U = R_1 - \tfrac12 n_1(n_1+1)
+    = \sum_{a}\sum_{b}\bigl[\mathbb 1\{X_a > Y_b\}
+      + \tfrac12 \mathbb 1\{X_a = Y_b\}\bigr],
+\qquad
+\widehat{\mathrm{AUC}} = \frac{U}{n_1 n_0} \in [0,1].$$
+
+The AUC is the probability that a random abnormal recording exceeds a random
+normal one, equal to `½` under the null.
+
+### 9quater.2 The exact null, not an approximation to it
+
+Because the sample is small and the positive class rare, every null is the
+**exact permutation law**. Under `H_0` the abnormal set is a uniform random
+six-subset of the 38 recordings, so the null law of `U` is its distribution
+over all
+
+$$\binom{38}{6} = 2\,760\,681$$
+
+label assignments. These are enumerated exactly — by dynamic programming over
+the rank multiset, which is what makes 2.76 million assignments affordable for
+every endpoint — and never sampled. The two-sided p-value is the total
+exact-null probability of an AUC at least as far from `½` as observed:
+
+$$p = \mathbb P_{H_0}\bigl(|\widehat{\mathrm{AUC}} - \tfrac12|
+      \ge |\widehat{\mathrm{AUC}}_{\mathrm{obs}} - \tfrac12|\bigr).$$
+
+The floor of this test is `2 / \binom{38}{6} ≈ 7.2 × 10⁻⁷`: with six positives,
+no endpoint can report a smaller p, however cleanly it separates the groups.
+That the code reaches exactly that floor under perfect separation is one of the
+checks in `test_methods.py`.
+
+### 9quater.3 The interval
+
+The interval on the AUC is the percentile interval of a **stratified
+nonparametric bootstrap**. Writing the two group-wise empirical distributions as
+`\hat F_{n_1}` and `\hat G_{n_0}`, each of `B = 10\,000` replicates draws
+
+$$X_1^\ast,\dots,X_{n_1}^\ast \sim \hat F_{n_1},
+\qquad
+Y_1^\ast,\dots,Y_{n_0}^\ast \sim \hat G_{n_0}$$
+
+independently, with replacement, **at each group's original size**, and
+recomputes the AUC. The reported 95 % interval is the `[2.5, 97.5]` percentile
+pair of the replicates. Holding the 6/32 allocation fixed is the point: the
+interval then describes sampling variation at *this* design, and it cannot
+leave `[0,1]`, which the Hanley–McNeil normal approximation at `n_1 = 6` cannot
+promise — it routinely runs past 1 and has to be clipped. The normal
+approximation is not reported.
+
+### 9quater.4 What is deliberately absent
+
+**No multiplicity correction across endpoints.** No confirmatory family is
+declared and no maxT or Holm adjustment is applied to the endpoint contrasts;
+each is reported as it stands, with its interval, and the reader is told how
+many were computed. (Within the two six-member families — the WCLR-PP pairs and
+the FidgetyFind chains — a Westfall–Young maximum-statistic p is printed
+*beside* the per-pair and per-chain contrasts, as §9bis.6 specifies for the
+co-movement construct.)
+
+**No nuisance adjustment.** No endpoint is residualised against recording
+length or against any state statistic before the contrast: the label enters no
+fit anywhere in the analysis. The nuisances are **reported** instead, in
+§9quater.5.
+
+**No power calculation.** Post-hoc power is a deterministic function of the
+p-value and is not reported; the interval already says what the design can
+resolve.
+
+### 9quater.5 Correlation analysis
+
+For each endpoint, its **Pearson and Spearman** correlation is reported with
+
+* occupancy entropy `H = -Σ_k o_k log o_k`, where `o_k` is the fraction of the
+  recording spent in state `k`;
+* mean dwell time;
+* log recording length.
+
+Both coefficients, because they answer different questions at `n = 38` with
+bounded, skewed endpoints: Pearson asks whether the endpoint moves linearly
+with the covariate, Spearman whether it orders the infants the same way, and
+where they disagree that disagreement is itself worth seeing. The state
+quantities are read off the primary model. The label enters none of these fits;
+these are reported quantities, not adjustments.
 
 ---
 
@@ -849,7 +960,12 @@ with the right sign on every recording, and the chain-level test finds it
 
 - **Small clinical cohort.** `n=38` with **6 positives**: every clinical result is
   exploratory, with wide CIs and reported LOO fragility. Window/clip counts are
-  estimation resources, not sample size.
+  estimation resources, not sample size. The exact test's own floor at this
+  design is `p ≈ 7.2 × 10⁻⁷` (§9quater.2).
+- **Endpoints are reported uncorrected.** Several endpoints are computed on one
+  dataset and none is adjusted for the others (§9quater.4). The reader is given
+  the count and the intervals; a small p on one endpoint among several is a
+  lead, not a result.
 - **No rate or periodicity claim.** The state model supports dwell times and
   transition structure only. The earlier dwell→frequency map and its 0.5–2 Hz
   band are withdrawn (§6.2); nothing here measures recurrence.
@@ -951,6 +1067,18 @@ with the right sign on every recording, and the chain-level test finds it
   power spectra. *IEEE Trans. Audio Electroacoust.* 15(2), 70–73.
 - Mann, H.B., Whitney, D.R. (1947). On a test of whether one of two random
   variables is stochastically larger than the other. *Ann. Math. Stat.* 18(1), 50–60.
+
+**Inference (§9quater).**
+- Mann, H.B., Whitney, D.R. (1947). On a test of whether one of two random
+  variables is stochastically larger than the other. *Annals of Mathematical
+  Statistics* 18(1), 50–60.
+- Wilcoxon, F. (1945). Individual comparisons by ranking methods. *Biometrics
+  Bulletin* 1(6), 80–83.
+- Bamber, D. (1975). The area above the ordinal dominance graph and the area
+  below the receiver operating characteristic graph. *Journal of Mathematical
+  Psychology* 12(4), 387–415.
+- Davison, A.C., Hinkley, D.V. (1997). *Bootstrap Methods and Their
+  Application.* Cambridge University Press.
 
 **The comparison detector (§9ter).**
 - Morais, R., Le, V., Morgan, C., Spittle, A., Badawi, N., Valentine, J.,

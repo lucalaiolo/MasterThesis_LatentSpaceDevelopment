@@ -321,10 +321,6 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
         "phi_truncation": ST.ordering_stability(phi, trunc),
         "truncate_to": cfg["truncate"]}
     du = out["duration"]
-    print(f"  §2.3 duration: rho(Phi, logL) = {du['phi_vs_logL']['rho']:+.3f} "
-          f"(p {du['phi_vs_logL']['p']:.3f}); rho(Kemeny, logL) = "
-          f"{du['kemeny_vs_logL']['rho']:+.3f} "
-          f"(p {du['kemeny_vs_logL']['p']:.3f})")
     print(f"  §2.3 truncation to {cfg['truncate']} windows: ordering rho = "
           f"{du['phi_truncation']['rho']:+.3f}")
 
@@ -345,19 +341,22 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
         "kemeny_vs_entropy": ST.duration_control(kem, ent),
         "kemeny_vs_dwell": ST.duration_control(kem, dwl)}
     rd = out["redundancy"]
-    print(f"  §11 redundancy: rho(Phi, entropy) = "
-          f"{rd['phi_vs_entropy']['rho']:+.3f}, rho(Phi, dwell) = "
-          f"{rd['phi_vs_dwell']['rho']:+.3f}, rho(K, entropy) = "
-          f"{rd['kemeny_vs_entropy']['rho']:+.3f}, rho(K, dwell) = "
-          f"{rd['kemeny_vs_dwell']['rho']:+.3f}")
 
-    # §10.2 group contrasts, exact where enumeration is feasible.
-    out["phi_test"] = ST.mannwhitney(phi[pos], phi[~pos])
-    out["kemeny_test"] = ST.mannwhitney(kem[pos], kem[~pos])
+    # The reported endpoint contrast: exact Mann-Whitney U on every label
+    # assignment, AUC as the effect size, and the stratified percentile
+    # bootstrap as the interval. Nothing is corrected for multiplicity and no
+    # nuisance is partialled out of the contrast: the nuisances are reported
+    # as correlations instead (see correlation_analysis), and the label enters
+    # no fit.
+    out["phi_test"] = ST.mannwhitney(phi[pos], phi[~pos],
+                                     boot=cfg["n_boot_auc"])
+    out["kemeny_test"] = ST.mannwhitney(kem[pos], kem[~pos],
+                                        boot=cfg["n_boot_auc"])
     for nm, r in (("Phi", out["phi_test"]), ("Kemeny", out["kemeny_test"])):
-        print(f"  §10.2 {nm:7s} AUC = {r['auc']:.3f} "
+        print(f"  {nm:7s} AUC = {r['auc']:.3f} "
               f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}], rank-biserial "
-              f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}  [{r['method']}]")
+              f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}\n"
+              f"          null: {r['method']};  interval: {r['ci_method']}")
 
     # §7 magnitude-vs-direction split: is the fluency signal carried by how much
     # a joint moves or by the axis along which it moves? Recompute Phi under
@@ -368,7 +367,8 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
         if s_key in res:
             phi_c = A.phi_excess(st, vid, np.asarray(res[s_key]), n_sub,
                                  n_perm=cfg["n_phi"], seed=0)["excess"]
-            out["channel_split"][nm] = ST.mannwhitney(phi_c[pos], phi_c[~pos])
+            out["channel_split"][nm] = ST.mannwhitney(phi_c[pos], phi_c[~pos],
+                                                      boot=cfg["n_boot_auc"])
     cs = out["channel_split"]
     print("  §7 fluency channel split (Phi group contrast per similarity "
           "channel):")
@@ -378,36 +378,11 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
             print(f"     {nm:9s}: AUC = {r['auc']:.3f}, rank-biserial "
                   f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}")
 
-    # §10.7 confirmatory family: maxT over {Phi, Kemeny}.
-    out["maxt"] = ST.maxt({"phi": phi, "kemeny": kem}, pos, n_perm=cfg["n_maxt"])
-    out["holm"] = dict(zip(["phi", "kemeny"],
-                           ST.holm([out["phi_test"]["p"],
-                                    out["kemeny_test"]["p"]]).tolist()))
-    mt = out["maxt"]
-    print(f"  §10.7 maxT: Phi p = {mt['phi']['p_maxT']:.4g}, Kemeny p = "
-          f"{mt['kemeny']['p_maxT']:.4g}   |   Holm: Phi "
-          f"{out['holm']['phi']:.4g}, Kemeny {out['holm']['kemeny']:.4g}")
-
-    # §10.3 nuisance adjustment where duration intrudes.
-    out["adjusted"] = {}
-    for nm, v in (("phi", phi), ("kemeny", kem)):
-        rho = out["duration"][f"{nm}_vs_logL"]["rho"]
-        if np.isfinite(rho) and abs(rho) >= cfg["duration_tol"]:
-            out["adjusted"][nm] = ST.freedman_lane(v, pos, logL,
-                                                   n_perm=cfg["n_maxt"])
-            print(f"  §10.3 {nm} correlates with logL (rho {rho:+.3f}); "
-                  f"Freedman-Lane adjusted AUC = "
-                  f"{out['adjusted'][nm]['auc']:.3f}, p = "
-                  f"{out['adjusted'][nm]['p']:.4g}")
-
-    # §10.9 group-level BCa intervals, and §10.12 power.
+    # BCa intervals on the group medians (descriptive, not the endpoint
+    # interval, which is the stratified bootstrap on the AUC above).
     if cfg["controls"] == "full":
         out["bca"] = {"phi_median": ST.bca_ci(phi, np.median, cfg["n_bca"]),
                       "kemeny_median": ST.bca_ci(kem, np.median, cfg["n_bca"])}
-    out["mde"] = ST.min_detectable_effect(int(pos.sum()), int((~pos).sum()))
-    print(f"  §10.12 minimum detectable effect at n = {int(pos.sum())} vs "
-          f"{int((~pos).sum())}: AUC {out['mde']['auc']:.3f} "
-          f"(rank-biserial {out['mde']['rank_biserial']:+.3f}) for 80% power")
     if cfg["controls"] == "full":
         out["loo"] = {"phi": ST.loo_auc(phi[pos], phi[~pos]),
                       "kemeny": ST.loo_auc(kem[pos], kem[~pos])}
@@ -491,17 +466,30 @@ def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
     wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0,
                         pairs=wc["pairs"])
     results["wclrpp"]["test"] = wt
-    print(f"  §10 group contrast on per-pair F, labels permuted "
-          f"({wt['n_perm']:,} draws), max-statistic corrected over six pairs "
-          f"[all six reported regardless]:")
-    for p, nm in enumerate(wc["pairs"]):
-        print(f"     {nm:8s}: dF (abnormal-normal) = {wt['observed'][p]:+.3f}  "
-              f"p_corrected = {wt['p_corrected'][p]:.4f}  "
-              f"(uncorrected {wt['p_uncorrected'][p]:.4f})")
+    y = np.asarray(labels).astype(int)
+    Fm = np.asarray(wc["F"], float)
+    pair_tests = [ST.mannwhitney(Fm[y == 1, i], Fm[y == 0, i],
+                                 boot=cfg["n_boot_auc"])
+                  for i in range(Fm.shape[1])]
+    results["wclrpp"]["pair_tests"] = pair_tests
+    print("  group contrast on each pair's F (one scalar per recording), "
+          "exact Mann-Whitney;\n  all six reported whatever any one shows:")
+    for i, nm in enumerate(wc["pairs"]):
+        r = pair_tests[i]
+        print(f"     {nm:8s}: AUC {r['auc']:.3f} [{r['auc_lo']:.3f}, "
+              f"{r['auc_hi']:.3f}]  p = {r['p']:.4g}   "
+              f"dF (abnormal-normal) = {wt['observed'][i]:+.3f}")
+    print(f"  a family-wise p over the six pairs, from the same labels "
+          f"permuted {wt['n_perm']:,} times with a\n  maximum-statistic "
+          f"(Westfall-Young) correction, is reported alongside but is not the "
+          f"endpoint test:")
+    print("     " + "  ".join(f"{nm}={wt['p_corrected'][i]:.3f}"
+                              for i, nm in enumerate(wc["pairs"])))
 
     # whole-body aggregation: mean F over pairs (a whole-body coupling pattern
     # scores high everywhere) and its across-pair spread.
-    agg = ST.mannwhitney(wc["mean_F"][labels == 1], wc["mean_F"][labels == 0])
+    agg = ST.mannwhitney(wc["mean_F"][labels == 1], wc["mean_F"][labels == 0],
+                         boot=cfg["n_boot_auc"])
     results["wclrpp"]["mean_F_test"] = agg
     print(f"  whole-body coupling (mean F over pairs): abnormal median "
           f"{np.nanmedian(wc['mean_F'][labels == 1]):.3f} vs normal "
@@ -579,26 +567,34 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
 
     test = ST.maxstat_label_test(ds["median_entropy"], y, n_perm=cfg["n_ff"],
                                  seed=0, names=ds["chains"])
-    print(f"  group contrast per chain, labels permuted ({test['n_perm']:,} "
-          f"draws), max-statistic corrected over the six chains "
-          f"[all six reported regardless]:")
+    M = np.asarray(ds["median_entropy"], float)
+    chain_tests = [ST.mannwhitney(M[pos, ci], M[~pos, ci],
+                                  boot=cfg["n_boot_auc"])
+                   for ci in range(M.shape[1])]
+    print("  group contrast on each chain's median entropy (one scalar per "
+          "recording), exact\n  Mann-Whitney; all six reported whatever any "
+          "one shows:")
     for ci, nm in enumerate(ds["chains"]):
-        print(f"     {nm:7s}: dH (abnormal-normal) = {test['observed'][ci]:+.3f}"
-              f"  p_corrected = {test['p_corrected'][ci]:.4f}  "
-              f"(uncorrected {test['p_uncorrected'][ci]:.4f})")
+        r = chain_tests[ci]
+        print(f"     {nm:7s}: AUC {r['auc']:.3f} [{r['auc_lo']:.3f}, "
+              f"{r['auc_hi']:.3f}]  p = {r['p']:.4g}   "
+              f"dH (abnormal-normal) = {test['observed'][ci]:+.3f}")
+    print(f"  a family-wise p over the six chains (Westfall-Young over "
+          f"{test['n_perm']:,} label permutations) is\n  reported alongside "
+          f"but is not the endpoint test:")
+    print("     " + "  ".join(f"{nm}={test['p_corrected'][ci]:.3f}"
+                              for ci, nm in enumerate(ds["chains"])))
 
     tests = {}
     for nm, key in (("FidgetyFind score", "score"),
                     ("hips only", "score_proximal"),
                     ("fidgety-window rate", "positive_rate_mean")):
         v = np.asarray(ds[key], float)
-        tests[key] = ST.mannwhitney(v[pos], v[~pos])
+        tests[key] = ST.mannwhitney(v[pos], v[~pos], boot=cfg["n_boot_auc"])
         r = tests[key]
         print(f"  {nm:20s}: abnormal median {np.nanmedian(v[pos]):.3f} vs "
               f"normal {np.nanmedian(v[~pos]):.3f}; AUC {r['auc']:.3f} "
-              f"[{r.get('auc_lo_boot', float('nan')):.3f}, "
-              f"{r.get('auc_hi_boot', float('nan')):.3f}], p = {r['p']:.4g}"
-              f"  [{r['method']}]")
+              f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}], p = {r['p']:.4g}")
     print("     AUC below 0.5 is the expected direction: absent fidgety "
           "movement means less direction variety.")
 
@@ -636,7 +632,8 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
         "score_distal": ds["score_distal"],
         "positive_rate_mean": ds["positive_rate_mean"],
         "coverage_mean": ds["coverage_mean"],
-        "params": ds["params"], "chain_test": test, "tests": tests,
+        "params": ds["params"], "chain_test": test,
+        "chain_tests": chain_tests, "tests": tests,
         "redundancy": redundancy, "agreement": agreement,
         "window_entropy": [np.asarray(e, float) for e in ds["E"]],
         "window_starts": [np.asarray(s0, int) for s0 in ds["starts"]]}
@@ -660,11 +657,142 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
 
 
 # ---------------------------------------------------------------------------
+# correlation analysis: every endpoint against the three nuisances
+# ---------------------------------------------------------------------------
+def correlation_analysis(results, primary, cfg):
+    """Pearson and Spearman of each endpoint with entropy, dwell and length.
+
+    These are reported, not adjusted for: no endpoint contrast is residualised
+    against them and the label enters none of these fits. Occupancy entropy and
+    mean dwell come from the primary model's state path, so they say how much
+    of an endpoint is just "this infant visits more states" or "this infant
+    holds them longer"; log recording length says how much is just "this
+    recording is longer".
+
+    Populates ``results['correlations']``.
+    """
+    section("Correlation analysis (endpoints against entropy, dwell, length)")
+    cl = results["clinical"]
+    res = results[primary]
+
+    endpoints = {"fluency Phi": np.asarray(res["phi"]["excess"], float),
+                 "Kemeny (jumps)": np.asarray(res["kemeny_per_subject"],
+                                              float)}
+    wc = results.get("wclrpp")
+    if wc and "mean_F" in wc:
+        endpoints["synchrony (mean F)"] = np.asarray(wc["mean_F"], float)
+    ff = results.get("fidgetyfind")
+    if ff and "score" in ff:
+        endpoints["FidgetyFind score"] = np.asarray(ff["score"], float)
+
+    covariates = {
+        "occupancy entropy": np.asarray(cl["occupancy_entropy"], float),
+        "mean dwell (windows)": np.asarray(cl["mean_dwell"], float),
+        "log recording length": np.log(np.asarray(results["frames"], float))}
+
+    table = ST.correlation_table(endpoints, covariates)
+    results["correlations"] = {
+        "table": table, "endpoints": list(endpoints),
+        "covariates": list(covariates), "model": primary}
+
+    print(f"  occupancy entropy and mean dwell are read off {primary}; "
+          f"length is the recording's frame count.")
+    print(f"  {'endpoint':22s}{'covariate':24s}{'Pearson r (p)':22s}"
+          f"{'Spearman rho (p)':22s}n")
+    for e, row in table.items():
+        for c, r in row.items():
+            print(f"  {e:22s}{c:24s}"
+                  f"{r['pearson_r']:+.3f} ({r['pearson_p']:.3f})"
+                  f"{'':7s}{r['spearman_rho']:+.3f} ({r['spearman_p']:.3f})"
+                  f"{'':6s}{r['n']}")
+    return results["correlations"]
+
+
+# ---------------------------------------------------------------------------
+# which models to analyse
+# ---------------------------------------------------------------------------
+# Result keys that are not models. A model may not be named any of these, or it
+# would overwrite part of the results object.
+RESERVED_KEYS = {
+    "config", "geometry", "data_report", "labels", "video_names", "frames",
+    "primary", "models_loaded", "stream", "checks", "clinical", "wclrpp",
+    "fidgetyfind", "replication", "correlations", "_halves"}
+
+LEGACY_DEFAULTS = (("AR-HMM", "arhmm_rvi38_stream_delta.pkl"),
+                   ("Gaussian HMM", "hmm_rvi38_stream_delta.pkl"))
+
+
+def model_specs(args) -> list[tuple[str, str]]:
+    """``(name, path)`` for every model the caller asked for, in order.
+
+    ``--model NAME=PATH`` names a model explicitly; a bare ``--model PATH`` is
+    named after the file, which keeps two models of the same kind (two AR-HMMs,
+    say) apart without the caller having to invent labels. ``--arhmm`` and
+    ``--hmm`` are shorthands for the two names this project used when there
+    could only ever be one of each.
+    """
+    specs: list[tuple[str, str]] = []
+    for raw in (args.model or []):
+        # Split at the *last* '=' so a name may contain one ("K=11=fit.pkl"),
+        # and fall back to treating the whole string as a path when that split
+        # does not name a file that exists but the whole string does.
+        name, sep, path = raw.rpartition("=")
+        if not sep or (not os.path.exists(path.strip())
+                       and os.path.exists(raw.strip())):
+            path = raw
+            name = os.path.splitext(os.path.basename(raw.strip()))[0]
+        specs.append((name.strip(), path.strip()))
+    legacy = [(nm, pth) for nm, pth in (("AR-HMM", args.arhmm),
+                                        ("Gaussian HMM", args.hmm)) if pth]
+    if specs and legacy:
+        print(f"  WARNING: --model was given, so "
+              f"{', '.join(nm for nm, _ in legacy)} from --arhmm/--hmm "
+              f"{'is' if len(legacy) == 1 else 'are'} ignored")
+    elif legacy:
+        specs = legacy
+    elif not specs:
+        specs = [(nm, pth) for nm, pth in LEGACY_DEFAULTS]
+        print("  no --model given: trying the legacy default pair")
+
+    seen: dict[str, int] = {}
+    out = []
+    for name, path in specs:
+        if not name:
+            name = os.path.splitext(os.path.basename(path))[0] or "model"
+        if name in RESERVED_KEYS:
+            raise SystemExit(f"model name {name!r} is reserved by the results "
+                             f"object; pass --model 'OTHERNAME={path}'")
+        if name in seen:
+            seen[name] += 1
+            name = f"{name} ({seen[name]})"
+        else:
+            seen[name] = 1
+        out.append((name, path))
+    return out
+
+
+# ---------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="rvi38_analysis.csv")
-    ap.add_argument("--arhmm", default="arhmm_rvi38_stream_delta.pkl")
-    ap.add_argument("--hmm", default="hmm_rvi38_stream_delta.pkl")
+    ap.add_argument("--model", action="append", metavar="[NAME=]PATH",
+                    help="a fitted model to analyse; repeat the flag for as "
+                         "many as you like, in any mix (two AR-HMMs, an AR-HMM "
+                         "and a Gaussian HMM, one model, five). 'NAME=PATH' "
+                         "names it for the report; a bare path is named after "
+                         "the file. The first one loaded is the primary model "
+                         "unless --primary says otherwise; every other one is "
+                         "a replication, its fluency correlated against the "
+                         "primary's.")
+    ap.add_argument("--primary", metavar="NAME",
+                    help="which model carries the clinical layer and the "
+                         "figures (default: the first one that loads).")
+    ap.add_argument("--arhmm", default=None,
+                    help="shorthand for --model 'AR-HMM=PATH'. With no --model "
+                         "and no --hmm either, the pair of legacy defaults is "
+                         "tried.")
+    ap.add_argument("--hmm", default=None,
+                    help="shorthand for --model 'Gaussian HMM=PATH'.")
     ap.add_argument("--labels", default="RVI_38_labels.mat")
     ap.add_argument("--outdir", default="rvi38_out")
     ap.add_argument("--fps", type=float, default=25.0)
@@ -674,11 +802,6 @@ def main(argv=None):
     ap.add_argument("--state-names", default=None,
                     help="file of state names (JSON list or one per line); "
                          "overrides whatever a1_core provides")
-    ap.add_argument("--models", choices=("arhmm", "hmm", "both"),
-                    default="both",
-                    help="which fitted model(s) to analyse; 'arhmm' skips the "
-                         "Gaussian HMM entirely (and with it the §7.6/§8.5 "
-                         "cross-model replication)")
     ap.add_argument("--controls", choices=("core", "full"), default="full",
                     help="'core' runs only what the §10.13 table and the §11 "
                          "gates require; 'full' adds the §7.6 controls and the "
@@ -806,9 +929,9 @@ def main(argv=None):
         "n_dwell": 50 if f else 200,
         "n_mantel": 2_000 if f else 20_000,   # §12.3 Mantel
         "n_block": 100 if f else 400,         # §12.3 block bootstrap
-        "n_maxt": 20_000 if f else 200_000,   # §12.3 headline contrasts
         "n_bca": 2_000 if f else 10_000,
-        "block": 50, "truncate": 387, "m_max": 6, "duration_tol": 0.3,
+        "n_boot_auc": 2_000 if f else 10_000,  # stratified AUC bootstrap, B
+        "block": 50, "truncate": 387, "m_max": 6,
         "controls": args.controls, "state_names": args.state_names,
         "n_wclr": 2_000 if f else 20_000,    # WCLR-PP label permutations
         "wclr_w": args.wclr_w, "wclr_tau_max": args.wclr_tau_max,
@@ -850,28 +973,37 @@ def main(argv=None):
           f"({sec.min():.0f}-{sec.max():.0f} s), "
           f"{max(frames) / min(frames):.1f}-fold range")
 
-    wanted = {"arhmm": ("AR-HMM",), "hmm": ("Gaussian HMM",),
-              "both": ("AR-HMM", "Gaussian HMM")}[args.models]
     models = {}
-    for path, tag in ((args.arhmm, "AR-HMM"), (args.hmm, "Gaussian HMM")):
-        if tag not in wanted:
-            print(f"  {tag}: skipped (--models {args.models})")
-            continue
+    model_paths = {}
+    for tag, path in model_specs(args):
         if path and os.path.exists(path):
             try:
                 models[tag] = L.load_normalised(path, tag)
+                model_paths[tag] = path
                 m = models[tag]
                 print(f"  loaded {tag}: K={m['k']}, {len(m['states']):,} "
-                      f"windows, {m['n_subjects']} subjects")
+                      f"windows, {m['n_subjects']} subjects  ({path})")
             except Exception as exc:                      # noqa: BLE001
                 print(f"  WARNING: {tag} at {path} failed to load: {exc}")
         else:
             print(f"  {tag}: not found at {path} (skipped)")
     if not models:
         raise SystemExit(
-            "No model could be loaded. Pass --arhmm/--hmm with valid paths.")
+            "No model could be loaded. Pass --model '[NAME=]PATH' (repeatable) "
+            "with valid paths.")
 
-    primary = "AR-HMM" if "AR-HMM" in models else "Gaussian HMM"
+    if args.primary is not None:
+        if args.primary not in models:
+            raise SystemExit(
+                f"--primary {args.primary!r} is not among the loaded models "
+                f"({', '.join(models)})")
+        primary = args.primary
+    else:
+        primary = next(iter(models))
+    others = [t for t in models if t != primary]
+    print(f"  primary model: {primary}"
+          + (f";  replications: {', '.join(others)}" if others
+             else ";  no replication model (only one loaded)"))
 
     # Which stream was the model fitted on? The delta trajectory is exactly one
     # window per subject shorter than the pose trajectory, so the stored
@@ -894,7 +1026,7 @@ def main(argv=None):
         "l": geom.l, "lo": geom.lo, "f0": geom.f0, "f_win": geom.f_win},
         "data_report": rep, "labels": labels, "video_names": vids,
         "frames": frames, "primary": primary, "models_loaded": list(models),
-        "stream": stream}
+        "model_paths": model_paths, "stream": stream}
 
     # §12.4 checks with a definite right answer.
     checks = {
@@ -937,16 +1069,27 @@ def main(argv=None):
         res["S"], m["n_subjects"])
     results["_halves"] = results["clinical"].pop("phi_halves", None)
 
-    # §7.6 replication on the independent model.
-    if len(models) > 1:
-        other = [t for t in models if t != primary][0]
-        section(f"§7.6  Replication on the independent model ({other})")
-        r2 = results[other]
-        rho, p = stats.spearmanr(res["phi"]["excess"], r2["phi"]["excess"])
-        results["replication"] = {"phi_spearman": {"rho": float(rho),
-                                                   "p": float(p)}}
-        print(f"  Phi agreement across models: Spearman rho = {rho:+.3f} "
-              f"(p = {p:.3g})")
+    # Replication: every other loaded model against the primary. Two fits of
+    # the same kind (two AR-HMMs at different K or seeds) and two fits of
+    # different kinds are read the same way -- does the fluency ordering of the
+    # infants survive refitting the state model?
+    if others:
+        section(f"Replication of the primary model ({primary}) on "
+                f"{len(others)} other model{'s' if len(others) > 1 else ''}")
+        results["replication"] = {}
+        for other in others:
+            r2 = results[other]
+            rho, pv = stats.spearmanr(res["phi"]["excess"],
+                                      r2["phi"]["excess"])
+            rho_k, pv_k = stats.spearmanr(res["kemeny_per_subject"],
+                                          r2["kemeny_per_subject"])
+            results["replication"][other] = {
+                "phi_spearman": {"rho": float(rho), "p": float(pv)},
+                "kemeny_spearman": {"rho": float(rho_k), "p": float(pv_k)},
+                "k": r2["k"]}
+            print(f"  {other} (K={r2['k']}): Phi agreement Spearman rho = "
+                  f"{rho:+.3f} (p = {pv:.3g});  Kemeny agreement rho = "
+                  f"{rho_k:+.3f} (p = {pv_k:.3g})")
 
     # ---- raw-kinematic constructs (§8): WCLR-PP inter-limb coordination (the
     # synchrony construct and the slow part of a run) and the per-state velocity
@@ -969,6 +1112,9 @@ def main(argv=None):
     else:
         fidgetyfind(results, pose, obs, vids, labels, geom, cfg, args.outdir)
 
+    # ---- correlation analysis: the nuisances, reported not adjusted for ----
+    correlation_analysis(results, primary, cfg)
+
     # ---- plain-language summary of every test that was run ----
     section("Statistical tests performed")
     cl = results["clinical"]
@@ -988,19 +1134,7 @@ def main(argv=None):
         ("Do abnormal infants differ in mixing time?",
          "Mann-Whitney, exact enumeration of all label assignments",
          cl["kemeny_test"]["p"], f"AUC = {cl['kemeny_test']['auc']:.3f}"),
-        ("Fluency, after correcting for testing two endpoints",
-         "maxT over the pair, resampled jointly",
-         cl["maxt"]["phi"]["p_maxT"], f"Holm {cl['holm']['phi']:.3g}"),
-        ("Mixing time, after correcting for testing two endpoints",
-         "maxT over the pair, resampled jointly",
-         cl["maxt"]["kemeny"]["p_maxT"], f"Holm {cl['holm']['kemeny']:.3g}"),
     ]
-    for nm, meth in (("phi", "Fluency"), ("kemeny", "Mixing time")):
-        if nm in cl.get("adjusted", {}):
-            rows.append((f"{meth}, with recording length partialled out",
-                         "Freedman-Lane residual permutation",
-                         cl["adjusted"][nm]["p"],
-                         f"AUC = {cl['adjusted'][nm]['auc']:.3f}"))
     if "wclrpp" in results and "mean_F_test" in results["wclrpp"]:
         wt = results["wclrpp"]["mean_F_test"]
         rows.append(("Do abnormal infants couple their limbs more?",
@@ -1023,23 +1157,23 @@ def main(argv=None):
     for q, meth, pv, extra in rows:
         pstr = "n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}"
         print(f"  {q}\n      {meth}\n      p = {pstr}   ({extra})")
-    print(f"\n  Effect sizes are AUC (= probability a random abnormal infant "
-          f"exceeds a random normal one).")
-    print(f"  AUC intervals are reported two ways: the Hanley-McNeil normal "
-          f"approximation, and\n  a percentile bootstrap resampling each group "
-          f"separately ({cl['phi_test'].get('n1', 0)} and "
-          f"{cl['phi_test'].get('n2', 0)} infants). The normal approximation "
-          f"is\n  unreliable at this sample size and is clipped at 0 and 1; "
-          f"prefer the bootstrap.")
+    ref = cl["phi_test"]
+    print(f"\n  Every endpoint is one scalar per recording, contrasted between "
+          f"the {ref.get('n1', 0)} abnormal and {ref.get('n2', 0)} normal "
+          f"recordings.\n  The effect size is the AUC: the probability that a "
+          f"random abnormal infant exceeds a\n  random normal one, which is "
+          f"1/2 under the null. The p-value is two-sided, the exact-null\n  "
+          f"probability of an AUC at least as far from 1/2 as the observed "
+          f"one, taken over\n  {ref.get('method', 'the permutation null')}. "
+          f"The interval is the\n  {ref.get('ci_method', 'bootstrap')}, "
+          f"resampling each group separately at its own size.")
+    print("  Nothing here is corrected for multiplicity and no nuisance is "
+          "partialled out of a\n  contrast; the nuisances are reported as "
+          "correlations, where the label enters no fit.")
     for nm, key in (("Fluency", "phi_test"), ("Kemeny", "kemeny_test")):
         r = cl[key]
-        print(f"     {nm:8s} AUC {r['auc']:.3f}  normal-approx "
-              f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}]"
-              f"{'  (CLIPPED)' if r.get('hm_clipped') else ''}"
-              f"   bootstrap [{r.get('auc_lo_boot', float('nan')):.3f}, "
-              f"{r.get('auc_hi_boot', float('nan')):.3f}]")
-    print(f"  Smallest AUC this study could detect at 80% power: "
-          f"{cl['mde']['auc']:.3f}")
+        print(f"     {nm:8s} AUC {r['auc']:.3f}  "
+              f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}]   p = {r['p']:.4g}")
 
     # ---- outputs ----
     section("Outputs")

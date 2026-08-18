@@ -9,6 +9,8 @@
 # Runtime: ~25-40 min for the full run on a Colab CPU (WCLR-PP is most of
 # it). SYNCHRONY = False cuts it to a few minutes. FAST = True cuts every
 # resampling count ~20x — use it to check the paths, not to report numbers.
+# (The endpoint p-values are exact enumerations either way; FAST only coarsens
+# the resampled quantities, the bootstrap interval among them.)
 # =====================================================================
 
 # ---- 0. Repo + dependencies (uncomment on a fresh Colab runtime) ----
@@ -22,10 +24,20 @@
 # ============================ CONFIG =================================
 REPO      = "/content/MasterThesis_LatentSpaceDevelopment"   # clone location
 CSV       = "/content/rvi38_analysis.csv"                    # long keypoint table
-ARHMM     = "/content/arhmm_rvi38_stream_delta.pkl"          # primary model
-HMM       = "/content/hmm_rvi38_stream_delta.pkl"            # replication model
 LABELS    = "/content/RVI_38_labels.mat"                     # or None
 OUT_DIR   = "/content/rvi38_out"
+
+# Which fitted models to analyse. Any number, any mix of kinds — two AR-HMMs,
+# an AR-HMM and a Gaussian HMM, one model, five. The FIRST is the primary one
+# (clinical layer, correlation analysis and every figure are computed on it);
+# every other is a replication, its fluency and Kemeny constant correlated
+# against the primary's. Write it as a dict to name them, or as a plain list of
+# paths to have them named after the files.
+MODELS    = {
+    "AR-HMM K=11": "/content/arhmm_rvi38_k11.pkl",
+    "AR-HMM K=14": "/content/arhmm_rvi38_k14.pkl",
+}
+PRIMARY   = None      # e.g. "AR-HMM K=14" to make that one primary instead
 
 FAST      = False     # True = smoke run (coarse p-values, ~20x fewer draws)
 SYNCHRONY = True      # WCLR-PP inter-limb coordination; the slow block
@@ -52,7 +64,7 @@ overrides = {k: v for k, v in (("fluency_omega", FLUENCY_OMEGA),
                                ("wclr_limb_signal", WCLR_LIMB)) if v is not None}
 
 out = run_report(
-    csv=CSV, arhmm=ARHMM, hmm=HMM, labels=LABELS, outdir=OUT_DIR,
+    csv=CSV, models=MODELS, primary=PRIMARY, labels=LABELS, outdir=OUT_DIR,
     fast=FAST, fps=FPS, stream=STREAM,
     synchrony=SYNCHRONY,        # WCLR-PP
     fidgetyfind=FIDGETY,        # FidgetyFind
@@ -67,17 +79,21 @@ out = run_report(
 #   out["figures"]  {"fluency": [...], "fluency_curve": [...], "kemeny": [...],
 #                    "synchrony": [...], "fidgetyfind": [...], "clinical": [...]}
 #   out["markdown"] the summary you just read (also OUT_DIR/summary.md)
+# Every endpoint: AUC with its stratified-bootstrap interval and the exact
+# two-sided p over all C(38,6) = 2,760,681 label assignments. Uncorrected.
 s = out["summary"]
-print("\nfluency      AUC %.3f  p %.4g" % (s["fluency"]["group"]["auc"],
-                                           s["fluency"]["group"]["p"]))
-print("kemeny       AUC %.3f  p %.4g" % (s["kemeny"]["group"]["auc"],
-                                         s["kemeny"]["group"]["p"]))
+def line(name, g):
+    print("%-12s AUC %.3f [%.3f, %.3f]  p %.4g"
+          % (name, g["auc"], g["auc_ci"][0], g["auc_ci"][1], g["p"]))
+
+print()
+line("fluency", s["fluency"]["group"])
+line("kemeny", s["kemeny"]["group"])
 if not s["synchrony"].get("skipped"):
-    print("synchrony    AUC %.3f  p %.4g" % (s["synchrony"]["whole_body"]["auc"],
-                                             s["synchrony"]["whole_body"]["p"]))
+    line("synchrony", s["synchrony"]["whole_body"])
 if not s["fidgetyfind"].get("skipped"):
-    print("FidgetyFind  AUC %.3f  p %.4g  (below 0.5 is the expected direction)"
-          % (s["fidgetyfind"]["group"]["auc"], s["fidgetyfind"]["group"]["p"]))
+    line("FidgetyFind", s["fidgetyfind"]["group"])
+    print("             (below 0.5 is the expected direction for FidgetyFind)")
 
 # To re-display one construct's figures later, without rerunning anything:
 #   from report import show_figures

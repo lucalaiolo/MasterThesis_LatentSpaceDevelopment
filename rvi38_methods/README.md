@@ -31,18 +31,38 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 107 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 124 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 
 ## Run
 
     pip install numpy scipy pandas joblib scikit-learn matplotlib
     python run_analysis.py --csv rvi38_analysis.csv \
-        --arhmm arhmm_rvi38_stream_delta.pkl \
-        --hmm hmm_rvi38_stream_delta.pkl \
+        --model "K=11=arhmm_k11.pkl" \
+        --model "K=14=arhmm_k14.pkl" \
         --labels RVI_38_labels.mat --outdir rvi38_out
 
 `--fast` cuts every resampling count ~20x for a smoke run.
+
+### Choosing the models
+
+`--model` is repeatable and takes as many fitted models as you like, in any
+mix: two AR-HMMs at different `K`, an AR-HMM and a Gaussian HMM, one model,
+five. `NAME=PATH` names a model for the report; a bare path is named after the
+file, which is enough to keep two fits of the same kind apart. The name may
+itself contain `=` (`"K=11=fit.pkl"` works).
+
+The **first** model loaded is the primary one — the clinical layer, the
+correlation analysis and every figure are computed on it — unless `--primary
+NAME` says otherwise. Every other model is a **replication**: its fluency and
+its Kemeny constant are correlated (Spearman, across the whole cohort) against
+the primary's, which asks whether the ordering of the infants survives
+refitting the state model. Any number of replications is fine; they are all
+reported.
+
+`--arhmm PATH` and `--hmm PATH` remain as shorthands for
+`--model "AR-HMM=PATH"` and `--model "Gaussian HMM=PATH"`; with no model flags
+at all the two legacy default filenames are tried.
 
 ### One call for everything (`report.py`)
 
@@ -56,14 +76,18 @@ summary and every figure path:
 from report import run_report
 
 out = run_report(csv="rvi38_analysis.csv",
-                 arhmm="arhmm_rvi38_stream_delta.pkl",
-                 hmm="hmm_rvi38_stream_delta.pkl",
+                 models={"K=11": "arhmm_k11.pkl",     # first = primary
+                         "K=14": "arhmm_k14.pkl"},    # the rest = replications
                  labels="RVI_38_labels.mat",
                  outdir="rvi38_out",
                  show="main")          # display the figures in a notebook
 
 out["summary"]["fidgetyfind"]["group"]["auc"]
 ```
+
+`models` takes one path, a list of paths, a list of `(name, path)` pairs or a
+`{name: path}` dict; `primary="K=14"` picks the primary model when it is not
+the first.
 
 It writes `summary.md` and `summary.json` next to the run alongside everything
 `run_analysis.py` writes. Keyword arguments pass through to the runner
@@ -157,6 +181,52 @@ exactly the homologous pairs that carry the cramped-synchronised signature.
 delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per
 subject shorter than the pose trajectory. Either model may be omitted.
+
+### Inference (`a1_stats.py`)
+
+Every clinical endpoint is **one scalar per recording**, contrasted between the
+`n1 = 6` abnormal and `n0 = 32` normal recordings, and that contrast is the
+whole of the reported inference:
+
+* **Null.** `H0: F_X = F_Y`. Equality of the two distributions makes the labels
+  exchangeable, which is what makes the permutation law below the true null law
+  of `U`.
+* **Statistic.** Pool the 38 values, rank them with mid-ranks for ties, and let
+  `R1` be the abnormal group's summed rank. Then
+  `U = R1 - n1(n1+1)/2 = ΣΣ [1{X>Y} + ½·1{X=Y}]` and
+  `AUC = U / (n1 n0)`: the probability that a random abnormal recording exceeds
+  a random normal one, equal to ½ under the null.
+* **p-value.** Under the null the abnormal set is a uniform random six-subset,
+  so the exact null law of `U` is its distribution over all
+  `C(38,6) = 2,760,681` label assignments — enumerated exactly, by dynamic
+  programming over the rank multiset, not sampled. The two-sided p is the
+  exact-null probability of an AUC at least as far from ½ as the observed one.
+* **Interval.** A stratified nonparametric bootstrap: `B = 10,000` times, each
+  group is resampled independently, with replacement, at its original size, the
+  AUC is recomputed, and the reported interval is the `[2.5, 97.5]` percentile
+  pair of those replicates. It holds the 6/32 allocation fixed and cannot leave
+  `[0, 1]`.
+
+Endpoints: fluency `Φ`, the Kemeny constant `𝒦`, whole-body synchrony
+(`mean F`) and the FidgetyFind score, plus each of the six WCLR-PP pairs and
+each of the six FidgetyFind chains. **Nothing is corrected for multiplicity**
+and **no nuisance is partialled out of a contrast**. (For the two six-member
+families a Westfall-Young maximum-statistic p is printed alongside the
+per-pair/per-chain contrasts, clearly marked, since the co-movement construct
+is specified that way in the companion; it is reported beside the endpoint
+tests, never in place of them.)
+
+The nuisances are reported as correlations instead: `correlation_analysis`
+gives every endpoint's **Pearson and Spearman** correlation with occupancy
+entropy `H = -Σ o_k log o_k`, mean dwell time, and log recording length,
+written to `results['correlations']` and drawn as `correlations.png`. The label
+enters no fit.
+
+The Hanley-McNeil normal approximation, the Holm and maxT corrections, the
+minimum detectable effect and the Freedman-Lane adjustment are **not** part of
+this and nothing in the pipeline calls them; the functions survive in
+`a1_stats.py`, marked, because they were used while the analysis was being
+developed.
 
 ### FidgetyFind: the literature's detector (`a10_fidgetyfind.py`)
 

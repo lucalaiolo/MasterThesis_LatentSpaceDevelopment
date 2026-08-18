@@ -295,40 +295,46 @@ def fig_split_half(res, results, outdir):
 
 
 def fig_auc(res, results, outdir):
-    """Group separation for each endpoint, with both interval estimates."""
+    """Group separation for every endpoint, on one AUC axis.
+
+    One row per endpoint: the AUC and its stratified percentile bootstrap
+    interval, with the exact two-sided p beside it. 0.5 is no separation; which
+    side of it counts as the abnormal pole differs by endpoint, and the axis
+    label says so.
+    """
     cl = results.get("clinical")
     if not cl:
         return None
-    rows = [("Fluency $\\Phi$", cl["phi_test"], "phi"),
-            ("Kemeny $\\mathcal{K}$", cl["kemeny_test"], "kemeny")]
-    fig, ax = plt.subplots(figsize=(6.0, 3.2))
-    for i, (nm, r, key) in enumerate(rows):
+    rows = [("Fluency $\\Phi$", cl["phi_test"]),
+            ("Kemeny $\\mathcal{K}$", cl["kemeny_test"])]
+    wc = results.get("wclrpp")
+    if wc and wc.get("mean_F_test"):
+        rows.append(("Synchrony (mean $F$)", wc["mean_F_test"]))
+    ff = results.get("fidgetyfind")
+    if ff and ff.get("tests", {}).get("score"):
+        rows.append(("FidgetyFind score", ff["tests"]["score"]))
+
+    fig, ax = plt.subplots(figsize=(6.4, 0.85 * len(rows) + 1.6))
+    for i, (nm, r) in enumerate(rows):
         y = len(rows) - 1 - i
-        ax.errorbar(r["auc"], y + .12,
-                    xerr=[[r["auc"] - r["auc_lo"]], [r["auc_hi"] - r["auc"]]],
-                    fmt="o", color=BLUE, ms=6, capsize=3,
-                    label="normal-approximation CI" if i == 0 else None)
-        if np.isfinite(r.get("auc_lo_boot", np.nan)):
-            ax.errorbar(r["auc"], y - .12,
-                        xerr=[[r["auc"] - r["auc_lo_boot"]],
-                              [r["auc_hi_boot"] - r["auc"]]],
-                        fmt="s", color=GREY, ms=5, capsize=3,
-                        label="bootstrap CI" if i == 0 else None)
-        ax.text(0.02, y + .3, f"$p$ = {r['p']:.3g}   "
-                f"(corrected {cl['maxt'][key]['p_maxT']:.3g})", fontsize=7.5)
-    mde = cl["mde"]["auc"]
+        lo = max(r["auc"] - r.get("auc_lo", np.nan), 0.0)
+        hi = max(r.get("auc_hi", np.nan) - r["auc"], 0.0)
+        ax.errorbar(r["auc"], y, xerr=[[lo], [hi]], fmt="o", color=BLUE, ms=6,
+                    capsize=3,
+                    label="stratified bootstrap CI" if i == 0 else None)
+        ax.text(0.02, y + .16, f"$p$ = {r['p']:.3g}   "
+                f"[{r.get('auc_lo', float('nan')):.2f}, "
+                f"{r.get('auc_hi', float('nan')):.2f}]", fontsize=7.5)
     ax.axvline(0.5, color="k", lw=.8)
-    for mline, lbl in ((mde, "minimum detectable effect"), (1 - mde, None)):
-        ax.axvline(mline, color=POS, ls=":", lw=1, label=lbl)
     ax.set_yticks(range(len(rows)))
     ax.set_yticklabels([r[0] for r in rows][::-1])
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.5, len(rows) - 0.3)
-    ax.set_xlabel("AUC, abnormal versus normal")
-    ax.legend(fontsize=7, frameon=False, ncol=3, loc="upper center",
-              bbox_to_anchor=(0.5, -0.28))
-    ax.set_title("Group separation for the two endpoints", loc="left",
-                 fontsize=10)
+    ax.set_xlabel("AUC, abnormal versus normal  (0.5 = no separation)")
+    ax.legend(fontsize=7, frameon=False, loc="upper center",
+              bbox_to_anchor=(0.5, -0.26))
+    ax.set_title("Group separation per endpoint — exact Mann-Whitney, "
+                 "bootstrap interval", loc="left", fontsize=10)
     return _save(fig, outdir, "auc_effect_sizes")
 
 
@@ -356,30 +362,50 @@ def fig_loo(res, results, outdir):
     return _save(fig, outdir, "loo_stability")
 
 
-def fig_redundancy(res, results, outdir):
-    """Whether either endpoint merely restates occupancy or dwell time."""
-    cl = results.get("clinical")
-    if not cl:
+def fig_correlations(res, results, outdir):
+    """Every endpoint against occupancy entropy, mean dwell and length.
+
+    Two panels of the same table: Pearson on the left, Spearman on the right,
+    endpoints down the rows and the three covariates across. Colour is the
+    correlation, the cell text carries its p. These are reported, not adjusted
+    for -- the question they answer is how much of an endpoint is already said
+    by "visits more states", "holds them longer" or "was recorded for longer".
+    """
+    co = results.get("correlations")
+    if not co or not co.get("table"):
         return None
-    rd = cl["redundancy"]
-    pretty = {"phi_vs_entropy": "$\\Phi$ vs occupancy entropy",
-              "phi_vs_dwell": "$\\Phi$ vs mean dwell",
-              "kemeny_vs_entropy": "$\\mathcal{K}$ vs occupancy entropy",
-              "kemeny_vs_dwell": "$\\mathcal{K}$ vs mean dwell"}
-    ks = list(rd)
-    fig, ax = plt.subplots(figsize=(5.4, 2.9))
-    vals = [abs(rd[k]["rho"]) for k in ks]
-    ax.barh(range(len(ks))[::-1], vals,
-            color=[POS if v >= 0.8 else BLUE for v in vals])
-    ax.axvline(0.8, color="k", ls="--", lw=.9)
-    ax.text(0.8, len(ks) - 0.4, " threshold", fontsize=7, va="top")
-    ax.set_yticks(range(len(ks))[::-1])
-    ax.set_yticklabels([pretty.get(k, k) for k in ks], fontsize=8)
-    ax.set_xlabel("|Spearman $\\rho$|")
-    ax.set_xlim(0, 1)
-    ax.set_title("Redundancy against simpler quantities", loc="left",
-                 fontsize=10)
-    return _save(fig, outdir, "redundancy")
+    table = co["table"]
+    ends = [e for e in co["endpoints"] if e in table]
+    covs = co["covariates"]
+    if not ends or not covs:
+        return None
+    fig, axes = plt.subplots(1, 2, figsize=(4.6 + 1.6 * len(covs), 
+                                           1.0 + 0.55 * len(ends)),
+                             sharey=True)
+    for ax, (key, pkey, lab) in zip(axes,
+                                    (("pearson_r", "pearson_p", "Pearson $r$"),
+                                     ("spearman_rho", "spearman_p",
+                                      "Spearman $\\rho$"))):
+        M = np.array([[table[e][c][key] for c in covs] for e in ends], float)
+        P = np.array([[table[e][c][pkey] for c in covs] for e in ends], float)
+        im = ax.imshow(M, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+        for i in range(len(ends)):
+            for j in range(len(covs)):
+                if not np.isfinite(M[i, j]):
+                    continue
+                ax.text(j, i, f"{M[i, j]:+.2f}\np={P[i, j]:.3f}",
+                        ha="center", va="center", fontsize=7,
+                        color="w" if abs(M[i, j]) > 0.55 else "k")
+        ax.set_xticks(range(len(covs)))
+        ax.set_xticklabels(covs, rotation=20, ha="right", fontsize=7.5)
+        ax.set_title(lab, fontsize=9, loc="left")
+    axes[0].set_yticks(range(len(ends)))
+    axes[0].set_yticklabels(ends, fontsize=8)
+    fig.colorbar(im, ax=axes, fraction=.03, label="correlation")
+    fig.suptitle(f"Endpoints against the three nuisances — reported, not "
+                 f"adjusted for (state quantities from {co.get('model', '')})",
+                 fontsize=10, y=1.04)
+    return _save(fig, outdir, "correlations")
 
 
 def fig_gates(res, results, outdir):
@@ -801,7 +827,7 @@ ALL = [fig_state_signature, fig_similarity, fig_similarity_channels,
        fig_fluency_per_subject,
        fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage, fig_split_half,
-       fig_auc, fig_loo, fig_redundancy, fig_gates,
+       fig_auc, fig_loo, fig_correlations, fig_gates,
        fig_wclrpp_pairs, fig_wclrpp_summary,
        fig_fidgetyfind_subject, fig_fidgetyfind_chains,
        fig_fidgetyfind_windows, fig_fidgetyfind_agreement,

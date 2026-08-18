@@ -63,7 +63,7 @@ FIGURE_GROUPS: dict[str, tuple[str, ...]] = {
     "fidgetyfind": ("fidgetyfind_subject", "fidgetyfind_chains",
                     "fidgetyfind_windows", "fidgetyfind_agreement",
                     "fidgetyfind/"),
-    "clinical": ("auc_effect_sizes", "loo_stability", "redundancy", "gates",
+    "clinical": ("auc_effect_sizes", "loo_stability", "correlations", "gates",
                  "state_velocity_regions", "state_velocity_lateral"),
 }
 PER_RECORDING = ("fluency_curve/", "fidgetyfind/")
@@ -78,13 +78,14 @@ def _f(v, default=float("nan")):
 
 
 def _auc_row(t: dict | None) -> dict:
-    """AUC, its bootstrap interval and p, from a :func:`a1_stats.mannwhitney`."""
+    """AUC, its bootstrap interval and its exact p, from :func:`mannwhitney`."""
     if not t:
         return {}
     return {"auc": _f(t.get("auc")), "p": _f(t.get("p")),
-            "auc_ci": [_f(t.get("auc_lo_boot")), _f(t.get("auc_hi_boot"))],
+            "auc_ci": [_f(t.get("auc_lo")), _f(t.get("auc_hi"))],
             "n_pos": int(t.get("n1", 0)), "n_neg": int(t.get("n2", 0)),
-            "method": t.get("method", "")}
+            "method": t.get("method", ""),
+            "ci_method": t.get("ci_method", "")}
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +96,22 @@ def summarise(results: dict, outdir: str) -> dict:
     primary = results.get("primary")
     res = results.get(primary, {})
     cl = results.get("clinical", {})
+    loaded = list(results.get("models_loaded", []))
     out: dict = {"cohort": {
         "n_recordings": len(results.get("video_names", [])),
         "n_abnormal": int(np.sum(np.asarray(results.get("labels", [])))),
         "primary_model": primary, "k_states": res.get("k"),
+        "models": [{"name": nm, "k": results.get(nm, {}).get("k"),
+                    "path": results.get("model_paths", {}).get(nm),
+                    "primary": nm == primary} for nm in loaded],
+        "replication": {nm: {"phi_rho": _f(v.get("phi_spearman", {})
+                                           .get("rho")),
+                             "phi_p": _f(v.get("phi_spearman", {}).get("p")),
+                             "kemeny_rho": _f(v.get("kemeny_spearman", {})
+                                              .get("rho")),
+                             "kemeny_p": _f(v.get("kemeny_spearman", {})
+                                            .get("p"))}
+                        for nm, v in (results.get("replication") or {}).items()},
         "stream": results.get("stream"),
         "fps": results.get("geometry", {}).get("fps")}}
 
@@ -111,9 +124,7 @@ def summarise(results: dict, outdir: str) -> dict:
           "within_infant_p": _f(w.get("p")),
           "split_half_r_sb": _f(cl.get("phi_split_half", {}).get("r_sb")),
           "icc": _f(cl.get("phi_split_half", {}).get("icc_a1")),
-          "group": _auc_row(cl.get("phi_test")),
-          "maxT_p": _f(cl.get("maxt", {}).get("phi", {}).get("p_maxT")),
-          "holm_p": _f(cl.get("holm", {}).get("phi"))}
+          "group": _auc_row(cl.get("phi_test"))}
     if phi.size and y.size == phi.size:
         fl["phi_median_normal"] = _f(np.median(phi[y == 0]))
         fl["phi_median_abnormal"] = _f(np.median(phi[y == 1]))
@@ -146,9 +157,7 @@ def summarise(results: dict, outdir: str) -> dict:
           "estimability_passed": bool(res.get("estimability", {})
                                       .get("passed", False)),
           "identity_check": _f(res.get("kemeny_identity", {}).get("abs_diff")),
-          "group": _auc_row(cl.get("kemeny_test")),
-          "maxT_p": _f(cl.get("maxt", {}).get("kemeny", {}).get("p_maxT")),
-          "holm_p": _f(cl.get("holm", {}).get("kemeny"))}
+          "group": _auc_row(cl.get("kemeny_test"))}
     if kem.size and y.size == kem.size:
         km["median_normal"] = _f(np.median(kem[y == 0]))
         km["median_abnormal"] = _f(np.median(kem[y == 1]))
@@ -160,9 +169,11 @@ def summarise(results: dict, outdir: str) -> dict:
         F = np.asarray(wc.get("F", []), float)
         t = wc.get("test", {})
         pairs = list(wc.get("pairs", []))
+        ptests = wc.get("pair_tests") or []
         per_pair = []
         for i, nm in enumerate(pairs):
-            per_pair.append({
+            row = _auc_row(ptests[i] if i < len(ptests) else None)
+            row.update({
                 "pair": nm, "class": list(wc.get("pair_class", []))[i]
                 if wc.get("pair_class") is not None else "",
                 "median_normal": _f(np.nanmedian(F[y == 0, i]))
@@ -171,8 +182,9 @@ def summarise(results: dict, outdir: str) -> dict:
                 if F.size else float("nan"),
                 "delta": _f(np.asarray(t.get("observed", []), float)[i])
                 if t else float("nan"),
-                "p_corrected": _f(np.asarray(t.get("p_corrected", []),
-                                             float)[i]) if t else float("nan")})
+                "p_familywise": _f(np.asarray(t.get("p_corrected", []),
+                                              float)[i]) if t else float("nan")})
+            per_pair.append(row)
         out["synchrony"] = {
             "limb_signal": wc.get("params", {}).get("limb_signal"),
             "window_frames": wc.get("params", {}).get("w"),
@@ -188,9 +200,11 @@ def summarise(results: dict, outdir: str) -> dict:
         M = np.asarray(ff.get("median_entropy", []), float)
         t = ff.get("chain_test", {})
         chains = list(ff.get("chains", []))
+        ctests = ff.get("chain_tests") or []
         per_chain = []
         for i, nm in enumerate(chains):
-            per_chain.append({
+            row = _auc_row(ctests[i] if i < len(ctests) else None)
+            row.update({
                 "chain": nm,
                 "class": list(ff.get("chain_class", []))[i] if
                 ff.get("chain_class") is not None else "",
@@ -200,10 +214,11 @@ def summarise(results: dict, outdir: str) -> dict:
                 if M.size else float("nan"),
                 "delta": _f(np.asarray(t.get("observed", []), float)[i])
                 if t else float("nan"),
-                "p_corrected": _f(np.asarray(t.get("p_corrected", []),
-                                             float)[i]) if t else float("nan"),
+                "p_familywise": _f(np.asarray(t.get("p_corrected", []),
+                                              float)[i]) if t else float("nan"),
                 "coverage": _f(np.nanmedian(
                     np.asarray(ff.get("coverage", []), float)[:, i]))})
+            per_chain.append(row)
         score = np.asarray(ff.get("score", []), float)
         out["fidgetyfind"] = {
             "score_median_normal": _f(np.nanmedian(score[y == 0]))
@@ -225,6 +240,7 @@ def summarise(results: dict, outdir: str) -> dict:
     else:
         out["fidgetyfind"] = {"skipped": True}
 
+    out["correlations"] = results.get("correlations", {})
     out["gates"] = cl.get("gates", {})
     out["checks"] = results.get("checks", {})
     return out
@@ -244,16 +260,39 @@ def _fmt_p(v):
 def summary_markdown(s: dict) -> str:
     """The summary as a short report, in the order the constructs are read."""
     c = s["cohort"]
-    L = [f"# RVI-38 analysis summary",
+    L = ["# RVI-38 analysis summary",
          "",
          f"{c['n_recordings']} recordings, {c['n_abnormal']} labelled abnormal "
-         f"(absent fidgety movement). Primary model {c['primary_model']} with "
-         f"K = {c['k_states']} states on the {c['stream']} stream at "
+         f"(absent fidgety movement), on the {c['stream']} stream at "
          f"{c['fps']} fps.",
-         "",
-         "Effect sizes are AUC: the probability that a random abnormal infant "
-         "scores above a random normal one. 0.5 is no separation.",
          ""]
+    models = c.get("models") or []
+    if models:
+        L += ["| model | states | role | file |", "|---|---|---|---|"]
+        for m in models:
+            L += [f"| {m['name']} | {m.get('k', '')} | "
+                  f"{'primary' if m['primary'] else 'replication'} | "
+                  f"`{m.get('path') or ''}` |"]
+        L += [""]
+    rep = c.get("replication") or {}
+    if rep:
+        L += ["Agreement with the primary model, across the whole cohort "
+              "(Spearman): "
+              + "; ".join(f"**{nm}** Phi {_fmt(v['phi_rho'], 2)} "
+                          f"(p {_fmt_p(v['phi_p'])}), Kemeny "
+                          f"{_fmt(v['kemeny_rho'], 2)} "
+                          f"(p {_fmt_p(v['kemeny_p'])})"
+                          for nm, v in rep.items()),
+              ""]
+    L += ["Every endpoint is one scalar per recording, contrasted between the "
+          "groups with the exact Mann-Whitney permutation null over all "
+          "C(38,6) = 2,760,681 label assignments. The effect size is the AUC "
+          "(the probability that a random abnormal infant exceeds a random "
+          "normal one; 0.5 is no separation), the p-value is two-sided, and "
+          "the interval is the percentile interval of a stratified "
+          "nonparametric bootstrap. Nothing is corrected for multiplicity and "
+          "no nuisance is partialled out of a contrast.",
+          ""]
 
     f = s["fluency"]
     g = f.get("group", {})
@@ -266,8 +305,6 @@ def summary_markdown(s: dict) -> str:
           f"[{_fmt(g.get('auc_ci', [np.nan])[0])}, "
           f"{_fmt(g.get('auc_ci', [np.nan, np.nan])[1])}], "
           f"p = {_fmt_p(g.get('p'))} ({g.get('method', '')})",
-          f"- corrected over the two confirmatory endpoints: maxT p = "
-          f"{_fmt_p(f['maxT_p'])}, Holm p = {_fmt_p(f['holm_p'])}",
           f"- reliability: split-half r_SB = {_fmt(f['split_half_r_sb'])}, "
           f"ICC(A,1) = {_fmt(f['icc'])}"]
     if "channel_split" in f:
@@ -297,7 +334,7 @@ def summary_markdown(s: dict) -> str:
           f"- group contrast: AUC {_fmt(g.get('auc'))} "
           f"[{_fmt(g.get('auc_ci', [np.nan])[0])}, "
           f"{_fmt(g.get('auc_ci', [np.nan, np.nan])[1])}], "
-          f"p = {_fmt_p(g.get('p'))}; maxT p = {_fmt_p(k['maxT_p'])}",
+          f"p = {_fmt_p(g.get('p'))}",
           f"- shrinkage alpha {_fmt(k['shrinkage_alpha'])}, estimability "
           f"ratio {_fmt(k['estimability_ratio'], 2)} "
           f"({'PASS' if k['estimability_passed'] else 'FAIL'}), spectral "
@@ -314,13 +351,17 @@ def summary_markdown(s: dict) -> str:
               f"permutations",
               f"- whole-body coupling (mean F): AUC {_fmt(g.get('auc'))}, "
               f"p = {_fmt_p(g.get('p'))}",
-              "", "| pair | class | normal | abnormal | delta | p (corrected) |",
-              "|---|---|---|---|---|---|"]
+              "", "| pair | class | normal | abnormal | AUC [95% CI] | p | "
+              "p (family-wise) |", "|---|---|---|---|---|---|---|"]
         for r in sy["per_pair"]:
+            ci = r.get("auc_ci", [np.nan, np.nan])
             L += [f"| {r['pair']} | {r['class']} | "
                   f"{_fmt(r['median_normal'])} | {_fmt(r['median_abnormal'])} "
-                  f"| {r['delta']:+.3f} | {_fmt_p(r['p_corrected'])} |"]
-        L += [""]
+                  f"| {_fmt(r.get('auc'))} [{_fmt(ci[0])}, {_fmt(ci[1])}] "
+                  f"| {_fmt_p(r.get('p'))} | {_fmt_p(r['p_familywise'])} |"]
+        L += ["", "The family-wise column is a Westfall-Young maximum-statistic "
+              "correction over the six pairs, reported alongside the endpoint "
+              "contrasts rather than in place of them.", ""]
 
     ff = s["fidgetyfind"]
     L += ["## 5. FidgetyFind (Morais et al., 2023)", ""]
@@ -345,13 +386,36 @@ def summary_markdown(s: dict) -> str:
                   + ", ".join(f"{k} rho {_fmt(v['rho'], 2)} "
                               f"(p {_fmt_p(v['p'])})"
                               for k, v in ff["agreement"].items())]
-        L += ["", "| chain | class | normal | abnormal | delta | "
-              "p (corrected) | assessable |", "|---|---|---|---|---|---|---|"]
+        L += ["", "| chain | class | normal | abnormal | AUC [95% CI] | p | "
+              "p (family-wise) | assessable |",
+              "|---|---|---|---|---|---|---|---|"]
         for r in ff["per_chain"]:
+            ci = r.get("auc_ci", [np.nan, np.nan])
             L += [f"| {r['chain']} | {r['class']} | "
                   f"{_fmt(r['median_normal'])} | {_fmt(r['median_abnormal'])} "
-                  f"| {r['delta']:+.3f} | {_fmt_p(r['p_corrected'])} | "
+                  f"| {_fmt(r.get('auc'))} [{_fmt(ci[0])}, {_fmt(ci[1])}] "
+                  f"| {_fmt_p(r.get('p'))} | {_fmt_p(r['p_familywise'])} | "
                   f"{_fmt(r['coverage'], 2)} |"]
+        L += [""]
+
+    co = s.get("correlations") or {}
+    if co.get("table"):
+        covs = co["covariates"]
+        L += ["## Correlation analysis", "",
+              f"Reported, not adjusted for; the label enters no fit. State "
+              f"quantities come from {co.get('model', 'the primary model')}.",
+              "",
+              "| endpoint | " + " | ".join(covs) + " |",
+              "|---" * (len(covs) + 1) + "|"]
+        for e, row in co["table"].items():
+            cells = []
+            for cv in covs:
+                r = row.get(cv, {})
+                cells.append(f"r {_fmt(r.get('pearson_r'), 2)} "
+                             f"(p {_fmt_p(r.get('pearson_p'))}), "
+                             f"rho {_fmt(r.get('spearman_rho'), 2)} "
+                             f"(p {_fmt_p(r.get('spearman_p'))})")
+            L += [f"| {e} | " + " | ".join(cells) + " |"]
         L += [""]
 
     if s.get("gates"):
@@ -429,15 +493,50 @@ def show_figures(figures: dict, which: str = "main", width: int = 900) -> int:
 # ---------------------------------------------------------------------------
 # the one call
 # ---------------------------------------------------------------------------
+def model_flags(models=None, arhmm=None, hmm=None) -> list[str]:
+    """Turn the ``models`` argument into ``--model`` flags for the runner.
+
+    Accepts whatever is natural to write: one path, a list of paths, a list of
+    ``(name, path)`` pairs, or a ``{name: path}`` dict. Unnamed models are
+    named after their file, which is what keeps two fits of the same kind
+    apart. ``arhmm`` and ``hmm`` are the old two-model shorthands.
+    """
+    if models is None:
+        specs = []
+    elif isinstance(models, str):
+        specs = [(None, models)]
+    elif isinstance(models, dict):
+        specs = list(models.items())
+    else:
+        specs = []
+        for m in models:
+            if isinstance(m, str):
+                specs.append((None, m))
+            else:
+                pair = tuple(m)
+                if len(pair) != 2:
+                    raise ValueError(f"expected a (name, path) pair, got {m!r}")
+                specs.append(pair)
+    flags: list[str] = []
+    for name, path in specs:
+        flags += ["--model", f"{name}={path}" if name else str(path)]
+    if arhmm:
+        flags += ["--arhmm", str(arhmm)]
+    if hmm:
+        flags += ["--hmm", str(hmm)]
+    return flags
+
+
 def run_report(csv: str = "rvi38_analysis.csv",
-               arhmm: str | None = "arhmm_rvi38_stream_delta.pkl",
-               hmm: str | None = "hmm_rvi38_stream_delta.pkl",
+               models=None,
+               primary: str | None = None,
+               arhmm: str | None = None,
+               hmm: str | None = None,
                labels: str | None = "RVI_38_labels.mat",
                outdir: str = "rvi38_out",
                fast: bool = False,
                fps: float = 25.0,
                stream: str = "auto",
-               models: str = "both",
                controls: str = "full",
                synchrony: bool = True,
                fidgetyfind: bool = True,
@@ -449,10 +548,25 @@ def run_report(csv: str = "rvi38_analysis.csv",
                **overrides) -> dict:
     """Run every construct and return results, summary and figure paths.
 
-    Parameters mirror the command line of :mod:`run_analysis`; the defaults are
-    the ones that produce the complete picture. Set ``fast=True`` for a smoke
-    run (every resampling count is cut ~20x, so the p-values are coarse), and
-    ``synchrony=False`` to skip WCLR-PP, which is by far the slowest block.
+    ``models`` says which fitted models to analyse, and takes whatever is
+    natural to write::
+
+        models="arhmm_k11.pkl"                        # one model
+        models=["arhmm_k11.pkl", "arhmm_k14.pkl"]     # two, named after files
+        models={"K=11": "arhmm_k11.pkl",              # two, named by you
+                "K=14": "arhmm_k14.pkl"}
+
+    They may be any mix of kinds -- two AR-HMMs, an AR-HMM and a Gaussian HMM,
+    five of anything. The first is the primary model (the clinical layer and
+    the figures are computed on it) unless ``primary`` names another; every
+    other is a replication, its fluency and mixing time correlated against the
+    primary's. With nothing given, the two legacy default filenames are tried.
+
+    The remaining parameters mirror the command line of :mod:`run_analysis`;
+    the defaults are the ones that produce the complete picture. Set
+    ``fast=True`` for a smoke run (every resampling count is cut ~20x, so the
+    p-values are coarse), and ``synchrony=False`` to skip WCLR-PP, which is by
+    far the slowest block.
 
     ``show`` displays the figures when called from a notebook: ``"main"`` for
     the cohort figures, ``"all"`` to include every per-recording panel, or a
@@ -466,12 +580,10 @@ def run_report(csv: str = "rvi38_analysis.csv",
     it is true.
     """
     argv = ["--csv", str(csv), "--outdir", str(outdir), "--fps", str(fps),
-            "--stream", str(stream), "--models", str(models),
-            "--controls", str(controls)]
-    if arhmm:
-        argv += ["--arhmm", str(arhmm)]
-    if hmm:
-        argv += ["--hmm", str(hmm)]
+            "--stream", str(stream), "--controls", str(controls)]
+    argv += model_flags(models, arhmm, hmm)
+    if primary:
+        argv += ["--primary", str(primary)]
     if labels:
         argv += ["--labels", str(labels)]
     if fast:
@@ -535,12 +647,16 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--csv", default="rvi38_analysis.csv")
-    ap.add_argument("--arhmm", default="arhmm_rvi38_stream_delta.pkl")
-    ap.add_argument("--hmm", default="hmm_rvi38_stream_delta.pkl")
+    ap.add_argument("--model", action="append", metavar="[NAME=]PATH",
+                    help="a fitted model to analyse; repeat for as many as "
+                         "you like. The first is the primary model.")
+    ap.add_argument("--primary", metavar="NAME")
     ap.add_argument("--labels", default="RVI_38_labels.mat")
     ap.add_argument("--outdir", default="rvi38_out")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--no-synchrony", action="store_true")
     a = ap.parse_args()
-    run_report(csv=a.csv, arhmm=a.arhmm, hmm=a.hmm, labels=a.labels,
-               outdir=a.outdir, fast=a.fast, synchrony=not a.no_synchrony)
+    spec = [tuple(m.split("=", 1)) if "=" in m else m for m in (a.model or [])]
+    run_report(csv=a.csv, models=spec or None, primary=a.primary,
+               labels=a.labels, outdir=a.outdir, fast=a.fast,
+               synchrony=not a.no_synchrony)

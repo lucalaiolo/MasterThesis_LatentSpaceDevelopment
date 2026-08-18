@@ -440,7 +440,10 @@ def test_fluency_curve():
 
 def test_stats_helpers():
     print("\n§10 helpers")
-    check("Holm adjustment is monotone and bounded",
+    # Holm and the minimum detectable effect are retained in a1_stats but are
+    # not part of the reported procedure; they are checked so that "retained"
+    # does not quietly become "broken".
+    check("Holm adjustment is monotone and bounded [retained, not reported]",
           np.all(ST.holm([0.01, 0.04, 0.5]) >= [0.01, 0.04, 0.5])
           and ST.holm([0.5, 0.5])[0] <= 1.0)
     check("Spearman-Brown of r = 0.5 is 2/3",
@@ -459,7 +462,8 @@ def test_stats_helpers():
     check("BCa 95% interval covers the true mean at ~95%", 0.88 <= rate <= 1.0,
           f"coverage {rate:.1%} over {reps} replicates")
     mde = ST.min_detectable_effect(6, 32)
-    check("minimum detectable AUC is large at 6 vs 32",
+    check("minimum detectable AUC is large at 6 vs 32 "
+          "[retained, not reported]",
           0.5 < mde["auc"] < 1.0, f"AUC {mde['auc']:.3f}")
     g = G.estimability_gate([1, 2, 3, 4], [0.9, 1.9, 2.9, 3.9],
                             [1.1, 2.1, 3.1, 4.1])
@@ -865,6 +869,104 @@ def test_fidgetyfind_planted_cohort():
           f"p_corrected = {t['p_corrected'][0]:.3f}")
 
 
+# ---------------------------------------------------------------------------
+def test_reported_inference():
+    """The endpoint contrast, against the definitions it is written from."""
+    print("\nReported inference: exact Mann-Whitney, AUC, bootstrap interval")
+    rng = np.random.default_rng(11)
+    x = rng.normal(0.6, 1, 6)             # abnormal
+    y = rng.normal(0.0, 1, 12)            # normal
+    r = ST.mannwhitney(x, y, boot=2000, seed=3)
+
+    # U as the double sum with the half-weight tie rule, and AUC = U / (n1 n0)
+    n1, n2 = len(x), len(y)
+    U = sum((xa > yb) + 0.5 * (xa == yb) for xa in x for yb in y)
+    check("U is the double sum with half-weight ties",
+          abs(r["U"] - U) < 1e-9, f"{r['U']:.1f} vs {U:.1f}")
+    check("AUC = U / (n1 n0)", abs(r["auc"] - U / (n1 * n2)) < 1e-12,
+          f"{r['auc']:.6f}")
+
+    # mid-ranks: a tied pair contributes exactly half
+    xt, yt = np.array([1.0, 2.0, 3.0]), np.array([3.0, 4.0, 5.0])
+    rt = ST.mannwhitney(xt, yt, boot=0)
+    check("ties are counted at one half (mid-ranks)",
+          abs(rt["auc"] - 0.5 / 9) < 1e-12, f"AUC {rt['auc']:.4f}")
+
+    # the exact two-sided p is the |AUC - 1/2| tail of the enumerated null
+    xs, ys = np.array([4.0, 5.0, 9.0]), np.array([1.0, 2.0, 3.0, 6.0, 7.0])
+    obs = ST.mannwhitney(xs, ys, exact=True, boot=0)
+    pool = np.concatenate([xs, ys])
+    ranks = stats.rankdata(pool)
+    n1s = len(xs)
+    tail = tot = 0
+    for idx in itertools.combinations(range(len(pool)), n1s):
+        R1 = ranks[list(idx)].sum()
+        auc = (R1 - n1s * (n1s + 1) / 2) / (n1s * (len(pool) - n1s))
+        tot += 1
+        tail += abs(auc - 0.5) >= abs(obs["auc"] - 0.5) - 1e-12
+    check("two-sided p is the exact |AUC - 1/2| tail over every assignment",
+          abs(obs["p"] - tail / tot) < 1e-12,
+          f"{obs['p']:.6f} vs {tail}/{tot}")
+    check("the null is enumerated, not sampled",
+          "exact enumeration" in obs["method"], obs["method"])
+
+    # the reported interval is the stratified percentile bootstrap
+    bs = ST.bootstrap_auc_ci(x, y, n_boot=2000, alpha=0.05, seed=3)
+    check("the reported interval is the stratified percentile bootstrap",
+          abs(r["auc_lo"] - bs["lo"]) < 1e-12
+          and abs(r["auc_hi"] - bs["hi"]) < 1e-12,
+          f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}]")
+    check("the interval stays inside [0, 1]",
+          0.0 <= r["auc_lo"] <= r["auc_hi"] <= 1.0)
+    check("the normal approximation is not reported",
+          "hm_clipped" not in r and "auc_lo_boot" not in r)
+    check("the interval brackets the point estimate",
+          r["auc_lo"] <= r["auc"] <= r["auc_hi"])
+
+    # perfect separation: the interval degenerates to the boundary, not past it
+    r2 = ST.mannwhitney(np.arange(100.0, 106.0), np.arange(6.0), boot=500,
+                        seed=0)
+    check("perfect separation gives AUC 1 and an interval at the boundary",
+          r2["auc"] == 1.0 and r2["auc_hi"] == 1.0 and r2["auc_lo"] <= 1.0)
+
+
+def test_correlation_analysis():
+    """The reported correlations, against scipy."""
+    print("\nCorrelation analysis")
+    rng = np.random.default_rng(12)
+    n = 38
+    cov = rng.normal(size=n)
+    end = 0.7 * cov + rng.normal(size=n)
+    r = ST.correlate(end, cov)
+    pr = stats.pearsonr(end, cov)
+    sp = stats.spearmanr(end, cov)
+    check("Pearson matches scipy",
+          abs(r["pearson_r"] - pr[0]) < 1e-12
+          and abs(r["pearson_p"] - pr[1]) < 1e-12)
+    check("Spearman matches scipy",
+          abs(r["spearman_rho"] - sp[0]) < 1e-12
+          and abs(r["spearman_p"] - sp[1]) < 1e-12)
+    check("a monotone but nonlinear covariate ranks perfectly",
+          abs(ST.correlate(np.exp(cov), cov)["spearman_rho"] - 1.0) < 1e-12)
+
+    v = rng.normal(size=n)
+    nan = v.copy()
+    nan[:3] = np.nan
+    check("non-finite entries are dropped pairwise",
+          ST.correlate(nan, cov)["n"] == n - 3)
+    check("a constant vector correlates with nothing, without raising",
+          not np.isfinite(ST.correlate(np.ones(n), cov)["pearson_r"]))
+
+    tab = ST.correlation_table({"phi": end, "kemeny": v},
+                               {"entropy": cov, "dwell": v, "logL": cov})
+    check("the table covers every endpoint against every covariate",
+          sorted(tab) == ["kemeny", "phi"]
+          and all(sorted(row) == ["dwell", "entropy", "logL"]
+                  for row in tab.values()))
+    check("an endpoint against itself is rho = 1",
+          abs(tab["kemeny"]["dwell"]["spearman_rho"] - 1.0) < 1e-12)
+
+
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -877,6 +979,8 @@ def main():
     test_kemeny()
     test_jump_chain_and_degeneracy()
     test_exact_mannwhitney()
+    test_reported_inference()
+    test_correlation_analysis()
     test_fluency()
     test_fluency_curve()
     test_stats_helpers()

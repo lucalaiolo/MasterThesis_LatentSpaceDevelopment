@@ -559,12 +559,252 @@ def fig_velocity_lateral(res, results, outdir):
         "hatched = leg)")
 
 
+# ---------------------------------------------------------------------------
+# FidgetyFind (the literature's detector)
+# ---------------------------------------------------------------------------
+def _ff_ylabel():
+    return "normalised direction entropy\n(1 = many directions, 0 = one)"
+
+
+def fig_fidgetyfind_subject(res, results, outdir):
+    """Per-infant FidgetyFind scores, by group.
+
+    Three readings of the same windows: the score over all six chains, the
+    hips-only score (the part of the published method that needs no adaptation
+    to a keypoint-only cohort), and the fraction of assessable windows that
+    clear the fidgety-positive threshold. Low is the abnormal pole — absent
+    fidgety movement means less direction variety — so an AUC below 0.5 is the
+    expected direction.
+    """
+    ff = results.get("fidgetyfind")
+    if not ff:
+        return None
+    y = np.asarray(results["labels"]).astype(int)
+    theta = ff.get("params", {}).get("theta", 0.5)
+    fields = [("score", "FidgetyFind score\n(mean over the six chains)"),
+              ("score_proximal", "hips only\n(the unadapted published path)"),
+              ("positive_rate_mean",
+               f"fidgety-window rate\n(entropy $\\geq$ {theta:g})")]
+    fig, axes = plt.subplots(1, 3, figsize=(11, 4.2))
+    rng = np.random.default_rng(0)
+    for ax, (key, lab) in zip(axes, fields):
+        v = np.asarray(ff[key], float)
+        for gi, (grp, col) in enumerate(((0, NEG), (1, POS))):
+            _dot_column(ax, gi, v[y == grp], col, rng=rng)
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["normal", "abnormal"])
+        ax.set_xlim(-0.6, 1.6)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_title(lab, fontsize=9, loc="left")
+        t = ff.get("tests", {}).get(key)
+        if t:
+            ax.annotate(f"AUC {t['auc']:.2f}, p={t['p']:.3f}",
+                        xy=(0.02, 0.06), xycoords="axes fraction", fontsize=8)
+    axes[0].set_ylabel(_ff_ylabel())
+    fig.suptitle("FidgetyFind — fidgety movement detected from the keypoints "
+                 "(low = absent fidgety movement, the abnormal pole)",
+                 fontsize=10, y=1.06)
+    return _save(fig, outdir, "fidgetyfind_subject")
+
+
+def fig_fidgetyfind_chains(res, results, outdir):
+    """Per-chain FidgetyFind entropy: six panels, one per scored body part.
+
+    Each panel is one infant per dot, the bar the group median, and the title
+    the max-statistic-corrected permutation p-value for that chain — so every
+    chain is visible whatever any one of them shows.
+    """
+    ff = results.get("fidgetyfind")
+    if not ff:
+        return None
+    M = np.asarray(ff["median_entropy"], float)
+    y = np.asarray(results["labels"]).astype(int)
+    names = list(ff["chains"])
+    klass = list(ff.get("chain_class", [""] * len(names)))
+    test = ff.get("chain_test")
+    fig, axes = plt.subplots(2, 3, figsize=(12, 7.2), sharey=True)
+    rng = np.random.default_rng(0)
+    for ci in range(len(names)):
+        ax = axes[ci // 3][ci % 3]
+        for gi, (grp, col) in enumerate(((0, NEG), (1, POS))):
+            _dot_column(ax, gi, M[y == grp, ci], col, rng=rng)
+        extra = ""
+        if test is not None:
+            extra = (f"   $\\Delta$={test['observed'][ci]:+.3f}"
+                     f", p={test['p_corrected'][ci]:.3f}")
+        ax.set_title(f"{names[ci]}  ({klass[ci]}){extra}", fontsize=9,
+                     loc="left")
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["normal", "abnormal"])
+        ax.set_xlim(-0.6, 1.6)
+        ax.set_ylim(-0.02, 1.02)
+        if ci % 3 == 0:
+            ax.set_ylabel(_ff_ylabel())
+    fig.suptitle("FidgetyFind per body part — median window entropy "
+                 "(red = abnormal)", fontsize=10, y=1.01)
+    return _save(fig, outdir, "fidgetyfind_chains")
+
+
+def fig_fidgetyfind_windows(res, results, outdir):
+    """What the windows themselves look like, before any per-infant reduction.
+
+    Left: the pooled distribution of every scoreable window's entropy, by
+    group — the spike at zero is the windows that were assessable and held no
+    small, directionally varied movement. Right: how much of each recording
+    could be scored at all, which is the honest limit on the construct.
+    """
+    ff = results.get("fidgetyfind")
+    if not ff or "window_entropy" not in ff:
+        return None
+    y = np.asarray(results["labels"]).astype(int)
+    E = [np.asarray(e, float) for e in ff["window_entropy"]]
+    pooled = {g: np.concatenate([E[i].ravel() for i in np.flatnonzero(y == g)])
+              for g in (0, 1) if (y == g).any()}
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.0))
+    ax = axes[0]
+    bins = np.linspace(0, 1, 26)
+    for g, col, nm in ((0, NEG, "normal"), (1, POS, "abnormal")):
+        if g not in pooled:
+            continue
+        v = pooled[g]
+        v = v[np.isfinite(v)]
+        ax.hist(v, bins=bins, density=True, histtype="step", lw=1.8,
+                color=col, label=f"{nm} ({v.size:,} windows)")
+    ax.set_xlabel(_ff_ylabel())
+    ax.set_ylabel("density")
+    ax.legend(fontsize=8, frameon=False)
+    ax.set_title("Every scoreable window", fontsize=9, loc="left")
+
+    ax = axes[1]
+    cov = np.asarray(ff["coverage_mean"], float)
+    rng = np.random.default_rng(0)
+    for gi, (grp, col) in enumerate(((0, NEG), (1, POS))):
+        _dot_column(ax, gi, cov[y == grp], col, rng=rng)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["normal", "abnormal"])
+    ax.set_xlim(-0.6, 1.6)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_title("Fraction of windows assessable at all", fontsize=9,
+                 loc="left")
+    fig.suptitle("FidgetyFind window-level view — a window is voided when the "
+                 "keypoints are unreliable or the limb is being transported",
+                 fontsize=10, y=1.04)
+    return _save(fig, outdir, "fidgetyfind_windows")
+
+
+def fig_fidgetyfind_agreement(res, results, outdir):
+    """Does the literature construct rank the infants as ours do?
+
+    FidgetyFind against fluency, mixing time and whole-body coupling, one dot
+    per infant, with the Spearman correlation each panel's title reports. These
+    are three independent measurements of the same recordings; agreement is
+    informative, disagreement equally so.
+    """
+    ff = results.get("fidgetyfind")
+    if not ff:
+        return None
+    primary = results["primary"]
+    y = np.asarray(results["labels"]).astype(int)
+    score = np.asarray(ff["score"], float)
+    others = []
+    if primary in results:
+        others.append(("fluency $\\Phi$",
+                       np.asarray(results[primary]["phi"]["excess"], float),
+                       ff.get("agreement", {}).get("phi")))
+        others.append(("mixing time (Kemeny, jumps)",
+                       np.asarray(results[primary]["kemeny_per_subject"],
+                                  float),
+                       ff.get("agreement", {}).get("kemeny")))
+    wc = results.get("wclrpp")
+    if wc and "mean_F" in wc:
+        others.append(("whole-body coupling (mean $F$)",
+                       np.asarray(wc["mean_F"], float),
+                       ff.get("agreement", {}).get("wclrpp_mean_F")))
+    if not others:
+        return None
+    fig, axes = plt.subplots(1, len(others), figsize=(3.7 * len(others), 3.8))
+    axes = np.atleast_1d(axes)
+    for ax, (lab, v, agr) in zip(axes, others):
+        for grp, col in ((0, NEG), (1, POS)):
+            m = y == grp
+            ax.scatter(v[m], score[m], s=22, color=col, alpha=0.85,
+                       edgecolor="none",
+                       label="abnormal" if grp else "normal")
+        ax.set_xlabel(lab)
+        ax.set_ylabel("FidgetyFind score")
+        ttl = lab if agr is None else (f"{lab}\n$\\rho$ = {agr['rho']:+.2f}, "
+                                       f"p = {agr['p']:.3f}")
+        ax.set_title(ttl, fontsize=9, loc="left")
+    axes[0].legend(fontsize=8, frameon=False, loc="best")
+    fig.suptitle("FidgetyFind against the model-based constructs", fontsize=10,
+                 y=1.08)
+    return _save(fig, outdir, "fidgetyfind_agreement")
+
+
+def fidgetyfind_panels(results, outdir):
+    """One FidgetyFind timeline per recording, under ``figures/fidgetyfind/``.
+
+    Each panel unrolls the per-window entropy along the recording for all six
+    chains, with the fidgety-positive threshold marked and voided windows left
+    as gaps — the per-recording view behind the cohort figures. Returns the
+    list of PNG paths.
+    """
+    ff = results.get("fidgetyfind")
+    if not ff or "window_entropy" not in ff:
+        return []
+    ids = list(results["video_names"])
+    y = np.asarray(results["labels"]).astype(int)
+    names = list(ff["chains"])
+    theta = float(ff.get("params", {}).get("theta", 0.5))
+    fps = float(ff.get("params", {}).get("fps", 25.0))
+    fdir = os.path.join(outdir, "figures", "fidgetyfind")
+    os.makedirs(fdir, exist_ok=True)
+    cmap = plt.get_cmap("tab10")
+    made = []
+    for i, ident in enumerate(ids):
+        E = np.asarray(ff["window_entropy"][i], float)
+        starts = np.asarray(ff["window_starts"][i], float)
+        if E.size == 0:
+            continue
+        t = starts / fps
+        fig, ax = plt.subplots(figsize=(9.0, 3.6))
+        for ci, nm in enumerate(names):
+            ax.plot(t, E[:, ci], lw=1.0, alpha=0.85, color=cmap(ci), label=nm)
+        med = np.nanmedian(E, axis=1)
+        ax.plot(t, med, lw=2.2, color="k", alpha=0.8,
+                label="median over chains")
+        ax.axhline(theta, color=GREY, ls="--", lw=0.9)
+        ax.annotate(f"fidgety-positive threshold {theta:g}",
+                    xy=(t[0], theta), xytext=(2, 3), textcoords="offset points",
+                    fontsize=7, color=GREY)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_xlabel("time (s)")
+        ax.set_ylabel(_ff_ylabel())
+        grp = "abnormal" if y[i] == 1 else "normal"
+        ax.set_title(f"{ident}  ({grp}) — FidgetyFind, score "
+                     f"{np.asarray(ff['score'], float)[i]:.3f}, "
+                     f"{np.isfinite(E).mean():.0%} of windows assessable",
+                     fontsize=9, loc="left")
+        ax.legend(fontsize=7, frameon=False, ncol=7, loc="upper center",
+                  bbox_to_anchor=(0.5, -0.22))
+        made.append(_save(fig, fdir, _safe_name(ident)))
+    return made
+
+
+def _safe_name(name):
+    keep = "-_.() "
+    return "".join(c if (c.isalnum() or c in keep) else "_"
+                   for c in str(name)).strip().replace(" ", "_") or "recording"
+
+
 ALL = [fig_state_signature, fig_similarity, fig_similarity_channels,
        fig_fluency_per_subject,
        fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage, fig_split_half,
        fig_auc, fig_loo, fig_redundancy, fig_gates,
        fig_wclrpp_pairs, fig_wclrpp_summary,
+       fig_fidgetyfind_subject, fig_fidgetyfind_chains,
+       fig_fidgetyfind_windows, fig_fidgetyfind_agreement,
        fig_velocity_regions, fig_velocity_lateral]
 
 

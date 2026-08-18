@@ -21,6 +21,7 @@ import a1_core as A          # noqa: E402
 import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
 import a8_movement as MV     # noqa: E402
+import a10_fidgetyfind as FF  # noqa: E402
 import fluency_curve as FC   # noqa: E402
 
 PASS, FAIL = [], []
@@ -649,6 +650,221 @@ def test_wclrpp_coupling():
           f"min p = {tn['p_corrected'].min():.3f}")
 
 
+# ---------------------------------------------------------------------------
+def _ff_skeleton(F, moves, rng=None, base=None):
+    """A skeleton at rest with a prescribed trajectory for the moving joints.
+
+    ``moves`` maps a joint index to an ``(F, 2)`` array of positions. Every
+    other joint is held at its resting place, so each chain's entropy is a
+    function of exactly what was planted.
+    """
+    import make_synthetic as MS
+    x = np.tile(MS.BASE if base is None else base, (F, 1, 1)).astype(float)
+    for j, track in moves.items():
+        x[:, j] = track
+    return x
+
+
+def _ff_walk(F, start, step_len, angles, radius=0.12):
+    """A joint stepping ``step_len`` per frame, kept inside ``radius`` of home.
+
+    The bound matters: an unbounded walk drifts away from its parent joint, and
+    since FidgetyFind measures every displacement as a fraction of the parent
+    limb, a drifting joint silently changes the very scale under test.
+    """
+    home = np.array(start, float)
+    pos = home.copy()
+    out = np.zeros((F, 2))
+    for t in range(F):
+        out[t] = pos
+        step = step_len * np.array([np.cos(angles[t]), np.sin(angles[t])])
+        if np.linalg.norm(pos + step - home) > radius:
+            step = -step
+        pos = pos + step
+    return out
+
+
+def test_fidgetyfind_entropy():
+    """The direction histogram behind FidgetyFind, on inputs with a known answer."""
+    print("\nFidgetyFind direction entropy")
+    rng = np.random.default_rng(0)
+    check("one direction gives entropy 0",
+          abs(FF.direction_entropy(np.full(200, 0.4), bins=8)) < 1e-4)
+    two = np.tile([0.4, 0.4 - np.pi], 100)
+    check("two opposite directions give log(2)/log(8) = 1/3",
+          abs(FF.direction_entropy(two, bins=8) - np.log(2) / np.log(8)) < 1e-4,
+          f"got {FF.direction_entropy(two, bins=8):.4f}")
+    unif = np.linspace(-np.pi, np.pi, 8001)[:-1]
+    check("uniform directions give entropy 1",
+          abs(FF.direction_entropy(unif, bins=8) - 1.0) < 1e-3,
+          f"got {FF.direction_entropy(unif, bins=8):.4f}")
+    check("angles outside [-pi, pi] are wrapped, not discarded",
+          abs(FF.direction_entropy(two + 2 * np.pi, bins=8)
+              - FF.direction_entropy(two, bins=8)) < 1e-9)
+    check("entropy never leaves [0, 1]",
+          all(-1e-9 <= FF.direction_entropy(rng.uniform(-np.pi, np.pi, n),
+                                            bins=8) <= 1 + 1e-9
+              for n in (10, 50, 500)))
+
+
+def test_fidgetyfind_windows():
+    """Window gating: what is scored, what is scored zero, what is voided."""
+    print("\nFidgetyFind window gates")
+    import make_synthetic as MS
+    rng = np.random.default_rng(1)
+    F = 600
+    hip, knee = FF.CHAINS["R hip"]          # (parent, moving joint)
+    ref = float(np.linalg.norm(MS.BASE[hip] - MS.BASE[knee]))
+    p = FF.FFParams(fps=25.0, start_frame=0, smooth=False)
+    mid = 0.5 * (p.minr + p.maxr) / 100.0 / p.rate_scale * ref   # in-band step
+
+    ang = rng.uniform(-np.pi, np.pi, F)
+    x = _ff_skeleton(F, {knee: _ff_walk(F, MS.BASE[knee], mid, ang)})
+    E = FF.fidgetyfind_recording(x, None, p)["E"][:, 0]
+    check("in-band steps in random directions score near 1",
+          np.nanmedian(E) > 0.85, f"median entropy {np.nanmedian(E):.3f}")
+
+    # A joint cannot move in one direction for ever, so the stereotyped case is
+    # a bounded oscillation along one axis: two opposite directions out of the
+    # eight bins, which is exactly log(2)/log(8).
+    x = _ff_skeleton(F, {knee: _ff_walk(F, MS.BASE[knee], mid,
+                                        np.zeros(F) + 0.7)})
+    E = FF.fidgetyfind_recording(x, None, p)["E"][:, 0]
+    check("movement confined to one axis scores log(2)/log(8)",
+          abs(float(np.nanmedian(E)) - np.log(2) / np.log(8)) < 1e-6,
+          f"median entropy {np.nanmedian(E):.3f}")
+
+    x = _ff_skeleton(F, {})                     # nothing moves at all
+    E = FF.fidgetyfind_recording(x, None, p)["E"][:, 0]
+    check("a still recording scores 0, not NaN (it was assessable)",
+          np.isfinite(E).all() and np.nanmax(np.abs(E)) < 1e-6)
+
+    big = 5 * p.maxr / 100.0 / p.rate_scale * ref
+    x = _ff_skeleton(F, {knee: _ff_walk(F, MS.BASE[knee], big,
+                                        np.zeros(F) + 0.7)})
+    E = FF.fidgetyfind_recording(x, None, p)["E"][:, 0]
+    check("movement far above the band voids the window (NaN, not 0)",
+          not np.isfinite(E).any(),
+          f"{int(np.isfinite(E).sum())} of {E.size} windows survived")
+
+    o = np.ones((F, 15), np.uint8)
+    o[::2, knee] = 0                            # half the frames uninterpolated
+    x = _ff_skeleton(F, {knee: _ff_walk(F, MS.BASE[knee], mid, ang)})
+    E = FF.fidgetyfind_recording(x, o, p)["E"][:, 0]
+    check("unobserved keypoints void the window",
+          not np.isfinite(E).any(),
+          f"{int(np.isfinite(E).sum())} of {E.size} windows survived")
+
+
+def test_fidgetyfind_invariance():
+    """The measure is built to be blind to camera pose and to frame rate."""
+    print("\nFidgetyFind invariances")
+    import make_synthetic as MS
+    rng = np.random.default_rng(2)
+    F = 600
+    hip, knee = FF.CHAINS["R hip"]
+    ref = float(np.linalg.norm(MS.BASE[hip] - MS.BASE[knee]))
+    p = FF.FFParams(fps=25.0, start_frame=0, smooth=False)
+    mid = 0.5 * (p.minr + p.maxr) / 100.0 / p.rate_scale * ref
+    ang = rng.uniform(-np.pi, np.pi, F)
+    x = _ff_skeleton(F, {knee: _ff_walk(F, MS.BASE[knee], mid, ang)})
+    E0 = FF.fidgetyfind_recording(x, None, p)["E"]
+
+    th = 0.7
+    R = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    E1 = FF.fidgetyfind_recording(x @ R.T, None, p)["E"]
+    check("rigid rotation of the whole skeleton leaves every entropy unchanged",
+          np.allclose(np.nan_to_num(E0, nan=-1), np.nan_to_num(E1, nan=-1),
+                      atol=1e-9))
+
+    E2 = FF.fidgetyfind_recording(3.7 * x, None, p)["E"]
+    check("uniform scaling leaves every entropy unchanged",
+          np.allclose(np.nan_to_num(E0, nan=-1), np.nan_to_num(E2, nan=-1),
+                      atol=1e-9))
+
+    E3 = FF.fidgetyfind_recording(x + np.array([2.0, -5.0]), None, p)["E"]
+    check("translation leaves every entropy unchanged",
+          np.allclose(np.nan_to_num(E0, nan=-1), np.nan_to_num(E3, nan=-1),
+                      atol=1e-9))
+
+    m25 = FF.motion_features(x, None, p)["magnitude"]
+    m30 = FF.motion_features(x, None, FF.FFParams(fps=30.0, start_frame=0,
+                                                  smooth=False))["magnitude"]
+    check("the same trajectory read at 30 fps scores 30/25 larger per frame",
+          np.allclose(m30, m25 * 30.0 / 25.0, atol=1e-9))
+
+
+def test_fidgetyfind_smoothing_and_reduction():
+    """The smoother does what it is there for, and the reduction is what it says."""
+    print("\nFidgetyFind smoothing and per-recording reduction")
+    rng = np.random.default_rng(3)
+    F, J = 400, 15
+    flat = np.tile(np.arange(J, dtype=float)[:, None] * np.ones(2), (F, 1, 1))
+    check("smoothing a motionless recording changes nothing",
+          np.allclose(FF.smooth_tracks(flat, None, 5, 2.0), flat, atol=1e-9))
+
+    jit = flat + rng.normal(0, 0.01, (F, J, 2))
+    sm = FF.smooth_tracks(jit, None, 5, 2.0)
+    raw_step = np.linalg.norm(np.diff(jit, axis=0), axis=-1).mean()
+    sm_step = np.linalg.norm(np.diff(sm, axis=0), axis=-1).mean()
+    check("smoothing shrinks frame-to-frame jitter", sm_step < 0.6 * raw_step,
+          f"{sm_step:.4f} vs {raw_step:.4f} per frame")
+
+    conf = np.ones((F, J))
+    conf[10] = 0.0
+    jit2 = jit.copy()
+    jit2[10] += 5.0                     # a wild, unobserved frame
+    sm2 = FF.smooth_tracks(jit2, conf, 5, 2.0)
+    check("an unobserved frame carries no weight into its neighbours",
+          np.allclose(sm2[8], FF.smooth_tracks(jit, conf, 5, 2.0)[8], atol=1e-9))
+
+    E = np.array([[0.9, 0.1], [0.7, np.nan], [np.nan, 0.3], [0.5, 0.2]])
+    agg = FF.aggregate(E, ("R hip", "L hip"), FF.FFParams(theta=0.5))
+    check("per-chain median ignores voided windows",
+          np.allclose(agg["median_entropy"], [0.7, 0.2]),
+          f"got {np.round(agg['median_entropy'], 3).tolist()}")
+    check("the score is the mean of the per-chain medians",
+          abs(agg["score"] - 0.45) < 1e-9, f"got {agg['score']:.4f}")
+    check("coverage is the fraction of windows that could be scored",
+          np.allclose(agg["coverage"], [0.75, 0.75]))
+    check("the fidgety-window rate counts windows at or above theta",
+          np.allclose(agg["positive_rate"], [1.0, 0.0]),
+          f"got {np.round(agg['positive_rate'], 3).tolist()}")
+
+
+def test_fidgetyfind_planted_cohort():
+    """The planted signal of make_synthetic is recovered, with the right sign."""
+    print("\nFidgetyFind on the planted cohort")
+    import make_synthetic as MS
+    rng = np.random.default_rng(4)
+    F = 1200
+    p = FF.FFParams(fps=25.0, start_frame=0)
+    poses = []
+    y = []
+    for present in (True,) * 8 + (False,) * 4:
+        moves = {}
+        for moving, parent in MS.FIDGETY_CHAINS.items():
+            ref = float(np.linalg.norm(MS.BASE[moving] - MS.BASE[parent]))
+            moves[moving] = MS.BASE[moving] + ref * MS.fidgety_layer(
+                F, rng, present)
+        poses.append(_ff_skeleton(F, moves))
+        y.append(0 if present else 1)
+    ds = FF.fidgetyfind_dataset(poses, None, p)
+    y = np.array(y)
+    lo, hi = ds["score"][y == 1], ds["score"][y == 0]
+    check("planted fidgety movement scores high",
+          float(np.nanmin(hi)) > 0.5, f"min normal score {np.nanmin(hi):.3f}")
+    check("planted absence scores low",
+          float(np.nanmax(lo)) < 0.2, f"max abnormal score {np.nanmax(lo):.3f}")
+    check("every recording is separated in the right direction",
+          float(np.nanmax(lo)) < float(np.nanmin(hi)))
+    t = ST.maxstat_label_test(ds["median_entropy"], y, n_perm=2000, seed=0,
+                              names=ds["chains"])
+    check("the max-statistic test sees it on the hips",
+          float(t["p_corrected"][0]) <= 0.05,
+          f"p_corrected = {t['p_corrected'][0]:.3f}")
+
+
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -668,6 +884,11 @@ def main():
     test_wclrpp_peakpick()
     test_wclrpp_reduction()
     test_wclrpp_coupling()
+    test_fidgetyfind_entropy()
+    test_fidgetyfind_windows()
+    test_fidgetyfind_invariance()
+    test_fidgetyfind_smoothing_and_reduction()
+    test_fidgetyfind_planted_cohort()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

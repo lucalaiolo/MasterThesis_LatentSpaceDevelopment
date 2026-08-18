@@ -411,3 +411,48 @@ def loo_auc(x, y, exact: bool = True) -> list:
         r = mannwhitney(x, y[:i] + y[i + 1:], exact=exact)
         out.append({"dropped": "neg", "index": i, "auc": r["auc"], "p": r["p"]})
     return out
+
+
+# ---------------------------------------------------------------------------
+# family of features tested together: Westfall-Young maximum-statistic
+# ---------------------------------------------------------------------------
+def median_contrast(M: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Median difference (positive − negative), one value per column."""
+    with np.errstate(invalid="ignore"):
+        return np.nanmedian(M[y == 1], axis=0) - np.nanmedian(M[y == 0], axis=0)
+
+
+def maxstat_label_test(M, labels, n_perm: int = 10_000, seed: int = 0,
+                       names=None, contrast=median_contrast) -> dict:
+    """Label-permutation test over a family of features, max-statistic corrected.
+
+    ``M`` is ``(n_subjects, n_features)`` and the recording is the exchangeable
+    unit, so only the labels are permuted. Family-wise error across the columns
+    is controlled by the Westfall-Young maximum-statistic procedure, and **every
+    column is reported whatever any one of them shows**. The columns must share
+    a scale (the maximum is taken without standardisation), which holds for the
+    families this package tests: coupled-time fractions and normalised
+    entropies both live on ``[0, 1]``.
+    """
+    M = np.asarray(M, float)
+    y = np.asarray(labels).astype(int)
+    if len(y) != len(M):
+        raise ValueError(f"{len(M)} recordings but {len(y)} labels")
+    n, n1 = len(y), int(y.sum())
+    if n1 == 0 or n1 == n:
+        raise ValueError("labels are degenerate (one group is empty)")
+    observed = contrast(M, y)
+    rng = np.random.default_rng(seed)
+    null = np.empty((n_perm, M.shape[1]))
+    for b in range(n_perm):
+        yp = np.zeros(n, int)
+        yp[rng.choice(n, n1, replace=False)] = 1
+        null[b] = contrast(M, yp)
+    null_max = np.nanmax(np.abs(null), axis=1)
+    a = np.abs(observed)
+    return {"observed": observed,
+            "p_corrected": (1 + (null_max[:, None] >= a[None, :]).sum(0)) / (1 + n_perm),
+            "p_uncorrected": (1 + (np.abs(null) >= a[None, :]).sum(0)) / (1 + n_perm),
+            "null_max": null_max, "n_perm": n_perm,
+            "names": None if names is None else tuple(names),
+            "n_pos": n1, "n_neg": n - n1}

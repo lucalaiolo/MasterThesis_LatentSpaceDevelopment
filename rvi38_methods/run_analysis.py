@@ -31,6 +31,7 @@ import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
 import a8_movement as MV     # noqa: E402
 import a9_wclrpp as WP       # noqa: E402
+import a10_fidgetyfind as FF  # noqa: E402
 import build_pose            # noqa: E402
 import load_models as L      # noqa: E402
 
@@ -52,6 +53,22 @@ class Tee:
     def flush(self):
         self.stdout.flush()
         self.f.flush()
+
+    def isatty(self):
+        return False
+
+    def close(self):
+        """Restore the previous stdout and close the log.
+
+        The runner is also called in-process (``report.run_report``, a Colab
+        cell), where leaving the Tee installed would nest one inside the next
+        on every rerun.
+        """
+        try:
+            self.f.close()
+        finally:
+            if sys.stdout is self:
+                sys.stdout = self.stdout
 
 
 def _json_safe(o):
@@ -509,6 +526,140 @@ def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
 
 
 # ---------------------------------------------------------------------------
+# FidgetyFind (Morais et al., 2023): the literature's fidgety-movement detector
+# ---------------------------------------------------------------------------
+def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
+    """Score the cohort with the published detector and contrast the groups.
+
+    This is the external yardstick: a construct from the literature, computed
+    from the keypoints alone, aimed at exactly what the GMA label encodes. High
+    normalised entropy means small movements went in many directions -- fidgety
+    movement present, the normal pole -- so the abnormal group is expected
+    *below* the normal one and the AUC below 0.5.
+
+    Populates ``results['fidgetyfind']`` and writes
+    ``<outdir>/fidgetyfind_per_subject.csv``.
+    """
+    section("FidgetyFind: fidgety-movement detection (Morais et al., 2023)")
+    p = FF.FFParams(fps=geom.fps, start_frame=cfg["ff_start_frame"],
+                    window=cfg["ff_window"], stride=cfg["ff_stride"],
+                    bins=cfg["ff_bins"], minr=cfg["ff_minr"],
+                    maxr=cfg["ff_maxr"], large_motion=cfg["ff_large_motion"],
+                    theta=cfg["ff_theta"], smooth=cfg["ff_smooth"])
+    obs = [observed.get(v) for v in vids] if observed else [None] * len(vids)
+    if observed and len(observed) < len(vids):
+        print(f"  WARNING: 'observed' flags present for {len(observed)} of "
+              f"{len(vids)} recordings; the rest are treated as fully observed")
+    ds = FF.fidgetyfind_dataset([pose[v] for v in vids], obs, p)
+    y = np.asarray(labels).astype(int)
+    pos = y == 1
+
+    print(f"  window {p.window} frames ({p.window / geom.fps:.2f} s), stride "
+          f"{p.stride}, first frame {p.start_frame}, {p.bins} direction bins; "
+          f"small-movement band [{p.minr}, {p.maxr}]% of the parent limb per "
+          f"frame at {p.standard_fps:.0f} fps (rescaled by "
+          f"{p.rate_scale:.3f} for {p.fps:.0f} fps)")
+    smoothing = (f"confidence-weighted Gaussian, {p.smooth_window} frames, "
+                 f"sigma {p.smooth_sigma:.1f}" if p.smooth else "off")
+    conf_src = ("the 'observed' flag" if observed else
+                "unavailable — every frame is treated as detected, so the "
+                "confidence gates never fire")
+    print(f"  keypoint smoothing: {smoothing};  detection confidence from "
+          f"{conf_src}")
+    print(f"  windows per recording: {int(ds['n_windows'].min())}..."
+          f"{int(ds['n_windows'].max())}")
+    print("  per-chain median window entropy (0 = one direction, 1 = uniform), "
+          "median over recordings:")
+    for ci, nm in enumerate(ds["chains"]):
+        med = ds["median_entropy"][:, ci]
+        print(f"     {nm:7s} ({ds['chain_class'][ci]:>8s}): normal "
+              f"{np.nanmedian(med[~pos]):.3f}  abnormal "
+              f"{np.nanmedian(med[pos]):.3f}   assessable windows "
+              f"{np.nanmedian(ds['coverage'][:, ci]):.0%}")
+
+    test = ST.maxstat_label_test(ds["median_entropy"], y, n_perm=cfg["n_ff"],
+                                 seed=0, names=ds["chains"])
+    print(f"  group contrast per chain, labels permuted ({test['n_perm']:,} "
+          f"draws), max-statistic corrected over the six chains "
+          f"[all six reported regardless]:")
+    for ci, nm in enumerate(ds["chains"]):
+        print(f"     {nm:7s}: dH (abnormal-normal) = {test['observed'][ci]:+.3f}"
+              f"  p_corrected = {test['p_corrected'][ci]:.4f}  "
+              f"(uncorrected {test['p_uncorrected'][ci]:.4f})")
+
+    tests = {}
+    for nm, key in (("FidgetyFind score", "score"),
+                    ("hips only", "score_proximal"),
+                    ("fidgety-window rate", "positive_rate_mean")):
+        v = np.asarray(ds[key], float)
+        tests[key] = ST.mannwhitney(v[pos], v[~pos])
+        r = tests[key]
+        print(f"  {nm:20s}: abnormal median {np.nanmedian(v[pos]):.3f} vs "
+              f"normal {np.nanmedian(v[~pos]):.3f}; AUC {r['auc']:.3f} "
+              f"[{r.get('auc_lo_boot', float('nan')):.3f}, "
+              f"{r.get('auc_hi_boot', float('nan')):.3f}], p = {r['p']:.4g}"
+              f"  [{r['method']}]")
+    print("     AUC below 0.5 is the expected direction: absent fidgety "
+          "movement means less direction variety.")
+
+    # Is the literature construct measuring what ours measures? Descriptive.
+    logL = np.log(np.asarray([pose[v].shape[0] for v in vids], float))
+    redundancy = {"score_vs_logL": ST.duration_control(ds["score"], logL),
+                  "coverage_vs_logL": ST.duration_control(ds["coverage_mean"],
+                                                          logL)}
+    primary = results["primary"]
+    agreement = {}
+    if primary in results:
+        agreement["phi"] = ST.duration_control(
+            ds["score"], results[primary]["phi"]["excess"])
+        agreement["kemeny"] = ST.duration_control(
+            ds["score"], results[primary]["kemeny_per_subject"])
+    wc = results.get("wclrpp")
+    if wc and "mean_F" in wc:
+        agreement["wclrpp_mean_F"] = ST.duration_control(
+            ds["score"], np.asarray(wc["mean_F"], float))
+    print("  agreement with the other constructs (Spearman; these are "
+          "different measurements of the same recordings, not a validation):")
+    for nm, r in agreement.items():
+        print(f"     FidgetyFind vs {nm:13s}: rho = {r['rho']:+.3f} "
+              f"(p {r['p']:.3f}, n {r['n']})")
+    print(f"  duration: rho(score, logL) = "
+          f"{redundancy['score_vs_logL']['rho']:+.3f} "
+          f"(p {redundancy['score_vs_logL']['p']:.3f})")
+
+    results["fidgetyfind"] = {
+        "chains": ds["chains"], "chain_class": ds["chain_class"],
+        "median_entropy": ds["median_entropy"],
+        "positive_rate": ds["positive_rate"], "coverage": ds["coverage"],
+        "n_windows": ds["n_windows"], "score": ds["score"],
+        "score_proximal": ds["score_proximal"],
+        "score_distal": ds["score_distal"],
+        "positive_rate_mean": ds["positive_rate_mean"],
+        "coverage_mean": ds["coverage_mean"],
+        "params": ds["params"], "chain_test": test, "tests": tests,
+        "redundancy": redundancy, "agreement": agreement,
+        "window_entropy": [np.asarray(e, float) for e in ds["E"]],
+        "window_starts": [np.asarray(s0, int) for s0 in ds["starts"]]}
+
+    import pandas as pd
+    rows = {"subject": np.arange(1, len(vids) + 1), "video": vids, "label": y,
+            "fidgetyfind_score": ds["score"],
+            "fidgetyfind_score_hips": ds["score_proximal"],
+            "fidgetyfind_score_distal": ds["score_distal"],
+            "fidgety_window_rate": ds["positive_rate_mean"],
+            "assessable_fraction": ds["coverage_mean"],
+            "n_windows": ds["n_windows"]}
+    for ci, nm in enumerate(ds["chains"]):
+        key = nm.replace(" ", "_")
+        rows[f"median_entropy_{key}"] = ds["median_entropy"][:, ci]
+        rows[f"coverage_{key}"] = ds["coverage"][:, ci]
+    path = os.path.join(outdir, "fidgetyfind_per_subject.csv")
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f"  wrote {os.path.basename(path)}")
+    return results["fidgetyfind"]
+
+
+# ---------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="rvi38_analysis.csv")
@@ -595,6 +746,45 @@ def main(argv=None):
                          "hip, whose torso-normalised velocities are close to "
                          "negations of each other across the midline and so "
                          "manufacture coupling in the homologous pairs.")
+    ap.add_argument("--skip-fidgetyfind", action="store_true",
+                    help="skip the FidgetyFind block (the literature's "
+                         "fidgety-movement detector, Morais et al. 2023). It "
+                         "reads the keypoints only and is fast; skipping it "
+                         "loses the external comparison construct.")
+    ap.add_argument("--ff-window", type=int, default=50,
+                    help="FidgetyFind window length in frames (default 50, the "
+                         "published value).")
+    ap.add_argument("--ff-stride", type=int, default=20,
+                    help="FidgetyFind window stride in frames (default 20).")
+    ap.add_argument("--ff-start-frame", type=int, default=100,
+                    help="first frame FidgetyFind scores (default 100), "
+                         "skipping the camera-adjustment head of a recording.")
+    ap.add_argument("--ff-bins", type=int, default=8,
+                    help="direction-histogram bins over [-pi, pi] (default 8, "
+                         "the published proximal value).")
+    ap.add_argument("--ff-minr", type=float, default=4.5,
+                    help="lower edge of the small-movement band, in percent of "
+                         "the parent limb per frame at 30 fps (default 4.5).")
+    ap.add_argument("--ff-maxr", type=float, default=8.0,
+                    help="upper edge of the small-movement band (default 8.0).")
+    ap.add_argument("--ff-large-motion", type=float, default=10.0,
+                    help="a frame whose displacement exceeds this (percent of "
+                         "the parent limb per frame at 30 fps, default 10.0) "
+                         "is not a fidget; a window with too many of them is "
+                         "voided rather than scored.")
+    ap.add_argument("--ff-theta", type=float, default=0.5,
+                    help="normalised entropy above which a window counts as "
+                         "fidgety-positive in the per-recording reduction "
+                         "(default 0.5, fixed a priori).")
+    ap.add_argument("--ff-no-smooth", action="store_true",
+                    help="disable the confidence-weighted 5-frame Gaussian "
+                         "keypoint smoothing FidgetyFind specifies. Keypoint "
+                         "jitter lives at the same amplitude as a fidget and "
+                         "is directionally uniform, so this inflates the "
+                         "entropy; a sensitivity check, not a better setting.")
+    ap.add_argument("--ff-panels", action="store_true",
+                    help="also write one FidgetyFind timeline panel per "
+                         "recording under figures/fidgetyfind/.")
     ap.add_argument("--fluency-curve", action="store_true",
                     help="also write the exploratory FLUENCY_CURVE temporal "
                          "decomposition of Phi (one panel per recording under "
@@ -626,6 +816,13 @@ def main(argv=None):
         "wclr_dtau": args.wclr_dtau,
         "wclr_limb_signal": args.wclr_limb_signal,
         "top_frac": 0.10,                    # high-velocity frame fraction
+        "n_ff": 2_000 if f else 20_000,      # FidgetyFind label permutations
+        "ff_window": args.ff_window, "ff_stride": args.ff_stride,
+        "ff_start_frame": args.ff_start_frame, "ff_bins": args.ff_bins,
+        "ff_minr": args.ff_minr, "ff_maxr": args.ff_maxr,
+        "ff_large_motion": args.ff_large_motion,
+        "ff_theta": args.ff_theta, "ff_smooth": not args.ff_no_smooth,
+        "skip_fidgetyfind": args.skip_fidgetyfind,
         "fluency_similarity": args.fluency_similarity,
         "fluency_omega": args.fluency_omega,
         "fluency_shape_state_term": not args.fluency_drop_state_term,
@@ -762,6 +959,16 @@ def main(argv=None):
     else:
         raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg)
 
+    # ---- FidgetyFind: the literature's detector of the labelled construct.
+    # Keypoints only -- no model, no latent -- so it is the external yardstick
+    # the two model-based constructs can be read against. See fidgetyfind().
+    if cfg["skip_fidgetyfind"]:
+        section("FidgetyFind: skipped (--skip-fidgetyfind)")
+        print("  the literature comparison construct is omitted; every other "
+              "result above is unaffected.")
+    else:
+        fidgetyfind(results, pose, obs, vids, labels, geom, cfg, args.outdir)
+
     # ---- plain-language summary of every test that was run ----
     section("Statistical tests performed")
     cl = results["clinical"]
@@ -794,6 +1001,25 @@ def main(argv=None):
                          "Freedman-Lane residual permutation",
                          cl["adjusted"][nm]["p"],
                          f"AUC = {cl['adjusted'][nm]['auc']:.3f}"))
+    if "wclrpp" in results and "mean_F_test" in results["wclrpp"]:
+        wt = results["wclrpp"]["mean_F_test"]
+        rows.append(("Do abnormal infants couple their limbs more?",
+                     "Mann-Whitney on whole-body WCLR-PP coupling (mean F)",
+                     wt["p"], f"AUC = {wt['auc']:.3f}"))
+    if "fidgetyfind" in results:
+        ft = results["fidgetyfind"]["tests"]["score"]
+        fc = results["fidgetyfind"]["chain_test"]
+        rows.append(("Do abnormal infants show less fidgety movement, "
+                     "by the published detector?",
+                     "Mann-Whitney on the FidgetyFind score (AUC < 0.5 is the "
+                     "expected direction)",
+                     ft["p"], f"AUC = {ft['auc']:.3f}"))
+        best = int(np.nanargmin(fc["p_corrected"]))
+        rows.append(("Which body part carries the FidgetyFind difference?",
+                     "label permutation per chain, max-statistic corrected "
+                     "over the six",
+                     float(fc["p_corrected"][best]),
+                     f"strongest: {fc['names'][best]}"))
     for q, meth, pv, extra in rows:
         pstr = "n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}"
         print(f"  {q}\n      {meth}\n      p = {pstr}   ({extra})")
@@ -873,6 +1099,13 @@ def main(argv=None):
             m["states"], m["vidid"], np.asarray(res["S"]), vids, labels,
             phi=res["phi"], geom=geom, sigmas=(3, 5), out_root=args.outdir,
             label_names=("normal", "abnormal"))
+
+    if args.ff_panels and "fidgetyfind" in results:
+        section("FidgetyFind  per-recording timeline panels")
+        import figures as _F
+        made = _F.fidgetyfind_panels(results, args.outdir)
+        print(f"  wrote {len(made)} panels under "
+              f"{os.path.join(args.outdir, 'figures', 'fidgetyfind')}/")
 
     if not args.no_figures:
         import figures

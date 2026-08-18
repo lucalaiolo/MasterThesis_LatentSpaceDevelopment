@@ -43,6 +43,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+import a1_stats as ST
+
 
 def _nanmean(a, axis=None):
     """``np.nanmean`` that returns NaN for an all-NaN slice without warning."""
@@ -412,8 +414,7 @@ def _contrast(M: np.ndarray, y: np.ndarray) -> np.ndarray:
     A positive entry is the pathological direction: cramped-synchronised
     movement couples limbs *more*, so higher F in the abnormal group.
     """
-    with np.errstate(invalid="ignore"):
-        return np.nanmedian(M[y == 1], axis=0) - np.nanmedian(M[y == 0], axis=0)
+    return ST.median_contrast(M, y)
 
 
 def wclrpp_test(Fmatrix: np.ndarray, labels, n_perm: int = 10000,
@@ -424,33 +425,16 @@ def wclrpp_test(Fmatrix: np.ndarray, labels, n_perm: int = 10000,
     Family-wise error across the six pairs is controlled by the Westfall-Young
     maximum-statistic procedure, and **all six pairs are reported whatever any
     one shows**. Every ``F`` lives on the same ``[0,1]`` scale, so the maximum is
-    taken without standardisation.
+    taken without standardisation. The procedure itself is
+    :func:`a1_stats.maxstat_label_test`, shared with the FidgetyFind family.
 
     ``pairs`` names the columns for the report; pass ``dataset["pairs"]`` so the
     labels match the limb signal the ``F`` matrix was built with.
     """
-    M = np.asarray(Fmatrix, float)
-    y = np.asarray(labels).astype(int)
-    if len(y) != len(M):
-        raise ValueError(f"{len(M)} recordings but {len(y)} labels")
-    n, n1 = len(y), int(y.sum())
-    if n1 == 0 or n1 == n:
-        raise ValueError("labels are degenerate (one group is empty)")
-    observed = _contrast(M, y)
-    rng = np.random.default_rng(seed)
-    null = np.empty((n_perm, M.shape[1]))
-    for b in range(n_perm):
-        yp = np.zeros(n, int)
-        yp[rng.choice(n, n1, replace=False)] = 1
-        null[b] = _contrast(M, yp)
-    null_max = np.nanmax(np.abs(null), axis=1)
-    a = np.abs(observed)
-    return {"observed": observed,
-            "p_corrected": (1 + (null_max[:, None] >= a[None, :]).sum(0)) / (1 + n_perm),
-            "p_uncorrected": (1 + (np.abs(null) >= a[None, :]).sum(0)) / (1 + n_perm),
-            "null_max": null_max, "n_perm": n_perm,
-            "pairs": PAIR_NAMES if pairs is None else tuple(pairs),
-            "n_pos": n1, "n_neg": n - n1}
+    out = ST.maxstat_label_test(Fmatrix, labels, n_perm=n_perm, seed=seed,
+                                names=PAIR_NAMES if pairs is None else pairs)
+    out["pairs"] = out.pop("names")
+    return out
 
 
 # ---------------------------------------------------------------------------

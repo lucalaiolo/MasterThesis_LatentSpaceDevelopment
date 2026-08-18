@@ -720,7 +720,112 @@ is taken without standardisation. Validated on synthetic data: a planted
 synchrony effect is recovered (`p_corr = 0.0025`) while a label-shuffled control is
 not (`p_corr = 0.84`).
 
+---
 
+## 9ter. FidgetyFind: the literature's detector as an external yardstick
+
+### 9ter.1 Why a construct we did not design
+
+Fluency `Φ`, the Kemeny mixing time and the co-movement measure are all ours,
+and all three read the label only at the last step. That leaves one question
+they cannot answer between them: *is any of this what the published literature
+would call fidgety movement?* The GMA label is not a proxy for the construct —
+it **is** the construct (§1.1) — so a detector built for it, by someone else,
+scored on the same 38 recordings, is the natural external reference.
+
+**FidgetyFind** (Morais et al., 2023) is that detector. It takes keypoints
+only, needs no model, no latent and no fitting, and its authors released the
+implementation, so what it computes is a matter of record rather than
+interpretation. Its agreement with `Φ` is then a result in its own right: high
+agreement says the fluency construct rediscovers the published one from the
+latent side; low agreement says the two measure different things, and the
+thesis must say which is closer to the clinical judgement.
+
+### 9ter.2 What it measures
+
+Fidgety movements are *small* and *directionally variable* — the limb wanders,
+it does not stroke. FidgetyFind operationalises exactly those two words. For a
+moving joint `c` with parent `b`, each frame contributes
+
+- an amplitude `r_t = 100·‖x_c(t+1) − x_c(t)‖ / ‖x_c(t) − x_b(t)‖ · (f/30)`, a
+  percentage of the parent limb per frame, rescaled to the 30 fps the published
+  thresholds are calibrated at — dimensionless, so camera distance and body
+  size divide out;
+- a direction `a_t = ∠(x_c(t+1) − x_b(t+1), x_c(t+1) − x_c(t)) ∈ [−π, π]`, the
+  displacement measured **against the limb's own axis**, so the measure is
+  invariant to how the infant is lying under the camera.
+
+Inside a 50-frame window, the displacements whose amplitude falls in the small-
+movement band `[4.5, 8.0]` are kept and their directions histogrammed into 8
+bins; the window's score is the Shannon entropy of that histogram divided by
+`log 8`, hence in `[0, 1]`. Near 1 the limb moved in every direction — fidgety
+movement present, the normal pole. Near 0 it moved along one line, or there
+were too few small movements to judge at all — **absent** fidgety movement,
+which is what the label marks. A recording's score is the mean over six chains
+(knees against thighs, wrists against forearms, ankles against shanks) of the
+median entropy over its scoreable windows.
+
+Two gates decide what is even assessable, and both are reported rather than
+hidden: a window with too many uninterpolated keypoints, or too many frames
+whose displacement is far above the band (the limb is being *transported*, not
+fidgeting), is returned as unscoreable. A window that passes the gates but
+holds too little in-band movement scores **0.0, not NaN** — the recording was
+assessable and nothing was found, which is a finding.
+
+**Direction of effect.** Higher is normal. The abnormal group is expected
+*below* the normal one, so the reported AUC is expected **below 0.5** — the
+opposite direction to the co-movement construct of §9bis, where the
+cramped-synchronised pole is high.
+
+### 9ter.3 What had to be adapted, and what it costs
+
+The published method scores hands and feet from dense optical flow over
+segmented hand and foot pixels, because OpenPose detects neither. This cohort
+is a keypoint table with no video, so those two chains are scored by the same
+skeleton-only estimator one joint proximally — the wrist against the forearm,
+the ankle against the shank — which is the very axis and reference length the
+flow path normalises by, and is exactly the estimator the published *proximal*
+path applies at the knee. Consequences to state plainly:
+
+1. the hips are the **unadapted** path and are reported separately, so the
+   claim that survives adaptation can be told apart from the claim that does
+   not;
+2. the reference's 16 distal histogram bins count thousands of flow vectors per
+   frame; one displacement per frame cannot support them, so all six chains use
+   the published proximal setting of 8;
+3. the camera-motion gate needs the video and is omitted — these are
+   fixed-camera cot recordings, but the gate's absence is a difference, not a
+   non-issue;
+4. detection confidence is the `observed` flag of the pose table rather than
+   OpenPose's score;
+5. the reduction of per-window entropies to one number per recording is **ours**
+   — the released code stops at the windows. It is the plainest one available
+   (median per chain, mean over chains, plus the fraction of windows above a
+   threshold fixed a priori at 0.5), and it is declared as ours in the code, in
+   the module docstring and here.
+
+The keypoint smoothing the method specifies (a 5-frame Gaussian weighted by
+detection confidence) is not cosmetic and is kept: the band starts at a few
+percent of a limb length per frame, which is the scale of keypoint jitter, and
+jitter is directionally uniform — unsmoothed, it would read as fidgety movement
+in every infant. Measured on the synthetic cohort, smoothing costs roughly half
+the per-frame amplitude, which is why a planted signal has to be coherent over
+a few frames and slightly above the band to survive it.
+
+### 9ter.4 Inference and reporting
+
+The per-recording score is contrasted between groups by the same exact
+Mann-Whitney enumeration used for `Φ` and the Kemeny constant, and the six
+chains are tested together under the same maximum-statistic (Westfall–Young)
+correction as the six limb pairs of §9bis.6, with **every chain reported
+whatever any one shows**. FidgetyFind is *not* added to the confirmatory family
+`{Φ, 𝒦}`: it is a comparison construct, reported descriptively alongside the
+Spearman correlations between it, `Φ`, the Kemeny constant and whole-body
+coupling. Validated on synthetic data: a planted fidgety signal is recovered
+with the right sign on every recording, and the chain-level test finds it
+(`p_corr = 0.035` at the hips on a 12-recording check).
+
+---
 
 - **Repository layout.** `architectures/` (VAE models, config, training loop,
   losses, param counts); `youtube_motion/` (data loader, BODY-15 skeleton, sweep
@@ -752,6 +857,12 @@ not (`p_corr = 0.84`).
   `A_{kk}>0.95` sit where the implied dwell is very sensitive to the fit (§6.4).
 - **Two constant joints** (MidHip, Neck) by normalisation — read the motion
   statistics and Jacobian rows with that in mind.
+- **FidgetyFind is run in adapted form.** Its hands and feet path needs the
+  video (dense optical flow over segmented hand/foot pixels) and this cohort is
+  a keypoint table, so those chains use a skeleton-only stand-in and the
+  camera-motion gate is dropped (§9ter.3). The hips are the unadapted published
+  path and are reported separately for exactly that reason; the reduction of
+  per-window entropies to a single score is ours, not the paper's.
 - **Unverified references:** the PRISM latent-motion work and the RVI-38
   introducing paper are cited at preparation-time confidence — verify before the
   bibliography. Verify also the page ranges of the older speech-recognition
@@ -840,6 +951,13 @@ not (`p_corr = 0.84`).
   power spectra. *IEEE Trans. Audio Electroacoust.* 15(2), 70–73.
 - Mann, H.B., Whitney, D.R. (1947). On a test of whether one of two random
   variables is stochastically larger than the other. *Ann. Math. Stat.* 18(1), 50–60.
+
+**The comparison detector (§9ter).**
+- Morais, R., Le, V., Morgan, C., Spittle, A., Badawi, N., Valentine, J.,
+  Hurrion, E.M., Dawson, P.A., Tran, T., Venkatesh, S. (2023). Robust and
+  Interpretable General Movement Assessment Using Fidgety Movement Detection.
+  *IEEE Journal of Biomedical and Health Informatics* 27(10), 5042–5053.
+  Reference implementation: `github.com/RomeroBarata/fidgetyfind`.
 
 **Pose estimation and the clinical construct/dataset.**
 - Cao, Z., Simon, T., Wei, S.-E., Sheikh, Y. (2017). Realtime multi-person 2D pose

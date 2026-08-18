@@ -4,6 +4,10 @@ Implementation of `METHODS_3.md` — fluency (A1) and mixing structure (A7) on t
 RVI-38 cohort, plus the raw-kinematic constructs (WCLR-PP inter-limb
 coordination for cramped-synchronised movements, and the per-state velocity
 profiles), with the §10 inference layer and the §11 pre-specified gates.
+Alongside them sits **FidgetyFind** (`a10_fidgetyfind.py`), the published
+detector of the fidgety movements the GMA label is about: a construct nobody
+here designed, computed from the keypoints alone, against which the
+model-based ones can be read on the identical cohort.
 
 The metastable decomposition (PCCA+, implied timescales, the kinematic
 dendrogram and their agreement statistics) has been removed. The earlier
@@ -23,9 +27,11 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
 | `a8_movement.py` | raw kinematics: per-state velocity profiles |
 | `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, label-permutation and circular-shift surrogate inference |
+| `a10_fidgetyfind.py` | FidgetyFind (Morais et al., 2023): the literature's fidgety-movement detector — small-amplitude displacement direction entropy per window, on six limb chains |
+| `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 59 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 107 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 
 ## Run
@@ -37,6 +43,33 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
         --labels RVI_38_labels.mat --outdir rvi38_out
 
 `--fast` cuts every resampling count ~20x for a smoke run.
+
+### One call for everything (`report.py`)
+
+`run_report` runs the five constructs the results chapter reports — fluency,
+the fluency curve, the Kemeny mixing time, WCLR-PP synchrony and FidgetyFind —
+with the settings that produce the complete picture (the fluency curve and the
+per-recording FidgetyFind panels are on), and returns the results, a headline
+summary and every figure path:
+
+```python
+from report import run_report
+
+out = run_report(csv="rvi38_analysis.csv",
+                 arhmm="arhmm_rvi38_stream_delta.pkl",
+                 hmm="hmm_rvi38_stream_delta.pkl",
+                 labels="RVI_38_labels.mat",
+                 outdir="rvi38_out",
+                 show="main")          # display the figures in a notebook
+
+out["summary"]["fidgetyfind"]["group"]["auc"]
+```
+
+It writes `summary.md` and `summary.json` next to the run alongside everything
+`run_analysis.py` writes. Keyword arguments pass through to the runner
+(`fluency_omega=0.7` becomes `--fluency-omega 0.7`), `fast=True` is the smoke
+run, and `synchrony=False` skips WCLR-PP, by far the slowest block. Paste
+`colab_rvi38_report.py` as a single Colab cell to run the same thing there.
 
 ### Direction-aware fluency (`DIRECTION_AWARE_KINEMATIC_SIMILARITY.md`)
 
@@ -124,6 +157,76 @@ exactly the homologous pairs that carry the cramped-synchronised signature.
 delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per
 subject shorter than the pose trajectory. Either model may be omitted.
+
+### FidgetyFind: the literature's detector (`a10_fidgetyfind.py`)
+
+> Morais, R., Le, V., Morgan, C., Spittle, A., Badawi, N., Valentine, J.,
+> Hurrion, E. M., Dawson, P. A., Tran, T., Venkatesh, S. (2023). *Robust and
+> Interpretable General Movement Assessment Using Fidgety Movement Detection.*
+> IEEE JBHI 27(10), 5042–5053. Reference code:
+> `github.com/RomeroBarata/fidgetyfind`.
+
+Fidgety movements are *small* and *directionally variable*. FidgetyFind
+measures exactly that: for each frame-to-frame displacement of a joint of
+interest it records the amplitude as a percentage of the parent limb's length
+(so the measure is scale-free) and the direction *relative to that limb's own
+axis*; inside a 50-frame window it keeps the displacements in a small-movement
+band and takes the Shannon entropy of their direction histogram, normalised by
+`log(bins)` to `[0, 1]`. Near 1: the limb wandered in every direction, fidgety
+movement is present — the normal pole. Near 0: one direction only, or too few
+small movements to judge — absent fidgety movement, which is what the GMA label
+marks. **The abnormal group is therefore expected below the normal one, and the
+reported AUC below 0.5.**
+
+Six chains are scored: the knees against the thighs (the reference's own
+proximal path), the wrists against the forearms and the ankles against the
+shanks. Per chain the run reports the median window entropy, the fraction of
+windows above `--ff-theta`, and the coverage (how much of the recording was
+assessable at all); per recording it reports their means, and the group
+contrast on each, plus a max-statistic-corrected permutation test across the
+six chains, in which **every chain is reported whatever any one shows**. It
+also reports the Spearman agreement between FidgetyFind and Φ, the Kemeny
+constant and whole-body coupling — three independent measurements of the same
+recordings, where disagreement is as informative as agreement.
+
+What transfers from the reference implementation verbatim: the per-frame
+`(angle, magnitude, score)` triple, the rescaling of every magnitude by
+`fps / 30` before any threshold (the published thresholds are calibrated at
+30 fps and a per-frame displacement is not fps-invariant), the window gates
+(too many low-confidence frames, or too many frames above `--ff-large-motion`,
+void a window as *unscoreable*), the rule that a window with too little in-band
+movement scores **0.0 rather than NaN** (it was assessable, and nothing was
+found), the histogram entropy and its normalisation, the window geometry
+(`--ff-start-frame 100 --ff-window 50 --ff-stride 20`), the band
+(`--ff-minr 4.5 --ff-maxr 8.0`) and the score-weighted 5-frame Gaussian
+keypoint smoothing.
+
+What is adapted, and why — all of it documented in the module docstring:
+
+* **The distal path.** The reference scores hands and feet from dense optical
+  flow over segmented hand/foot pixels, since OpenPose detects neither. We have
+  no video, so the wrist against the forearm and the ankle against the shank
+  are scored by the same skeleton-only estimator — the very axis and reference
+  length the flow path normalises by. The distal gates keep the reference's
+  intent: a window is voided when the *parent* joint is transporting the limb,
+  because then the distal motion is carriage, not fidget.
+* **Bins.** 8 for every chain. The reference's 16 distal bins count thousands
+  of flow vectors per frame; ours counts one displacement per frame, and 16
+  bins over 50 samples reads sparsity as order.
+* **Confidence** is the `observed` flag of the pose table (interior gaps are
+  interpolated upstream); without it every frame counts as detected and the
+  confidence gates never fire.
+* **The camera-motion gate is omitted** — it needs the video. These are
+  fixed-camera cot recordings; a caller who can compute the mask may pass it.
+* **The reduction to one number per recording** is ours: the released code
+  stops at the per-window entropies. `--ff-theta 0.5` (fixed a priori, halfway
+  up the normalised entropy scale) is the only free choice in it.
+
+`--skip-fidgetyfind` omits the block; `--ff-panels` additionally writes one
+timeline panel per recording under `figures/fidgetyfind/`. Outputs:
+`fidgetyfind_per_subject.csv` (per-chain median entropy and coverage, the
+per-recording scores) and the four cohort figures `fidgetyfind_subject`,
+`fidgetyfind_chains`, `fidgetyfind_windows` and `fidgetyfind_agreement`.
 
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and

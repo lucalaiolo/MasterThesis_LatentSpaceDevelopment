@@ -533,12 +533,26 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
                     window=cfg["ff_window"], stride=cfg["ff_stride"],
                     bins=cfg["ff_bins"], minr=cfg["ff_minr"],
                     maxr=cfg["ff_maxr"], large_motion=cfg["ff_large_motion"],
-                    theta=cfg["ff_theta"], smooth=cfg["ff_smooth"])
+                    theta=cfg["ff_theta"], smooth=cfg["ff_smooth"],
+                    lowconf_rate=cfg["ff_lowconf_rate"],
+                    lowconf_rate_distal=max(cfg["ff_lowconf_rate"], 0.2))
     obs = [observed.get(v) for v in vids] if observed else [None] * len(vids)
     if observed and len(observed) < len(vids):
         print(f"  WARNING: 'observed' flags present for {len(observed)} of "
               f"{len(vids)} recordings; the rest are treated as fully observed")
-    ds = FF.fidgetyfind_dataset([pose[v] for v in vids], obs, p)
+    poses = [pose[v] for v in vids]
+    calibrated = bool(cfg.get("ff_calibrate"))
+    if calibrated:
+        published = (p.minr, p.maxr)
+        p = FF.calibrate_band(poses, obs, p, centre_pct=cfg["ff_centre_pct"])
+        print(f"  RE-CALIBRATED BAND (--ff-calibrate): the published band "
+              f"[{published[0]}, {published[1]}] is replaced by "
+              f"[{p.minr:.2f}, {p.maxr:.2f}], window {p.window}, in-range rate "
+              f"{p.in_range_rate:.2f}, centre percentile {cfg['ff_centre_pct']:g}.")
+        print("  This is NOT the published FidgetyFind measurement; it is a "
+              "skeleton-only re-calibration. Report it as such, and use the "
+              "search-corrected p (FIDGETYFIND_FIDELITY §13.8), not the naive one.")
+    ds = FF.fidgetyfind_dataset(poses, obs, p)
     y = np.asarray(labels).astype(int)
     pos = y == 1
 
@@ -646,6 +660,10 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
         "positive_rate_mean": ds["positive_rate_mean"],
         "coverage_mean": ds["coverage_mean"],
         "params": ds["params"], "chain_test": test, "diagnosis": diag,
+        "calibrated": calibrated,
+        "band_label": (f"re-calibrated band [{p.minr:.2f}, {p.maxr:.2f}]"
+                       if calibrated else
+                       f"published band [{p.minr:.1f}, {p.maxr:.1f}]"),
         "chain_tests": chain_tests, "tests": tests,
         "redundancy": redundancy, "agreement": agreement,
         "window_entropy": [np.asarray(e, float) for e in ds["E"]],
@@ -918,6 +936,23 @@ def main(argv=None):
                          "jitter lives at the same amplitude as a fidget and "
                          "is directionally uniform, so this inflates the "
                          "entropy; a sensitivity check, not a better setting.")
+    ap.add_argument("--ff-calibrate", action="store_true",
+                    help="slide the FidgetyFind amplitude band onto this "
+                         "cohort's own scale (FF.calibrate_band) instead of the "
+                         "published [minr, maxr]. Use when the published band "
+                         "does not fit the data (the run says so). NOTE: the "
+                         "result is a re-calibration, not the published "
+                         "measurement -- it is labelled as such everywhere.")
+    ap.add_argument("--ff-centre-pct", type=float, default=75.0,
+                    help="with --ff-calibrate, the amplitude percentile the "
+                         "band's centre is placed on (default 75). Fix it "
+                         "before looking at the labels.")
+    ap.add_argument("--ff-lowconf-rate", type=float, default=0.1,
+                    help="fraction of a window's frames allowed to be "
+                         "unobserved before it is voided (default 0.1, the "
+                         "published value). The binary 'observed' flag makes "
+                         "the published rate coarse (see FIDGETYFIND_FIDELITY "
+                         "6.4); 0.5 is a defensible relaxation on this cohort.")
     ap.add_argument("--ff-panels", action="store_true",
                     help="also write one FidgetyFind timeline panel per "
                          "recording under figures/fidgetyfind/.")
@@ -958,6 +993,9 @@ def main(argv=None):
         "ff_minr": args.ff_minr, "ff_maxr": args.ff_maxr,
         "ff_large_motion": args.ff_large_motion,
         "ff_theta": args.ff_theta, "ff_smooth": not args.ff_no_smooth,
+        "ff_calibrate": args.ff_calibrate,
+        "ff_centre_pct": args.ff_centre_pct,
+        "ff_lowconf_rate": args.ff_lowconf_rate,
         "skip_fidgetyfind": args.skip_fidgetyfind,
         "fluency_similarity": args.fluency_similarity,
         "fluency_omega": args.fluency_omega,

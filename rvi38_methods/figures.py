@@ -592,6 +592,20 @@ def _ff_ylabel():
     return "normalised direction entropy\n(1 = many directions, 0 = one)"
 
 
+def _ff_band_tag(results):
+    """A suptitle suffix that keeps a re-calibrated run from being read as the
+    published construct, and flags a degenerate published run as unmeasured."""
+    ff = results.get("fidgetyfind", {})
+    label = ff.get("band_label", "")
+    if ff.get("calibrated"):
+        return f"\nRE-CALIBRATED to this cohort ({label}) — NOT the published band"
+    diag = ff.get("diagnosis") or {}
+    if diag.get("degenerate"):
+        return (f"\n{label}: DEGENERATE on this cohort — the band did not fit, "
+                "these panels show no measurement")
+    return f"\n{label}" if label else ""
+
+
 def fig_fidgetyfind_subject(res, results, outdir):
     """Per-infant FidgetyFind scores, by group.
 
@@ -628,8 +642,9 @@ def fig_fidgetyfind_subject(res, results, outdir):
                         xy=(0.02, 0.06), xycoords="axes fraction", fontsize=8)
     axes[0].set_ylabel(_ff_ylabel())
     fig.suptitle("FidgetyFind — fidgety movement detected from the keypoints "
-                 "(low = absent fidgety movement, the abnormal pole)",
-                 fontsize=10, y=1.06)
+                 "(low = absent fidgety movement, the abnormal pole)"
+                 + _ff_band_tag(results),
+                 fontsize=10, y=1.08)
     return _save(fig, outdir, "fidgetyfind_subject")
 
 
@@ -667,7 +682,8 @@ def fig_fidgetyfind_chains(res, results, outdir):
         if ci % 3 == 0:
             ax.set_ylabel(_ff_ylabel())
     fig.suptitle("FidgetyFind per body part — median window entropy "
-                 "(red = abnormal)", fontsize=10, y=1.01)
+                 "(red = abnormal)" + _ff_band_tag(results), fontsize=10,
+                 y=1.03)
     return _save(fig, outdir, "fidgetyfind_chains")
 
 
@@ -713,8 +729,8 @@ def fig_fidgetyfind_windows(res, results, outdir):
     ax.set_title("Fraction of windows assessable at all", fontsize=9,
                  loc="left")
     fig.suptitle("FidgetyFind window-level view — a window is voided when the "
-                 "keypoints are unreliable or the limb is being transported",
-                 fontsize=10, y=1.04)
+                 "keypoints are unreliable or the limb is being transported"
+                 + _ff_band_tag(results), fontsize=10, y=1.06)
     return _save(fig, outdir, "fidgetyfind_windows")
 
 
@@ -762,8 +778,8 @@ def fig_fidgetyfind_agreement(res, results, outdir):
                                        f"p = {agr['p']:.3f}")
         ax.set_title(ttl, fontsize=9, loc="left")
     axes[0].legend(fontsize=8, frameon=False, loc="best")
-    fig.suptitle("FidgetyFind against the model-based constructs", fontsize=10,
-                 y=1.08)
+    fig.suptitle("FidgetyFind against the model-based constructs"
+                 + _ff_band_tag(results), fontsize=10, y=1.10)
     return _save(fig, outdir, "fidgetyfind_agreement")
 
 

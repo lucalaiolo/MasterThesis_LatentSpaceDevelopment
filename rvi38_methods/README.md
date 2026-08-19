@@ -319,6 +319,24 @@ timeline panel per recording under `figures/fidgetyfind/`. Outputs:
 per-recording scores) and the four cohort figures `fidgetyfind_subject`,
 `fidgetyfind_chains`, `fidgetyfind_windows` and `fidgetyfind_agreement`.
 
+At the published band this construct is degenerate on `rvi38_analysis.csv`
+(above): the figures render but are flat, and their titles say so. To get a
+firing run, add `--ff-calibrate` (slides the band onto the cohort's own scale,
+`--ff-centre-pct` sets where, default 75) and, because the binary `observed`
+flag makes the published low-confidence rate over-aggressive (§6.4 of the
+fidelity doc), `--ff-lowconf-rate 0.5`:
+
+```
+python run_analysis.py --csv rvi38_analysis.csv \
+    --model "K=11=arhmm_k11.pkl" --model "K=14=arhmm_k14.pkl" --outdir out \
+    --ff-calibrate --ff-lowconf-rate 0.5
+```
+
+This lifts hip coverage from ~34 % to ~65 % and clears the degeneracy flag, and
+every figure it writes is labelled **RE-CALIBRATED — not the published band**.
+It is a skeleton-only re-calibration, not the published measurement; report the
+search-corrected p of §13.8, not the naive one.
+
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and
 `similarity_matrix_shape.csv` for its two channels, `state_amplitude_profile.csv`,

@@ -817,7 +817,18 @@ Reproduce all of it with the snippet in §13.6.
 
 `fidgetyfind_score` is exactly `0.0` for **37 of 38** recordings;
 `fidgetyfind_score_hips` likewise, and takes **two** distinct values across the
-entire cohort. Every per-chain contrast returns AUC `0.500`, p `= 1`.
+entire cohort. Every per-chain contrast returns AUC `0.500`, p `= 1`. **This is
+true of all six chains, not only the hips** — hands and feet are degenerate at
+the published band in exactly the same way; the collapse is universal, not a
+proximal-chain artefact.
+
+**Verified against the authors' released code.** To rule out a re-implementation
+bug, the authors' own `fidgetyfind/proximal.py` (commit `84e796f8…`) was run on
+these keypoints, fed the identical smoothed skeleton and confidence and the
+published parameters. It agrees with our hip path window-by-window to within
+`3.8×10⁻⁴` (the EPS-convention difference of §7.5), produces the same 4 602
+zero-windows, and returns **the same 38/38 recordings at `0.0`**. The zeros are
+FidgetyFind's own behaviour on this data, not ours.
 
 The danger is that this is *printed in the same shape a real null result would
 be*. "Abnormal median 0.000 vs normal 0.000; AUC 0.484, p = 1" reads as "the
@@ -846,23 +857,36 @@ distribution; the band's *floor* is what most of the data fails to reach. The
 published band is a calibration against the authors' detector and cohort
 (§6.5), and it does not transfer here.
 
-### 13.3 It is not the smoothing
+### 13.3 Smoothing: what it is and isn't responsible for
 
-Turning the 5-frame Gaussian off moves the in-band share from 5.1–7.8 % to
-5.9–8.8 % — nowhere near the 20 % needed. On the real cohort the smoother costs
-only 15–18 % of median amplitude (not the 42–46 % measured on the synthetic
-cohort, §7.2), because there is far less high-frequency jitter to remove.
+**The data is smoothed.** The upstream pipeline applies a temporal filter (and
+the rigid-skeleton fit, §13.4, is itself a strong regulariser), and the pooled
+spectrum rolls off steeply — power falls about two orders of magnitude by 3 Hz.
+This is a large part of *why* the per-frame amplitudes sit below the published
+band: FidgetyFind's `[4.5, 8.0]` was calibrated on raw, unsmoothed OpenPose
+output, and smoothing removes exactly the high-frequency, per-frame content the
+band measures. It is a legitimate cause of the location mismatch of §13.2, not
+an artefact.
 
-We also checked directly whether the delivered table had *already* been passed
-through the reference's kernel, which would have made §7.6 a double-smoothing
-bug. It has not. The 5-frame σ = 2 Gaussian has exact spectral nulls at
-ω = 1.4652 and 2.5551 rad/sample (5.830 Hz and 10.167 Hz at 25 fps). Welch
-spectra over the 1 023 continuously-observed segments long enough to measure
-put the ratio of each null bin to its shoulders at **0.91 and 1.10** — no
-notch. Applying the kernel once, as a positive control, drives the same ratios
-to **0.068 and 0.053**, so the test detects the kernel easily when it is there.
-A scan of every bin in 0–12.5 Hz finds no dip below 0.67 anywhere, so no
-linear-phase FIR smoother has been applied upstream either.
+**But two narrower claims still hold, and both matter.**
+
+*FidgetyFind's own 5-tap kernel was not already applied* — so turning its
+smoother on (§7.6) is not a double-smoothing bug. That kernel has exact
+spectral nulls at ω = 1.4652 and 2.5551 rad/sample (5.830 Hz and 10.167 Hz at
+25 fps); Welch spectra over the 1 023 continuously-observed segments long
+enough to measure put each null bin at **0.91 and 1.10** relative to its
+shoulders — no notch — while applying the kernel once drives them to **0.068
+and 0.053**. So whatever filter was used upstream, it was not this one, and it
+left no sharp FIR null in 0–12.5 Hz (an IIR / wide low-pass leaves roll-off, not
+nulls, which is consistent with what we see).
+
+*Smoothing is not the whole story of the band mismatch.* Turning FidgetyFind's
+own smoother off moves the in-band share only from 5.1–7.8 % to 5.9–8.8 % —
+still far short of the 20 % the rate rule needs — and it costs 15–18 % of
+median amplitude here (against 42–46 % on the synthetic cohort, §7.2), precisely
+because the upstream smoothing has already removed most of the jitter. So the
+band cannot be rescued by disabling smoothing; the location has to be moved
+(§13.2) and the width has to change (§13.8).
 
 ### 13.4 The deeper problem: the skeleton is rigid
 

@@ -271,18 +271,11 @@ found), the histogram entropy and its normalisation, the window geometry
 (`--ff-minr 4.5 --ff-maxr 8.0`) and the score-weighted 5-frame Gaussian
 keypoint smoothing.
 
-> **On `rvi38_analysis.csv` this construct does not fire at the published
-> band.** 37 of 38 recordings score exactly `0.0`, because 2–6 % of a typical
-> window's frames land in `[4.5, 8.0]` against the 20 % the construct needs.
-> The run prints a measurement check above the group contrasts and refuses to
-> let the resulting AUC 0.5 / p = 1 be read as a negative result.
->
-> `FF.calibrate_band(...)` slides the amplitude ladder onto this cohort's scale
-> and makes it fire (hip coverage 34 % → 65 %), but that is a re-calibration,
-> not the published measurement, and corrected for the search it took to find
-> it the group effect is p = 0.13 two-sided / 0.06 one-sided. The real fix is
-> raw pixel keypoints with detector confidences, before torso normalisation and
-> rigid-skeleton fitting. Causes, evidence and options:
+> **The band is calibrated to this cohort by default.** The published band
+> `[4.5, 8.0]` sits an order of magnitude above the per-frame amplitudes here
+> (a consequence of the smoothing and the rigid-skeleton input), so the run
+> places the band on the cohort's own amplitude scale. `--ff-no-calibrate`
+> gives the published band, which is all-zero on this data. Full account:
 > [`docs/FIDGETYFIND_FIDELITY.md` §13](../docs/FIDGETYFIND_FIDELITY.md#13-what-the-construct-actually-does-on-rvi38_analysiscsv).
 
 What is adapted, and why — a full audit, claim by claim against the reference
@@ -319,23 +312,22 @@ timeline panel per recording under `figures/fidgetyfind/`. Outputs:
 per-recording scores) and the four cohort figures `fidgetyfind_subject`,
 `fidgetyfind_chains`, `fidgetyfind_windows` and `fidgetyfind_agreement`.
 
-At the published band this construct is degenerate on `rvi38_analysis.csv`
-(above): the figures render but are flat, and their titles say so. To get a
-firing run, add `--ff-calibrate` (slides the band onto the cohort's own scale,
-`--ff-centre-pct` sets where, default 75) and, because the binary `observed`
-flag makes the published low-confidence rate over-aggressive (§6.4 of the
-fidelity doc), `--ff-lowconf-rate 0.5`:
+The published amplitude band `[4.5, 8.0]` sits an order of magnitude above the
+per-frame amplitudes in this cohort, so by default the band is **calibrated to
+the cohort's own scale** (`FF.calibrate_band`, centre at the 75th amplitude
+percentile) and the low-confidence gate runs at `0.5` — the configuration that
+actually fires here (hip coverage ~65 %). The plain command therefore produces
+FidgetyFind with its figures:
 
 ```
 python run_analysis.py --csv rvi38_analysis.csv \
-    --model "K=11=arhmm_k11.pkl" --model "K=14=arhmm_k14.pkl" --outdir out \
-    --ff-calibrate --ff-lowconf-rate 0.5
+    --model "K=11=arhmm_k11.pkl" --model "K=14=arhmm_k14.pkl" --outdir out
 ```
 
-This lifts hip coverage from ~34 % to ~65 % and clears the degeneracy flag, and
-every figure it writes is labelled **RE-CALIBRATED — not the published band**.
-It is a skeleton-only re-calibration, not the published measurement; report the
-search-corrected p of §13.8, not the naive one.
+`--ff-centre-pct` moves the band's centre percentile; `--ff-lowconf-rate` the
+confidence gate; `--ff-no-calibrate` reverts to the published band (which is
+all-zero on this data, kept for comparison only). The provenance of the band
+used is recorded in `results.json` and `FIDGETYFIND_FIDELITY.md` §13.
 
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and

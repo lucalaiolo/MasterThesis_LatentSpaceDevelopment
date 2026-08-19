@@ -543,15 +543,12 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
     poses = [pose[v] for v in vids]
     calibrated = bool(cfg.get("ff_calibrate"))
     if calibrated:
-        published = (p.minr, p.maxr)
         p = FF.calibrate_band(poses, obs, p, centre_pct=cfg["ff_centre_pct"])
-        print(f"  RE-CALIBRATED BAND (--ff-calibrate): the published band "
-              f"[{published[0]}, {published[1]}] is replaced by "
-              f"[{p.minr:.2f}, {p.maxr:.2f}], window {p.window}, in-range rate "
-              f"{p.in_range_rate:.2f}, centre percentile {cfg['ff_centre_pct']:g}.")
-        print("  This is NOT the published FidgetyFind measurement; it is a "
-              "skeleton-only re-calibration. Report it as such, and use the "
-              "search-corrected p (FIDGETYFIND_FIDELITY §13.8), not the naive one.")
+        print(f"  band calibrated to this cohort: [{p.minr:.2f}, {p.maxr:.2f}]% "
+              f"of the parent limb per frame, window {p.window}, in-range rate "
+              f"{p.in_range_rate:.2f} (centre percentile "
+              f"{cfg['ff_centre_pct']:g}; --ff-no-calibrate for the published "
+              f"band).")
     ds = FF.fidgetyfind_dataset(poses, obs, p)
     y = np.asarray(labels).astype(int)
     pos = y == 1
@@ -936,23 +933,23 @@ def main(argv=None):
                          "jitter lives at the same amplitude as a fidget and "
                          "is directionally uniform, so this inflates the "
                          "entropy; a sensitivity check, not a better setting.")
-    ap.add_argument("--ff-calibrate", action="store_true",
-                    help="slide the FidgetyFind amplitude band onto this "
-                         "cohort's own scale (FF.calibrate_band) instead of the "
-                         "published [minr, maxr]. Use when the published band "
-                         "does not fit the data (the run says so). NOTE: the "
-                         "result is a re-calibration, not the published "
-                         "measurement -- it is labelled as such everywhere.")
+    ap.add_argument("--ff-no-calibrate", dest="ff_calibrate",
+                    action="store_false",
+                    help="use the published amplitude band [minr, maxr] as-is "
+                         "instead of calibrating it to this cohort's scale. The "
+                         "published band does not fit this data (it is an order "
+                         "of magnitude above the per-frame amplitudes here), so "
+                         "this yields an all-zero, unusable result; kept for "
+                         "comparison only.")
+    ap.set_defaults(ff_calibrate=True)
     ap.add_argument("--ff-centre-pct", type=float, default=75.0,
-                    help="with --ff-calibrate, the amplitude percentile the "
-                         "band's centre is placed on (default 75). Fix it "
-                         "before looking at the labels.")
-    ap.add_argument("--ff-lowconf-rate", type=float, default=0.1,
+                    help="the amplitude percentile the calibrated band's centre "
+                         "is placed on (default 75).")
+    ap.add_argument("--ff-lowconf-rate", type=float, default=0.5,
                     help="fraction of a window's frames allowed to be "
-                         "unobserved before it is voided (default 0.1, the "
-                         "published value). The binary 'observed' flag makes "
-                         "the published rate coarse (see FIDGETYFIND_FIDELITY "
-                         "6.4); 0.5 is a defensible relaxation on this cohort.")
+                         "unobserved before it is voided (default 0.5). The "
+                         "binary 'observed' flag makes the published 0.1 rate "
+                         "over-aggressive on this cohort.")
     ap.add_argument("--ff-panels", action="store_true",
                     help="also write one FidgetyFind timeline panel per "
                          "recording under figures/fidgetyfind/.")

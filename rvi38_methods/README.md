@@ -271,7 +271,9 @@ found), the histogram entropy and its normalisation, the window geometry
 (`--ff-minr 4.5 --ff-maxr 8.0`) and the score-weighted 5-frame Gaussian
 keypoint smoothing.
 
-What is adapted, and why — all of it documented in the module docstring:
+What is adapted, and why — a full audit, claim by claim against the reference
+code, is in [`docs/FIDGETYFIND_FIDELITY.md`](../docs/FIDGETYFIND_FIDELITY.md);
+the short version:
 
 * **The distal path.** The reference scores hands and feet from dense optical
   flow over segmented hand/foot pixels, since OpenPose detects neither. We have
@@ -291,6 +293,11 @@ What is adapted, and why — all of it documented in the module docstring:
 * **The reduction to one number per recording** is ours: the released code
   stops at the per-window entropies. `--ff-theta 0.5` (fixed a priori, halfway
   up the normalised entropy scale) is the only free choice in it.
+
+Read `docs/FIDGETYFIND_FIDELITY.md` before quoting any of these numbers as
+"FidgetyFind": it says which of them are the published measurement (the hips),
+which are our substitution (the hands and feet), and which are ours outright
+(the per-recording score).
 
 `--skip-fidgetyfind` omits the block; `--ff-panels` additionally writes one
 timeline panel per recording under `figures/fidgetyfind/`. Outputs:

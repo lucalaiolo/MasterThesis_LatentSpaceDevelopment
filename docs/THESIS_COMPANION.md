@@ -788,6 +788,12 @@ cramped-synchronised pole is high.
 
 ### 9ter.3 What had to be adapted, and what it costs
 
+> The element-by-element audit against the authors' released code — what is
+> identical, what was forced by the absence of video, what we chose differently
+> and why, and what is ours outright — is
+> [`FIDGETYFIND_FIDELITY.md`](FIDGETYFIND_FIDELITY.md). It also gives the
+> wording to use, and to avoid, when attributing a number to the method.
+
 The published method scores hands and feet from dense optical flow over
 segmented hand and foot pixels, because OpenPose detects neither. This cohort
 is a keypoint table with no video, so those two chains are scored by the same

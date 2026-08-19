@@ -16,8 +16,8 @@ whose trace-normalised part is read off as the double-angle shape coordinate
 similarity fed to Phi combines a magnitude channel (log RMS speed, as before)
 with a shape channel (the residual axes), the preferred *separated* form being
 ``S = omega S_mag + (1 - omega) S_shape`` (:func:`direction_aware_similarity`).
-Nothing else changes: Phi and the maxT family are untouched -- one statistic
-enters the signature and one leaves.
+Nothing else changes: Phi and the endpoint contrast it feeds are untouched --
+one statistic enters the signature and one leaves.
 
 Two deviations from the supplied reference implementation are deliberate and
 are documented where they occur:

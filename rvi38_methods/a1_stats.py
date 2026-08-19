@@ -1,15 +1,37 @@
-"""Nonparametric inference (METHODS §10).
+"""Nonparametric inference.
 
-Everything here is permutation- or resampling-based, as §10 requires: the
-sample is small (N = 38), the outcome is rare and imbalanced (6 against 32),
-and the features are bounded and skewed, so asymptotic calibration is
-inappropriate.
+Everything here is permutation- or resampling-based: the sample is small
+(N = 38), the outcome is rare and imbalanced (6 against 32), and the features
+are bounded and skewed, so asymptotic calibration is inappropriate.
 
-:func:`mannwhitney` performs **exact enumeration** of all ``C(38,6) =
-2,760,681`` label assignments by dynamic programming over the rank multiset
-(§10.1 notes this is feasible; enumerating it removes Monte Carlo error from the
-headline contrasts entirely). Monte Carlo is retained for the statistics where
-enumeration does not apply.
+**The reported procedure.** Every clinical endpoint is a single scalar per
+recording, contrasted between the n1 = 6 abnormal and n0 = 32 normal recordings
+by :func:`mannwhitney`, which is the whole of it:
+
+* the null is equality of the two distributions, which makes the labels
+  exchangeable, so the exact permutation law is the true null law of ``U``;
+* pooled mid-ranks give ``U = R1 - n1(n1+1)/2`` and
+  ``AUC = U / (n1 n0)``, the probability that a random abnormal recording
+  exceeds a random normal one, equal to 1/2 under the null;
+* the null law of ``U`` is its distribution over all ``C(38,6) = 2,760,681``
+  label assignments, enumerated exactly by dynamic programming over the rank
+  multiset, and the two-sided p-value is the exact-null probability of an AUC
+  at least as far from 1/2 as the observed one;
+* the interval is the percentile interval of a **stratified nonparametric
+  bootstrap** (:func:`bootstrap_auc_ci`): B = 10,000 resamples of each group
+  independently and at its original size, so the 6/32 allocation is held fixed
+  and the interval cannot leave [0, 1].
+
+Alongside the endpoints, :func:`correlation_table` reports each one's Pearson
+and Spearman correlation with occupancy entropy, mean dwell time and log
+recording length. The label enters no fit.
+
+Functions below the endpoint machinery -- multiplicity corrections, the
+Hanley-McNeil normal approximation, the minimum detectable effect, the
+Freedman-Lane nuisance adjustment -- are **not part of the reported procedure**
+and nothing in the pipeline calls them. They are kept because they were used
+while the analysis was being developed and are cheap to keep correct; see the
+note above each.
 """
 
 from __future__ import annotations
@@ -52,13 +74,23 @@ def exact_ranksum_null(ranks: np.ndarray, n1: int):
 
 
 def mannwhitney(x, y, exact: bool | None = None, n_perm: int = 200_000,
-                seed: int = 0, boot: int = 10_000) -> dict:
-    """Permutation Mann-Whitney with AUC and rank-biserial effect size.
+                seed: int = 0, boot: int = 10_000, alpha: float = 0.05) -> dict:
+    """The reported endpoint contrast: exact Mann-Whitney U, AUC, bootstrap CI.
 
-    Ranks are computed once on the pooled sample and only the labels are
+    ``x`` is the abnormal group, ``y`` the normal one. Ranks are computed once
+    on the pooled sample with mid-ranks for ties and only the labels are
     permuted, which is valid under exchangeability and preserves the tie
-    pattern (§10.2). ``exact`` defaults to enumeration whenever the label space
-    is at most 5,000,000 assignments.
+    pattern. ``exact`` defaults to enumerating every label assignment whenever
+    there are at most 5,000,000 of them, which covers the C(38,6) = 2,760,681
+    of this cohort; below that fallback the null is Monte Carlo and the
+    returned ``method`` says so.
+
+    Returns ``auc``, the two-sided exact p-value, and ``[auc_lo, auc_hi]``: the
+    percentile interval of the stratified bootstrap of
+    :func:`bootstrap_auc_ci`. That interval is the only one reported. The
+    Hanley-McNeil normal approximation is not used: at n1 = 6 it routinely runs
+    past 1 and has to be clipped, which is not an interval so much as an
+    apology for one.
     """
     x = np.asarray(x, float)
     y = np.asarray(y, float)
@@ -88,19 +120,28 @@ def mannwhitney(x, y, exact: bool | None = None, n_perm: int = 200_000,
         p = float((1 + np.sum(np.abs(aucs - 0.5) >= obs - 1e-12)) / (n_perm + 1))
         method = f"Monte Carlo ({n_perm:,} draws)"
 
-    lo, hi = hanley_mcneil_ci(auc, n1, n2)
-    bs = bootstrap_auc_ci(x, y, n_boot=boot, seed=seed) if boot else {
-        "lo": np.nan, "hi": np.nan}
+    bs = (bootstrap_auc_ci(x, y, n_boot=boot, alpha=alpha, seed=seed) if boot
+          else {"lo": np.nan, "hi": np.nan, "n_boot": 0})
     return {"auc": float(auc), "rank_biserial": float(2 * auc - 1), "p": p,
             "n1": n1, "n2": n2, "method": method,
-            "auc_lo": lo, "auc_hi": hi,                       # Hanley-McNeil
-            "auc_lo_boot": bs["lo"], "auc_hi_boot": bs["hi"],  # stratified boot
-            "hm_clipped": bool(hi >= 1.0 - 1e-9 or lo <= 1e-9),
+            "auc_lo": bs["lo"], "auc_hi": bs["hi"],
+            "ci_method": (f"stratified percentile bootstrap "
+                          f"({bs['n_boot']:,} resamples, "
+                          f"{100 * (1 - alpha):.0f}%)"),
+            "n_boot": bs["n_boot"], "alpha": alpha,
             "U": float(auc * n1 * n2)}
 
 
+# ---------------------------------------------------------------------------
+# Retained, not reported. Nothing in the pipeline calls anything from here to
+# the end of this block: the reported interval is the stratified bootstrap
+# above, the reported p-value is the exact permutation one, and neither
+# multiplicity correction nor nuisance adjustment nor a power calculation is
+# part of the procedure. Kept because they were used while the analysis was
+# being developed, and are cheap to keep correct.
+# ---------------------------------------------------------------------------
 def hanley_mcneil_se(auc: float, n1: int, n2: int) -> float:
-    """§10.2 / §10.12 distribution-free SE of the AUC (Hanley & McNeil, 1982)."""
+    """Distribution-free SE of the AUC (Hanley & McNeil, 1982). Not reported."""
     a = min(max(auc, 1e-9), 1 - 1e-9)
     q1 = a / (2 - a)
     q2 = 2 * a * a / (1 + a)
@@ -116,12 +157,13 @@ def hanley_mcneil_ci(auc, n1, n2, alpha=0.05):
 
 def bootstrap_auc_ci(x, y, n_boot: int = 10_000, alpha: float = 0.05,
                      seed: int = 0) -> dict:
-    """Percentile CI on the AUC by resampling subjects within each group.
+    """The reported AUC interval: stratified nonparametric percentile bootstrap.
 
-    The Hanley-McNeil interval is a normal approximation and is unreliable at
-    n1 = 6, where it routinely runs past 1 and has to be clipped. Resampling the
-    two groups separately keeps the 6/32 allocation fixed and gives an interval
-    that cannot leave [0, 1] by construction. Both are reported (§10.2).
+    Each group is resampled independently, with replacement, at its original
+    size, so the 6/32 allocation is held fixed; the AUC is recomputed on every
+    resample and the interval is the ``[alpha/2, 1 - alpha/2]`` quantile pair of
+    those replicates. It cannot leave [0, 1] by construction, which the normal
+    approximation at n1 = 6 cannot promise.
     """
     x = np.asarray(x, float); y = np.asarray(y, float)
     x, y = x[np.isfinite(x)], y[np.isfinite(y)]
@@ -142,7 +184,12 @@ def bootstrap_auc_ci(x, y, n_boot: int = 10_000, alpha: float = 0.05,
 
 def min_detectable_effect(n1: int, n2: int, alpha: float = 0.05,
                           power: float = 0.80) -> dict:
-    """§10.12 smallest AUC reaching ``power`` at ``alpha``, at this allocation."""
+    """Smallest AUC reaching ``power`` at ``alpha``, at this allocation.
+
+    Not reported: post-hoc power is a deterministic function of the p-value
+    (Hoenig & Heisey, 2001) and the design power adds nothing the interval does
+    not already say.
+    """
     z_a = stats.norm.ppf(1 - alpha / 2)
     z_b = stats.norm.ppf(power)
     se0 = hanley_mcneil_se(0.5, n1, n2)
@@ -175,7 +222,7 @@ def required_n(auc: float, ratio: float, alpha: float = 0.05,
 # §10.7 multiplicity
 # ---------------------------------------------------------------------------
 def holm(pvals) -> np.ndarray:
-    """Holm (1979) step-down adjusted p-values."""
+    """Holm (1979) step-down adjusted p-values. Not reported."""
     p = np.asarray(pvals, float)
     order = np.argsort(p)
     m = len(p)
@@ -188,7 +235,7 @@ def holm(pvals) -> np.ndarray:
 
 
 def maxt(features: dict, labels, n_perm: int = 200_000, seed: int = 0) -> dict:
-    """§10.7 maxT family-wise correction over a declared family.
+    """maxT family-wise correction over a declared family. Not reported.
 
     The null maximum of ``|AUC - 0.5|`` across the family is accumulated inside
     the same permutation loop that produces the marginal nulls, so the
@@ -240,7 +287,8 @@ def maxt(features: dict, labels, n_perm: int = 200_000, seed: int = 0) -> dict:
 # §10.3 nuisance adjustment
 # ---------------------------------------------------------------------------
 def freedman_lane(y, labels, nuisance, n_perm: int = 200_000, seed: int = 0):
-    """§10.3 Freedman-Lane adjustment for a between-subject nuisance.
+    """Freedman-Lane adjustment for a between-subject nuisance. Not reported:
+    the nuisances are reported as correlations, and the label enters no fit.
 
     ``y`` is regressed on the nuisance, the residuals carry the tested signal,
     and the label permutation is applied to them, so the nuisance structure is
@@ -380,6 +428,39 @@ def partition_agreement(a, b, n_perm: int = 200_000, seed: int = 0) -> dict:
 # ---------------------------------------------------------------------------
 # §2.3 / §11 duration controls
 # ---------------------------------------------------------------------------
+def correlate(a, b) -> dict:
+    """Pearson and Spearman correlation of two per-recording vectors.
+
+    Both are reported for every endpoint: Pearson answers "does it move
+    linearly with this?", Spearman "does it order the infants the same way?",
+    and at n = 38 with bounded, skewed endpoints the two can disagree in ways
+    worth seeing.
+    """
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    ok = np.isfinite(a) & np.isfinite(b)
+    n = int(ok.sum())
+    out = {"pearson_r": np.nan, "pearson_p": np.nan,
+           "spearman_rho": np.nan, "spearman_p": np.nan, "n": n}
+    if n < 4 or np.std(a[ok]) == 0 or np.std(b[ok]) == 0:
+        return out
+    r, pr = stats.pearsonr(a[ok], b[ok])
+    rho, ps = stats.spearmanr(a[ok], b[ok])
+    out.update({"pearson_r": float(r), "pearson_p": float(pr),
+                "spearman_rho": float(rho), "spearman_p": float(ps)})
+    return out
+
+
+def correlation_table(endpoints: dict, covariates: dict) -> dict:
+    """Every endpoint against every covariate, Pearson and Spearman.
+
+    ``endpoints`` and ``covariates`` map a name to one value per recording.
+    Returns ``{endpoint: {covariate: correlate(...)}}``. The label enters
+    nothing here.
+    """
+    return {e: {c: correlate(v, u) for c, u in covariates.items()}
+            for e, v in endpoints.items()}
+
+
 def duration_control(feature, log_len) -> dict:
     """Spearman correlation of a feature with ``log L_i`` (§2.3 control 1)."""
     f, L = np.asarray(feature, float), np.asarray(log_len, float)
@@ -411,3 +492,48 @@ def loo_auc(x, y, exact: bool = True) -> list:
         r = mannwhitney(x, y[:i] + y[i + 1:], exact=exact)
         out.append({"dropped": "neg", "index": i, "auc": r["auc"], "p": r["p"]})
     return out
+
+
+# ---------------------------------------------------------------------------
+# family of features tested together: Westfall-Young maximum-statistic
+# ---------------------------------------------------------------------------
+def median_contrast(M: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Median difference (positive − negative), one value per column."""
+    with np.errstate(invalid="ignore"):
+        return np.nanmedian(M[y == 1], axis=0) - np.nanmedian(M[y == 0], axis=0)
+
+
+def maxstat_label_test(M, labels, n_perm: int = 10_000, seed: int = 0,
+                       names=None, contrast=median_contrast) -> dict:
+    """Label-permutation test over a family of features, max-statistic corrected.
+
+    ``M`` is ``(n_subjects, n_features)`` and the recording is the exchangeable
+    unit, so only the labels are permuted. Family-wise error across the columns
+    is controlled by the Westfall-Young maximum-statistic procedure, and **every
+    column is reported whatever any one of them shows**. The columns must share
+    a scale (the maximum is taken without standardisation), which holds for the
+    families this package tests: coupled-time fractions and normalised
+    entropies both live on ``[0, 1]``.
+    """
+    M = np.asarray(M, float)
+    y = np.asarray(labels).astype(int)
+    if len(y) != len(M):
+        raise ValueError(f"{len(M)} recordings but {len(y)} labels")
+    n, n1 = len(y), int(y.sum())
+    if n1 == 0 or n1 == n:
+        raise ValueError("labels are degenerate (one group is empty)")
+    observed = contrast(M, y)
+    rng = np.random.default_rng(seed)
+    null = np.empty((n_perm, M.shape[1]))
+    for b in range(n_perm):
+        yp = np.zeros(n, int)
+        yp[rng.choice(n, n1, replace=False)] = 1
+        null[b] = contrast(M, yp)
+    null_max = np.nanmax(np.abs(null), axis=1)
+    a = np.abs(observed)
+    return {"observed": observed,
+            "p_corrected": (1 + (null_max[:, None] >= a[None, :]).sum(0)) / (1 + n_perm),
+            "p_uncorrected": (1 + (np.abs(null) >= a[None, :]).sum(0)) / (1 + n_perm),
+            "null_max": null_max, "n_perm": n_perm,
+            "names": None if names is None else tuple(names),
+            "n_pos": n1, "n_neg": n - n1}

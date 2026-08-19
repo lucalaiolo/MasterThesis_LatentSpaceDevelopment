@@ -533,12 +533,23 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
                     window=cfg["ff_window"], stride=cfg["ff_stride"],
                     bins=cfg["ff_bins"], minr=cfg["ff_minr"],
                     maxr=cfg["ff_maxr"], large_motion=cfg["ff_large_motion"],
-                    theta=cfg["ff_theta"], smooth=cfg["ff_smooth"])
+                    theta=cfg["ff_theta"], smooth=cfg["ff_smooth"],
+                    lowconf_rate=cfg["ff_lowconf_rate"],
+                    lowconf_rate_distal=max(cfg["ff_lowconf_rate"], 0.2))
     obs = [observed.get(v) for v in vids] if observed else [None] * len(vids)
     if observed and len(observed) < len(vids):
         print(f"  WARNING: 'observed' flags present for {len(observed)} of "
               f"{len(vids)} recordings; the rest are treated as fully observed")
-    ds = FF.fidgetyfind_dataset([pose[v] for v in vids], obs, p)
+    poses = [pose[v] for v in vids]
+    calibrated = bool(cfg.get("ff_calibrate"))
+    if calibrated:
+        p = FF.calibrate_band(poses, obs, p, centre_pct=cfg["ff_centre_pct"])
+        print(f"  band calibrated to this cohort: [{p.minr:.2f}, {p.maxr:.2f}]% "
+              f"of the parent limb per frame, window {p.window}, in-range rate "
+              f"{p.in_range_rate:.2f} (centre percentile "
+              f"{cfg['ff_centre_pct']:g}; --ff-no-calibrate for the published "
+              f"band).")
+    ds = FF.fidgetyfind_dataset(poses, obs, p)
     y = np.asarray(labels).astype(int)
     pos = y == 1
 
@@ -646,6 +657,10 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
         "positive_rate_mean": ds["positive_rate_mean"],
         "coverage_mean": ds["coverage_mean"],
         "params": ds["params"], "chain_test": test, "diagnosis": diag,
+        "calibrated": calibrated,
+        "band_label": (f"re-calibrated band [{p.minr:.2f}, {p.maxr:.2f}]"
+                       if calibrated else
+                       f"published band [{p.minr:.1f}, {p.maxr:.1f}]"),
         "chain_tests": chain_tests, "tests": tests,
         "redundancy": redundancy, "agreement": agreement,
         "window_entropy": [np.asarray(e, float) for e in ds["E"]],
@@ -918,6 +933,23 @@ def main(argv=None):
                          "jitter lives at the same amplitude as a fidget and "
                          "is directionally uniform, so this inflates the "
                          "entropy; a sensitivity check, not a better setting.")
+    ap.add_argument("--ff-no-calibrate", dest="ff_calibrate",
+                    action="store_false",
+                    help="use the published amplitude band [minr, maxr] as-is "
+                         "instead of calibrating it to this cohort's scale. The "
+                         "published band does not fit this data (it is an order "
+                         "of magnitude above the per-frame amplitudes here), so "
+                         "this yields an all-zero, unusable result; kept for "
+                         "comparison only.")
+    ap.set_defaults(ff_calibrate=True)
+    ap.add_argument("--ff-centre-pct", type=float, default=75.0,
+                    help="the amplitude percentile the calibrated band's centre "
+                         "is placed on (default 75).")
+    ap.add_argument("--ff-lowconf-rate", type=float, default=0.5,
+                    help="fraction of a window's frames allowed to be "
+                         "unobserved before it is voided (default 0.5). The "
+                         "binary 'observed' flag makes the published 0.1 rate "
+                         "over-aggressive on this cohort.")
     ap.add_argument("--ff-panels", action="store_true",
                     help="also write one FidgetyFind timeline panel per "
                          "recording under figures/fidgetyfind/.")
@@ -958,6 +990,9 @@ def main(argv=None):
         "ff_minr": args.ff_minr, "ff_maxr": args.ff_maxr,
         "ff_large_motion": args.ff_large_motion,
         "ff_theta": args.ff_theta, "ff_smooth": not args.ff_no_smooth,
+        "ff_calibrate": args.ff_calibrate,
+        "ff_centre_pct": args.ff_centre_pct,
+        "ff_lowconf_rate": args.ff_lowconf_rate,
         "skip_fidgetyfind": args.skip_fidgetyfind,
         "fluency_similarity": args.fluency_similarity,
         "fluency_omega": args.fluency_omega,

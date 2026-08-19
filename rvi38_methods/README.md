@@ -275,8 +275,15 @@ keypoint smoothing.
 > band.** 37 of 38 recordings score exactly `0.0`, because 2–6 % of a typical
 > window's frames land in `[4.5, 8.0]` against the 20 % the construct needs.
 > The run prints a measurement check above the group contrasts and refuses to
-> let the resulting AUC 0.5 / p = 1 be read as a negative result. Causes and
-> evidence: [`docs/FIDGETYFIND_FIDELITY.md` §13](../docs/FIDGETYFIND_FIDELITY.md#13-what-the-construct-actually-does-on-rvi38_analysiscsv).
+> let the resulting AUC 0.5 / p = 1 be read as a negative result.
+>
+> `FF.calibrate_band(...)` slides the amplitude ladder onto this cohort's scale
+> and makes it fire (hip coverage 34 % → 65 %), but that is a re-calibration,
+> not the published measurement, and corrected for the search it took to find
+> it the group effect is p = 0.13 two-sided / 0.06 one-sided. The real fix is
+> raw pixel keypoints with detector confidences, before torso normalisation and
+> rigid-skeleton fitting. Causes, evidence and options:
+> [`docs/FIDGETYFIND_FIDELITY.md` §13](../docs/FIDGETYFIND_FIDELITY.md#13-what-the-construct-actually-does-on-rvi38_analysiscsv).
 
 What is adapted, and why — a full audit, claim by claim against the reference
 code, is in [`docs/FIDGETYFIND_FIDELITY.md`](../docs/FIDGETYFIND_FIDELITY.md);

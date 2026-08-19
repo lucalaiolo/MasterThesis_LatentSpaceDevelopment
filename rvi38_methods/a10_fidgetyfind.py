@@ -471,7 +471,14 @@ def aggregate(E: np.ndarray, chains, params: FFParams = FFParams()) -> dict:
         v = np.asarray(v, float)[idx]
         return float(np.nanmean(v)) if len(idx) and np.isfinite(v).any() else float("nan")
 
-    return {"median_entropy": med, "positive_rate": pos, "coverage": cov,
+    # The mean over windows, kept beside the median because the median is
+    # fragile in exactly the way this cohort is: when most windows are quiet the
+    # median window is a rate-rule 0.0 and the median collapses, while the mean
+    # still registers the active windows. ``diagnose`` compares the two.
+    mean = np.array([float(np.nanmean(E[:, i])) if np.isfinite(E[:, i]).any()
+                     else np.nan for i in range(len(chains))])
+    return {"median_entropy": med, "mean_entropy": mean,
+            "positive_rate": pos, "coverage": cov,
             "n_windows": int(E.shape[0]),
             "n_scoreable": np.isfinite(E).sum(axis=0).astype(int),
             "score": _mean(med, list(range(len(chains)))),
@@ -528,6 +535,7 @@ def fidgetyfind_dataset(poses, observeds=None, params: FFParams = FFParams()
             "gates": [r["gates"] for r in per],
             "in_band_rate": [r["in_band_rate"] for r in per],
             "median_entropy": np.vstack([r["median_entropy"] for r in per]),
+            "mean_entropy": np.vstack([r["mean_entropy"] for r in per]),
             "positive_rate": np.vstack([r["positive_rate"] for r in per]),
             "coverage": np.vstack([r["coverage"] for r in per]),
             "n_windows": np.array([r["n_windows"] for r in per], int),
@@ -616,7 +624,7 @@ def diagnose(ds: dict, params: FFParams = FFParams()) -> dict:
     if thin.any():
         _hit(thin,
              f"the median window puts {100 * np.nanmedian(r[thin]):.0f}% of its "
-             f"frames inside the band [{lo}, {hi}], against the "
+             f"frames inside the band [{lo:.2f}, {hi:.2f}], against the "
              f"{100 * params.in_range_rate:.0f}% this construct needs before it "
              f"will compute an entropy at all, so the typical window takes the "
              f"score 0.0 by the rate rule and not by measurement")
@@ -633,6 +641,29 @@ def diagnose(ds: dict, params: FFParams = FFParams()) -> dict:
                   f"{GATE_NAMES[worst]} gate is the main cause "
                   f"({100 * np.nanmean(g[low][:, worst]):.0f}% of windows)")
 
+    # The median-over-windows reduction (section 8, ours) collapses to 0.0 as
+    # soon as most windows are quiet, even where the band is fine and the active
+    # windows carry a perfectly good measurement. That is a defect of the
+    # reduction, not of the band, and it needs a different fix -- so it is
+    # reported separately rather than folded into the band warning above.
+    med = np.asarray(ds["median_entropy"], float)
+    mean = np.asarray(ds.get("mean_entropy", med), float)
+    with np.errstate(invalid="ignore"):
+        med_dead = np.array([float(np.nanmean(med[:, ci] == 0.0))
+                             if np.isfinite(med[:, ci]).any() else np.nan
+                             for ci in range(C)])
+        mean_live = np.array([float(np.nanmean(mean[:, ci] > 0.0))
+                              if np.isfinite(mean[:, ci]).any() else np.nan
+                              for ci in range(C)])
+    out["median_zero_fraction"] = med_dead
+    out["mean_nonzero_fraction"] = mean_live
+    rescued = np.isfinite(med_dead) & (med_dead > 0.9) & (mean_live > 0.5)
+    _hit(rescued,
+         "the median window entropy is 0.0 for over 90% of recordings while the "
+         "mean is not -- most windows are quiet, so the median reduction of "
+         "section 8 is throwing away a measurement the active windows did make. "
+         "Use mean_entropy, or report the per-window entropies directly")
+
     zf = out["score_zero_fraction"]
     out["degenerate"] = bool(
         (np.isfinite(zf) and zf > 0.9) or out["score_distinct_values"] < 3)
@@ -643,7 +674,8 @@ def diagnose(ds: dict, params: FFParams = FFParams()) -> dict:
                  f"score takes {out['score_distinct_values']} distinct "
                  f"value(s) across the cohort. Any AUC, p-value or correlation "
                  f"computed from it is a statement about the band "
-                 f"[{lo}, {hi}] not fitting this data, NOT about the infants.")
+                 f"[{lo:.2f}, {hi:.2f}] not fitting this data, NOT about the "
+                 f"infants.")
     out["warnings"] = w
     return out
 
@@ -668,3 +700,84 @@ def format_diagnosis(d: dict) -> str:
         L.append("     no degeneracy detected: the band fits and the entropy "
                  "is being computed")
     return "\n".join(L)
+
+
+def calibrate_band(poses, observeds=None, params: FFParams = FFParams(),
+                   centre_pct: float = 75.0, min_samples: int = 10,
+                   window_grid=(50, 70, 100, 150)) -> FFParams:
+    """Slide the published amplitude ladder onto this cohort's own scale.
+
+    Use only when ``diagnose`` says the published band does not fit, and say in
+    print that you used it: the result is no longer the published measurement.
+
+    The published numbers ``minr=4.5``, ``maxr=8.0``, ``large_motion=10.0`` are
+    a calibration against the authors' detector, cohort and preprocessing. They
+    fail to transfer in two independent ways when the amplitude distribution
+    differs (see ``docs/FIDGETYFIND_FIDELITY.md`` section 13):
+
+    * **location** -- the whole ladder can sit far from where the data lives;
+    * **width** -- ``maxr/minr`` is fixed at 1.78, and a band that narrow cannot
+      hold ``in_range_rate`` of a broad amplitude distribution *at any
+      location*, so the rate rule fires however the band is placed.
+
+    This fixes both, without touching the construct's internal geometry:
+
+    1. all four amplitude thresholds are multiplied by one factor ``s``, chosen
+       so the band's geometric centre ``sqrt(minr*maxr) = 6.0`` lands on the
+       ``centre_pct``-th percentile of the cohort's pooled per-frame amplitudes
+       over observed frames. The published ratios 4.5 : 8.0 : 10.0 survive;
+    2. ``in_range_rate`` is replaced by the *sample count* it encodes upstream
+       (the reference's 0.2 x 50 frames = 10 directions in the histogram), and
+       the shortest window in ``window_grid`` that supplies 10 samples at the
+       cohort's realised in-band share is chosen.
+
+    ``centre_pct`` is a free choice and there is no principled value for it --
+    that is the honest cost of the published band not transferring. **Fix it
+    before you look at the labels.** On this cohort the group contrast is
+    stable for ``centre_pct`` in roughly 65-85, but stability is not
+    significance: corrected for the whole search, the effect does not reach it.
+    """
+    poses = list(poses)
+    observeds = [None] * len(poses) if observeds is None else list(observeds)
+    pool = []
+    for x, o in zip(poses, observeds):
+        f = motion_features(x, o, params)
+        pool.append(f["magnitude"][f["score"] > 0])
+    pool = np.concatenate(pool) if pool else np.zeros(0)
+    pool = pool[np.isfinite(pool)]
+    if pool.size == 0:
+        raise ValueError("no observed frames to calibrate against")
+
+    centre = float(np.percentile(pool, float(centre_pct)))
+    s = centre / float(np.sqrt(params.minr * params.maxr))
+    out = replace(params,
+                  minr=params.minr * s, maxr=params.maxr * s,
+                  large_motion=params.large_motion * s,
+                  parent_motion_hand=params.parent_motion_hand * s,
+                  parent_motion_foot=params.parent_motion_foot * s)
+    if params.minr_distal is not None:
+        out = replace(out, minr_distal=params.minr_distal * s)
+    if params.maxr_distal is not None:
+        out = replace(out, maxr_distal=params.maxr_distal * s)
+
+    # Pick the window from the realised per-window in-band *count*, not from the
+    # pooled per-frame share: window activity is heavy-tailed, so the median
+    # window holds noticeably less than the cohort average and sizing on the
+    # average leaves the median window still failing the rate rule.
+    need = float(min_samples)
+    feats = [motion_features(x, o, out) for x, o in zip(poses, observeds)]
+    window = max(window_grid)
+    for w in sorted(window_grid):
+        counts = []
+        probe = replace(out, window=w, stride=max(w // 2, 1))
+        for f in feats:
+            mag, sc = f["magnitude"], f["score"]
+            for s0 in window_starts(mag.shape[0] + 1, probe):
+                sl = slice(int(s0), int(s0) + w)
+                m, c = mag[sl], sc[sl]
+                counts.append(((c > 0) & (m >= out.minr) & (m <= out.maxr)).sum(axis=0))
+        if counts and float(np.median(np.concatenate(counts))) >= need:
+            window = w
+            break
+    return replace(out, window=window, stride=max(window // 2, 1),
+                   in_range_rate=need / window)

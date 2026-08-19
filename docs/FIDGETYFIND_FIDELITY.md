@@ -936,14 +936,18 @@ not have it. It is not fixable by re-tuning a threshold.
 
 ### 13.5 What was changed in the code
 
-Nothing about the measurement. `window_entropies` now also records the in-band
-frame rate of every window (whether or not a gate later voided it — that is
-what says whether the *band* fits, independently of the gates), and
-`a10_fidgetyfind.diagnose` / `format_diagnosis` turn that plus the gate
-breakdown into a verdict. `run_analysis.py::fidgetyfind` prints it before the
-group contrasts and, when the score is degenerate, prints an explicit refusal
-to treat the contrasts as a negative result. Window entropies are unchanged —
-`test_fidgetyfind_degeneracy_check` pins that.
+Nothing about the measurement, and no default was retuned. `window_entropies`
+now also records the in-band frame rate of every window (whether or not a gate
+later voided it — that is what says whether the *band* fits, independently of
+the gates); `aggregate` returns `mean_entropy` beside `median_entropy` (§13.7);
+`diagnose` / `format_diagnosis` turn those plus the gate breakdown into a
+verdict; and `calibrate_band` implements option 2 of §13.8 as an explicit,
+opt-in call. `run_analysis.py::fidgetyfind` prints the verdict before the group
+contrasts and, when the score is degenerate, prints an explicit refusal to
+treat the contrasts as a negative result. Window entropies at a given set of
+parameters are unchanged — `test_fidgetyfind_degeneracy_check` pins that, and
+`test_fidgetyfind_calibration` pins that calibration recovers a planted signal
+from a cohort whose amplitudes are 4× too small for the published band.
 
 ### 13.6 Reproducing §13
 
@@ -1016,25 +1020,93 @@ for c, (b, cj) in FF.CHAINS.items():
           f"v off perpendicular {np.median(np.concatenate(a_v)):.1f} deg")
 ```
 
-### 13.7 What to do about it
+### 13.7 The third failure: the reduction
 
-Not a decision this document can make, but the options, in order of honesty:
+§13.2 and §13.4 are about the input. There is also a defect in **our own**
+reduction (§8), and it is separable from them.
 
-1. **Report the failure.** `fidgetyfind_score` at the published band is not a
-   result and must not appear as one. §10's wording does not cover this case;
-   the safe sentence is that the published band did not transfer to this
-   cohort's keypoint representation, and say why (§13.2, §13.4).
-2. **Re-derive the band on this cohort and declare it re-derived.** The
-   construct is not dead — swept over plausible bands it does carry signal in
-   the predicted direction (abnormal lower), reaching AUC ≈ 0.22 on the hips
-   around `[1.5, 6.0]`. **That number is not reportable as it stands**: it comes
-   from a post-hoc sweep on 38 recordings with 6 positives, and the sweep also
-   passes through settings where the effect reverses. Any re-derived band needs
-   to be fixed by a rule that does not look at the labels — e.g. anchoring
-   `minr` at a fixed percentile of the cohort's own amplitude distribution —
-   and stated as an adaptation, which moves the hips out of the "unadapted
-   published path" column of §3.
-3. **Fix the input, not the threshold.** The rigid skeleton (§13.4) and the
-   binary confidence (§6.4) are both upstream. Raw per-frame keypoints with
-   real detector scores would remove the two deepest deviations at once, and
-   `a10_fidgetyfind.py` needs no change to consume them.
+`median_entropy` is the median over a recording's windows. This cohort's
+windows are mostly quiet, so the median window is a rate-rule `0.0` and the
+median collapses — *even where the active windows made a perfectly good
+measurement*. Swapping the reduction alone, at the unchanged published band:
+
+| reduction | recordings scoring > 0 | AUC hips | AUC all six |
+|---|---|---|---|
+| median (current) | 1 / 38 | — (degenerate) | — |
+| mean | 37 / 38 | 0.372 | 0.333 |
+| median over windows that actually computed an entropy | 37 / 38 | 0.303 | 0.258 |
+
+So part of what looked like a band failure was a reduction failure. `aggregate`
+now returns `mean_entropy` beside `median_entropy`, and `diagnose` warns when
+the median is dead while the mean is not.
+
+### 13.8 What to do about it
+
+**First, the honest statistics**, because they bound everything below. Across
+138 usable configurations — band scale `s ∈ {1.0, 0.5, 0.4, 0.35, 0.3}` × window
+{50, 100} × confidence rate {0.1, 0.5} × four reductions × {hips, all six} —
+the best is `s = 0.35`, window 100, `lowconf_rate = 0.5`, fidgety-window rate on
+the hips: **AUC 0.135, naive p = 0.0033**. Corrected for that search by a
+max-statistic permutation test (5 000 permutations of the labels, recomputing
+the whole selection each time):
+
+| | p |
+|---|---|
+| naive, best configuration, uncorrected | 0.0033 |
+| **selection-corrected, two-sided** | **0.133** |
+| selection-corrected, one-sided (the construct predicts the sign a priori) | 0.063 |
+
+135 of the 138 configurations point in the predicted direction (AUC < 0.5,
+median 0.305), which is encouraging but not independent evidence — the
+configurations are heavily correlated. With 6 abnormal against 32 normal the
+design *can* detect a real effect (perfect separation would give p ≈ 1.4 × 10⁻⁹),
+so this is a genuinely marginal effect, not a power ceiling.
+
+**Do not report the naive p.** Anything drawn from a re-calibrated band is
+suggestive at best, and must be labelled as a re-calibration.
+
+**Now the options, in order of value.**
+
+1. **Run it on raw keypoints. This is the real fix, and the only one that
+   restores the published construct.** Every problem in §13 except §13.7 comes
+   from the input representation, not from the code: the band mismatch (§13.2)
+   is largely a jitter mismatch — the authors' band was calibrated on raw
+   OpenPose output, whose per-frame displacement carries detector noise our
+   rigid reconstruction has removed — and §13.4 is the rigidification itself.
+   What is needed is the keypoint table **before** torso normalisation and
+   **before** the rigid-skeleton fit, in pixels, with the detector's per-joint
+   confidence instead of a binary flag. `a10_fidgetyfind.py` consumes that with
+   no change: nothing in it assumes normalised input. If that table exists
+   anywhere in the upstream pipeline, this is where to spend the effort.
+
+2. **If it does not exist: re-calibrate, and rename.** `calibrate_band` slides
+   the whole amplitude ladder onto this cohort's scale, preserving the
+   published ratios 4.5 : 8.0 : 10.0, and replaces `in_range_rate` by the
+   sample count it encodes (10 directions in the histogram), choosing the
+   window that supplies it at the median window. On this cohort:
+
+   ```python
+   p = FF.calibrate_band(P, O, FF.FFParams(fps=25.0), centre_pct=75.0)
+   p = FF.replace(p, lowconf_rate=0.5, lowconf_rate_distal=0.5)   # see §6.4
+   ```
+
+   giving band `[2.04, 3.63]`, `large_motion 4.54`, window 100 (4.0 s),
+   `in_range_rate 0.10`. Hip coverage rises from 34 % to 64–69 %, windows
+   scoring `0.0` fall from 92 % to 44 %, and the degeneracy flag clears. The
+   `centre_pct` argument is a free choice with no principled value — that is
+   the cost of the band not transferring — so **fix it before looking at the
+   labels**, and report §13.8's corrected p, not the naive one.
+
+3. **Report the per-window entropies and stop reducing.** The released code
+   stops there (§8) and the reduction is the part with no published warrant.
+   The distribution of window entropies per recording is a defensible primary
+   object, and it sidesteps §13.7 entirely.
+
+4. **Do not** fix this by lowering `theta`, by dropping chains that look bad,
+   or by choosing the band after seeing the contrast. §13.8's corrected p is
+   what that search is worth.
+
+**What survives regardless.** The construct cannot be quoted as the published
+measurement on this cohort under any of these options: at the published band it
+does not fire, and every setting that makes it fire is a re-calibration. §10's
+suggested wording does not cover this and should not be used as it stands.

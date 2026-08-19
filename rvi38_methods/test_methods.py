@@ -922,6 +922,58 @@ def test_fidgetyfind_degeneracy_check():
 
 
 # ---------------------------------------------------------------------------
+def test_fidgetyfind_calibration():
+    """calibrate_band recovers a construct that a scale mismatch had killed."""
+    print("\nFidgetyFind band calibration")
+    import make_synthetic as MS
+    rng = np.random.default_rng(12)
+    F = 1200
+    poses, y = [], []
+    for present in (True,) * 8 + (False,) * 4:
+        moves = {}
+        for moving, parent in MS.FIDGETY_CHAINS.items():
+            ref = float(np.linalg.norm(MS.BASE[moving] - MS.BASE[parent]))
+            # Quarter-amplitude cohort: the same planted structure, measured
+            # through a pipeline whose per-frame displacements are 4x smaller.
+            moves[moving] = MS.BASE[moving] + 0.25 * ref * MS.fidgety_layer(
+                F, rng, present)
+        poses.append(_ff_skeleton(F, moves))
+        y.append(0 if present else 1)
+    y = np.array(y)
+
+    pub = FF.FFParams(fps=25.0, start_frame=0)
+    d0 = FF.diagnose(FF.fidgetyfind_dataset(poses, None, pub), pub)
+    check("the published band is degenerate on a 4x-smaller cohort",
+          d0["degenerate"])
+
+    cal = FF.calibrate_band(poses, None, pub, centre_pct=75.0)
+    check("calibration scales the whole ladder by one factor",
+          abs(cal.maxr / cal.minr - pub.maxr / pub.minr) < 1e-9
+          and abs(cal.large_motion / cal.maxr
+                  - pub.large_motion / pub.maxr) < 1e-9,
+          f"band [{cal.minr:.2f}, {cal.maxr:.2f}]")
+    check("calibration moves the band down for a smaller cohort",
+          cal.minr < pub.minr, f"minr {cal.minr:.2f} < {pub.minr}")
+    check("in_range_rate still encodes 10 histogram samples",
+          abs(cal.in_range_rate * cal.window - 10.0) < 1e-9,
+          f"{cal.in_range_rate:.3f} x {cal.window}")
+
+    ds = FF.fidgetyfind_dataset(poses, None, cal)
+    d1 = FF.diagnose(ds, cal)
+    check("the calibrated band is no longer degenerate", not d1["degenerate"])
+    lo, hi = ds["mean_entropy"][y == 1], ds["mean_entropy"][y == 0]
+    check("the planted signal is recovered after calibration",
+          float(np.nanmax(np.nanmean(lo[:, :2], 1)))
+          < float(np.nanmin(np.nanmean(hi[:, :2], 1))),
+          f"abnormal max {np.nanmax(np.nanmean(lo[:, :2], 1)):.3f} < "
+          f"normal min {np.nanmin(np.nanmean(hi[:, :2], 1)):.3f}")
+
+    # The mean reduction survives quiet windows that flatten the median.
+    check("the mean reduction is reported beside the median",
+          ds["mean_entropy"].shape == ds["median_entropy"].shape)
+
+
+# ---------------------------------------------------------------------------
 def test_reported_inference():
     """The endpoint contrast, against the definitions it is written from."""
     print("\nReported inference: exact Mann-Whitney, AUC, bootstrap interval")
@@ -1046,6 +1098,7 @@ def main():
     test_fidgetyfind_smoothing_and_reduction()
     test_fidgetyfind_planted_cohort()
     test_fidgetyfind_degeneracy_check()
+    test_fidgetyfind_calibration()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

@@ -608,7 +608,7 @@ def fig_fidgetyfind_subject(res, results, outdir):
     y = np.asarray(results["labels"]).astype(int)
     theta = ff.get("params", {}).get("theta", 0.5)
     fields = [("score", "FidgetyFind score\n(mean over the six chains)"),
-              ("score_proximal", "hips only\n(the unadapted published path)"),
+              ("score_proximal", "hips only"),
               ("positive_rate_mean",
                f"fidgety-window rate\n(entropy $\\geq$ {theta:g})")]
     fig, axes = plt.subplots(1, 3, figsize=(11, 4.2))

@@ -887,17 +887,49 @@ raw detections. Two consequences for this construct specifically:
   compile-time constant per chain. The measure still has the right dimensions,
   but it carries no per-subject or per-frame adaptation, and it cannot reflect
   how long this infant's thigh actually is.
-- **The direction histogram is structurally confined.** A rigid bone forces the
-  child joint onto a circle about its parent, so its displacement is
-  perpendicular to the limb axis — and the limb axis is exactly what `a_t` is
-  measured against. Of the in-band directions, **99.7 % (hips)** and
-  **88–90 % (hands)** fall in the four bins straddling ±90°; the bins around 0°
-  and 180°, i.e. motion *along* the limb, hold 0.2–0.3 % at the hips. The
-  entropy of the pooled hip histogram is 0.64, not 1.0, before any biology
-  enters. The feet escape this (41.6 % / 58.4 %, pooled entropy 0.97) because
-  the ankle inherits the knee's own motion. So on the two chains that are the
-  *unadapted published path*, the construct's dynamic range is roughly halved
-  by a property of the input format.
+- **One of the two channels that fill the direction histogram is identically
+  zero.** Write the moving joint's displacement as
+  `v = Δx_c = Δx_b + Δu`, where `u = x_c − x_b` is the bone and `Δx_b` is the
+  parent joint's own translation. Constant `‖u‖` constrains **only** `Δu`:
+  `‖u+Δu‖ = ‖u‖` forces `u_{t+1} · Δu = ‖Δu‖²/2`, i.e. `Δu` is perpendicular to
+  the limb axis up to exactly `Δθ/2`. Measured here, `∠(u_{t+1}, Δu)` is
+  89.59°–89.78° on every chain, matching `90° − Δθ/2` to 0.007° at the median
+  and to 0.03° at p90 (the 0.3 % of frames that deviate have rotations of
+  ~0.002°, at the float32 floor of the stored coordinates).
+
+  It does **not** follow that `v` is perpendicular to the limb, because `Δx_b`
+  is unconstrained. Whether the histogram collapses depends on how much the
+  parent translates relative to how much the bone turns, and that varies by
+  chain:
+
+  The column to read is how far the *measured* displacement departs from
+  perpendicular, `median | |∠(u, v)| − 90° |`. For `Δu` the same quantity is
+  the identity above and is 0.2–0.4° everywhere; for `v` it is not:
+
+  | chain | median ‖Δx_b‖ / ‖v‖ | Δu: dev. from ⊥ | v: dev. from ⊥ | in-band directions in the four bins straddling ±90° |
+  |---|---|---|---|---|
+  | hips (parent = RHip/LHip) | 0.29–0.30 | 0.4° | **7.6°** | 99.7 % |
+  | hands (parent = elbow) | 0.57–0.60 | 0.4° | **19–22°** | 88–90 % |
+  | feet (parent = knee) | 0.73–0.75 | 0.2° | **46°** | 41.6 % |
+
+  So the concentration at ±90° is not a geometric necessity — it is what
+  happens where the parent is nearly still. At the hips the parent is almost
+  pinned (MidHip is the normalisation's origin and MidHip→RHip is rigid), so
+  the knee's displacement is nearly pure thigh rotation and the bins around 0°
+  and 180° — motion *along* the limb — hold 0.2–0.3 %. Pooled hip entropy is
+  0.64, not 1.0, before any biology enters. The feet are barely affected.
+
+  What rigidity actually removes is the **radial** component of the child's
+  motion relative to its parent. In real detector output that component is
+  populated by two things: keypoint noise along the bone, and genuine
+  out-of-plane limb motion, which a 2D projection registers as foreshortening.
+  Both fill the 0°/180° bins in the authors' pixel data. Here the 2D bone
+  length is constant to float32, so neither is representable at all — the
+  source is planar-rigid, and out-of-plane movement is not merely noisy but
+  absent from the representation. That matters for this construct specifically,
+  because fidgety movements are small and three-dimensional. On the two chains
+  that are the *unadapted published path*, the dynamic range of the direction
+  histogram is roughly halved by a property of the input format.
 
 This is the most consequential fidelity issue in this document, and §§1–12 did
 not have it. It is not fixable by re-tuning a threshold.
@@ -959,6 +991,29 @@ for a, b in (("RHip", "RKnee"), ("RElbow", "RWrist"), ("RKnee", "RAnkle")):
     L = np.concatenate([np.linalg.norm(pose[v][:, J[b]] - pose[v][:, J[a]], axis=-1)
                         for v in vids])
     print(f"{a}->{b}: mean {L.mean():.5f}  sd {L.std():.1e}")
+
+# 13.4 — and what that does, and does not, force about the direction histogram
+def signed_angle(ax, w):
+    return np.degrees(np.arctan2(ax[:, 0] * w[:, 1] - ax[:, 1] * w[:, 0],
+                                 ax[:, 0] * w[:, 0] + ax[:, 1] * w[:, 1]))
+for c, (b, cj) in FF.CHAINS.items():
+    dxb, v, a_du, a_v = [], [], [], []
+    for vid in vids:
+        X, o = pose[vid].astype(float), obs[vid]
+        m = ((o[:-1, b] > 0) & (o[:-1, cj] > 0)
+             & (o[1:, b] > 0) & (o[1:, cj] > 0))
+        db, dc = (X[1:, b] - X[:-1, b])[m], (X[1:, cj] - X[:-1, cj])[m]
+        u1 = (X[1:, cj] - X[1:, b])[m]
+        dxb.append(np.linalg.norm(db, axis=-1))
+        v.append(np.linalg.norm(dc, axis=-1))
+        # deviation from perpendicular; NOT median|angle|, which sits near 90
+        # whatever the spread, because the distribution is symmetric about +/-90
+        a_du.append(abs(abs(signed_angle(u1, dc - db)) - 90))   # the identity
+        a_v.append(abs(abs(signed_angle(u1, dc)) - 90))         # what FF measures
+    f = np.median(np.concatenate(dxb)) / np.median(np.concatenate(v))
+    print(f"{c:8s} |dx_b|/|v| {f:.2f}   "
+          f"du off perpendicular {np.median(np.concatenate(a_du)):.2f} deg   "
+          f"v off perpendicular {np.median(np.concatenate(a_v)):.1f} deg")
 ```
 
 ### 13.7 What to do about it

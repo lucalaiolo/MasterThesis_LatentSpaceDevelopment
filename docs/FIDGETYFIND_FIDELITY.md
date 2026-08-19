@@ -12,6 +12,15 @@
 > If you quote a number from this pipeline, the safe phrasing is in
 > [§10](#10-how-to-describe-this-in-the-thesis).
 
+> **Status on the real cohort, added after running it (read this first).**
+> At the published band the construct **does not fire on `rvi38_analysis.csv`**.
+> 37 of 38 recordings score exactly `0.0`; `fidgetyfind_score_hips` takes two
+> distinct values across the whole cohort. This is not a negative finding about
+> these infants — it is a failed measurement, and §13 gives the evidence and the
+> cause. Nothing in §§1–12 below is retracted, but every numerical claim in
+> them that was measured on the *synthetic* cohort is marked as such, because
+> several do not survive contact with the real one.
+
 This document exists because "we ran FidgetyFind" is a claim about someone
 else's method, and the only honest way to make it is to say exactly which parts
 are theirs. Everything below is checkable: each claim names the reference file and
@@ -393,6 +402,21 @@ one. If the `observed` column is missing from a table, every frame counts as
 detected and the confidence gates never fire at all — the run log says which of
 the two situations you are in.
 
+**Measured on `rvi38_analysis.csv`.** The flag is present and is doing real
+work: 87.0 % of all keypoint-frames are observed, ranging from 96.6 % (Neck)
+to 76.6 % (LAnkle), in 74 497 unobserved runs of median length 2 and maximum
+length 255 frames.
+
+The rates transfer but the *event* they rate does not. The reference tolerates
+10 % of frames below an OpenPose score of 0.1 — a rare, genuinely-failed
+detection. We apply the same 10 % to "was interpolated", which on this cohort
+is 13 % of frames overall and clusters in long runs. The result is a far more
+aggressive gate than the reference's: it voids **63–66 % of hip windows** and
+**56–58 % of foot windows**, leaving hip coverage at 34–37 %. That is the
+largest single cause of lost windows here, and it is an artefact of the
+substitution, not of the recordings. Raising `lowconf_rate`, or carrying real
+detector scores (§12.3), is the fix; neither should be done without saying so.
+
 ### 6.5 The pose detector
 
 The authors use an OpenPose model fine-tuned on infants (their
@@ -432,10 +456,14 @@ instead.
 The argument is that `0.08` sizes a different signal. It is a threshold on
 *raw dense optical flow*, unsmoothed, on pixels; ours is a *temporally smoothed
 keypoint displacement*, which is the signal `minr`/`maxr` were calibrated for.
-Measured on this project's data, the 5-frame smoothing leaves the median
-per-frame amplitude at **42–46 %** of its unsmoothed value (all six chains,
-synthetic cohort), so applying an unsmoothed-signal threshold to a smoothed
-signal excludes most genuine movement. Concretely: with `minr_distal = 8.0` and
+Measured on the **synthetic** cohort, the 5-frame smoothing leaves the median
+per-frame amplitude at **42–46 %** of its unsmoothed value (all six chains), so
+applying an unsmoothed-signal threshold to a smoothed signal excludes most
+genuine movement. On the **real** cohort the same smoothing leaves
+**82–85 %**: the synthetic generator plants far more per-frame jitter than
+`rvi38_analysis.csv` contains, so the smoother has much less to remove there
+(§13.3). The argument for using the proximal band stands, but the 42–46 %
+figure must not be quoted as a property of the real data. Concretely: with `minr_distal = 8.0` and
 no upper edge, all four distal chains score exactly `0.0` for **all 38**
 recordings of the synthetic cohort, while the hips — which keep the proximal
 band — separate the groups normally. The construct would have reported "no
@@ -497,8 +525,9 @@ entire neighbourhood is unobserved. This is a deviation from the code as
 written; we consider the negative-weight behaviour a defect rather than a
 specification, and say so here rather than reproducing it silently.
 
-The smoothing itself is *not* optional in spirit and is on by default (and it
-is what costs the 54–58 % of per-frame amplitude quoted in §7.2):
+The smoothing itself is *not* optional in spirit and is on by default (it costs
+the 54–58 % of per-frame amplitude quoted in §7.2 on the synthetic cohort, but
+only 15–18 % on the real one — §13.3):
 FidgetyFind's band starts a few percent of a limb length per frame, which is
 the scale of keypoint jitter, and jitter is directionally uniform — unsmoothed,
 it reads as fidgety movement in every infant. `--ff-no-smooth` exists as a
@@ -602,12 +631,14 @@ is 1, per frame. The reference works in raw pixels.
   (out-of-plane torso rotation, detector noise), every joint acquires a
   spurious displacement pointing radially away from MidHip, of size
   `ε · ‖x_c‖`. As a fraction of the parent limb — the unit the band is measured
-  in — that is `ε · ‖x_c‖ / ‖x_c − x_b‖`: about `1.1 ε` at the knee
-  (`0.48 / 0.45`) but about `2.1 ε` at the wrist (`0.60 / 0.28`) — the forearm
-  is short and far from the root. (Both ratios are read off the canonical
-  resting pose in `make_synthetic.BASE`; they vary with posture.) At
-  `ε ≈ 1 %` that is ~1 % of a limb length per frame at the knee and ~2 % at the
-  wrist, against a band that starts at 4.5 %: not enough to put still frames
+  in — that is `ε · ‖x_c‖ / ‖x_c − x_b‖`: measured on `rvi38_analysis.csv`,
+  about `1.5 ε` at the knee (`0.70 / 0.456`) but about `3.1 ε` at the wrist
+  (`1.20 / 0.389`) — the forearm is short and far from the root. (Median over
+  the cohort's observed frames; they vary with posture. An earlier draft quoted
+  `1.1 ε` and `2.1 ε` from the canonical pose in `make_synthetic.BASE`, whose
+  forearm is shorter than the real one.) At
+  `ε ≈ 1 %` that is ~1.5 % of a limb length per frame at the knee and ~3 % at
+  the wrist, against a band that starts at 4.5 %: not enough to put still frames
   into the band on its own, but enough to add to genuine motion, and its
   direction is radial rather than uniform, so it perturbs the direction
   histogram rather than merely blurring it. The effect is largest exactly where
@@ -759,3 +790,196 @@ In order of value:
 With 1–4 done, the only remaining differences would be the deliberate ones of
 §7 — each a one-line parameter change — and the reduction of §8, which has no
 published counterpart to restore.
+
+---
+
+## 13. What the construct actually does on `rvi38_analysis.csv`
+
+Everything above describes the construct as built. This section reports what it
+*measures* when pointed at the real cohort, which is a separate question and
+was checked separately. The answer is that **at the published band it does not
+measure anything**, and the reason is not in §§5–9.
+
+Reproduce all of it with the snippet in §13.6.
+
+### 13.1 The result
+
+38 recordings, 145 721 frames, 25 fps, 7 015 windows.
+
+| chain | assessable | in-band rate, median window | windows scoring exactly `0.0` |
+|---|---|---|---|
+| R hip | 33.8 % | 2 % | 91.6 % |
+| L hip | 36.9 % | 2 % | 93.9 % |
+| R hand | 55.0 % | 6 % | 89.7 % |
+| L hand | 57.8 % | 4 % | 90.5 % |
+| R foot | 29.0 % | 2 % | 99.7 % |
+| L foot | 31.2 % | 2 % | 99.1 % |
+
+`fidgetyfind_score` is exactly `0.0` for **37 of 38** recordings;
+`fidgetyfind_score_hips` likewise, and takes **two** distinct values across the
+entire cohort. Every per-chain contrast returns AUC `0.500`, p `= 1`.
+
+The danger is that this is *printed in the same shape a real null result would
+be*. "Abnormal median 0.000 vs normal 0.000; AUC 0.484, p = 1" reads as "the
+published detector found no group difference"; what happened is that the
+detector never ran. `a10_fidgetyfind.diagnose` now separates the two and
+`run_analysis.py` prints its verdict above the contrasts and refuses to let a
+degenerate score be read as a negative result (§13.5).
+
+### 13.2 Why: the band does not fit this cohort
+
+The rule of §2 step 2 needs 20 % of a window's frames inside `[4.5, 8.0]`. The
+cohort delivers 2–6 %. Per-frame amplitudes, pooled over observed frames
+(percent of the parent limb per frame, rescaled to 30 fps):
+
+| chain | p25 | median | p75 | p90 | share in `[4.5, 8.0]` |
+|---|---|---|---|---|---|
+| R hip | 0.48 | 1.13 | 2.66 | 5.53 | 8.2 % |
+| L hip | 0.48 | 1.09 | 2.44 | 4.90 | 7.6 % |
+| R hand | 0.64 | 1.41 | 3.12 | 6.06 | 9.9 % |
+| L hand | 0.60 | 1.32 | 2.97 | 5.80 | 9.5 % |
+| R foot | 0.56 | 1.20 | 2.60 | 5.18 | 8.0 % |
+| L foot | 0.56 | 1.18 | 2.47 | 4.72 | 7.6 % |
+
+`4.5` sits at the **84th–89th percentile** of this cohort's own amplitude
+distribution; the band's *floor* is what most of the data fails to reach. The
+published band is a calibration against the authors' detector and cohort
+(§6.5), and it does not transfer here.
+
+### 13.3 It is not the smoothing
+
+Turning the 5-frame Gaussian off moves the in-band share from 5.1–7.8 % to
+5.9–8.8 % — nowhere near the 20 % needed. On the real cohort the smoother costs
+only 15–18 % of median amplitude (not the 42–46 % measured on the synthetic
+cohort, §7.2), because there is far less high-frequency jitter to remove.
+
+We also checked directly whether the delivered table had *already* been passed
+through the reference's kernel, which would have made §7.6 a double-smoothing
+bug. It has not. The 5-frame σ = 2 Gaussian has exact spectral nulls at
+ω = 1.4652 and 2.5551 rad/sample (5.830 Hz and 10.167 Hz at 25 fps). Welch
+spectra over the 1 023 continuously-observed segments long enough to measure
+put the ratio of each null bin to its shoulders at **0.91 and 1.10** — no
+notch. Applying the kernel once, as a positive control, drives the same ratios
+to **0.068 and 0.053**, so the test detects the kernel easily when it is there.
+A scan of every bin in 0–12.5 Hz finds no dip below 0.67 anywhere, so no
+linear-phase FIR smoother has been applied upstream either.
+
+### 13.4 The deeper problem: the skeleton is rigid
+
+Every bone length in `rvi38_analysis.csv` is **constant to float32 precision
+across every frame, every recording and every subject**, and bilaterally
+symmetric:
+
+| bone | length (torso units) | sd over all 145 721 frames |
+|---|---|---|
+| RHip→RKnee, LHip→LKnee | 0.45622 | 4.1 × 10⁻⁷ |
+| RElbow→RWrist, LElbow→LWrist | 0.38926 | 4.1 × 10⁻⁷ |
+| RKnee→RAnkle, LKnee→LAnkle | 0.57672 | 4.1 × 10⁻⁷ |
+| Neck→MidHip | 1.00000 | 0 |
+
+A per-frame similarity normalisation cannot manufacture that — it scales all
+bones by one factor, so unequal raw bones would stay unequal. The table is
+therefore a **rigid-skeleton reconstruction on a single canonical body**, not
+raw detections. Two consequences for this construct specifically:
+
+- **The limb normalisation is inert.** `‖x_c(t) − x_b(t)‖` is what makes
+  FidgetyFind free of body size and camera distance (§2). Here it is a
+  compile-time constant per chain. The measure still has the right dimensions,
+  but it carries no per-subject or per-frame adaptation, and it cannot reflect
+  how long this infant's thigh actually is.
+- **The direction histogram is structurally confined.** A rigid bone forces the
+  child joint onto a circle about its parent, so its displacement is
+  perpendicular to the limb axis — and the limb axis is exactly what `a_t` is
+  measured against. Of the in-band directions, **99.7 % (hips)** and
+  **88–90 % (hands)** fall in the four bins straddling ±90°; the bins around 0°
+  and 180°, i.e. motion *along* the limb, hold 0.2–0.3 % at the hips. The
+  entropy of the pooled hip histogram is 0.64, not 1.0, before any biology
+  enters. The feet escape this (41.6 % / 58.4 %, pooled entropy 0.97) because
+  the ankle inherits the knee's own motion. So on the two chains that are the
+  *unadapted published path*, the construct's dynamic range is roughly halved
+  by a property of the input format.
+
+This is the most consequential fidelity issue in this document, and §§1–12 did
+not have it. It is not fixable by re-tuning a threshold.
+
+### 13.5 What was changed in the code
+
+Nothing about the measurement. `window_entropies` now also records the in-band
+frame rate of every window (whether or not a gate later voided it — that is
+what says whether the *band* fits, independently of the gates), and
+`a10_fidgetyfind.diagnose` / `format_diagnosis` turn that plus the gate
+breakdown into a verdict. `run_analysis.py::fidgetyfind` prints it before the
+group contrasts and, when the score is degenerate, prints an explicit refusal
+to treat the contrasts as a negative result. Window entropies are unchanged —
+`test_fidgetyfind_degeneracy_check` pins that.
+
+### 13.6 Reproducing §13
+
+```python
+import numpy as np, build_pose, a10_fidgetyfind as FF
+from scipy.signal import welch
+
+vids, pose, obs, _ = build_pose.build("rvi38_analysis.csv", out=None)
+P, O = [pose[v] for v in vids], [obs[v] for v in vids]
+p = FF.FFParams(fps=25.0)
+
+# 13.1 / 13.2 — the verdict, and the amplitudes behind it
+ds = FF.fidgetyfind_dataset(P, O, p)
+print(FF.format_diagnosis(FF.diagnose(ds, p)))
+print("recordings scoring exactly 0:", int((ds["score"] == 0).sum()), "of", len(vids))
+
+M = np.concatenate([np.where(FF.motion_features(pose[v], obs[v], p)["score"] > 0,
+                             FF.motion_features(pose[v], obs[v], p)["magnitude"],
+                             np.nan) for v in vids])
+print("median amplitude per chain:", np.round(np.nanmedian(M, 0), 2))
+print("percentile of 4.5:", [round(100 * float((c[np.isfinite(c)] < 4.5).mean()), 1)
+                             for c in M.T])
+
+# 13.3 — was the reference kernel already applied? (exact nulls at 5.830/10.167 Hz)
+k = np.exp(-0.5 * ((np.arange(5) - 2.0) / 2.0) ** 2); k /= k.sum()
+segs = [pose[v][s:e, j, c].astype(float)          # continuously-observed runs,
+        for v in vids for j in build_pose.FREE     # long enough to survive
+        for s, e in zip(*[np.where(np.diff(np.concatenate(  # a 'valid' convolution
+            ([0], (obs[v][:, j] > 0).astype(int), [0]))) == d)[0] for d in (1, -1)])
+        if e - s >= 256 + len(k) for c in (0, 1)]
+def notches(apply_k):
+    Q = 0
+    for x in segs:
+        x = np.convolve(x, k, "valid") if apply_k else x
+        f, q = welch(x - x.mean(), fs=25.0, nperseg=256, detrend="linear")
+        Q = Q + q
+    return [round(float(Q[i] / np.exp(np.mean(np.log(np.r_[Q[i-4:i-1], Q[i+2:i+5]])))), 3)
+            for i in (int(np.argmin(abs(f - 5.8297))), int(np.argmin(abs(f - 10.1667))))]
+print("null/shoulder as delivered:", notches(False))   # ~[0.92, 1.12]
+print("null/shoulder +1 pass     :", notches(True))    # ~[0.07, 0.05]
+
+# 13.4 — the skeleton is rigid
+J = {n: i for i, n in enumerate(build_pose.JOINTS)}
+for a, b in (("RHip", "RKnee"), ("RElbow", "RWrist"), ("RKnee", "RAnkle")):
+    L = np.concatenate([np.linalg.norm(pose[v][:, J[b]] - pose[v][:, J[a]], axis=-1)
+                        for v in vids])
+    print(f"{a}->{b}: mean {L.mean():.5f}  sd {L.std():.1e}")
+```
+
+### 13.7 What to do about it
+
+Not a decision this document can make, but the options, in order of honesty:
+
+1. **Report the failure.** `fidgetyfind_score` at the published band is not a
+   result and must not appear as one. §10's wording does not cover this case;
+   the safe sentence is that the published band did not transfer to this
+   cohort's keypoint representation, and say why (§13.2, §13.4).
+2. **Re-derive the band on this cohort and declare it re-derived.** The
+   construct is not dead — swept over plausible bands it does carry signal in
+   the predicted direction (abnormal lower), reaching AUC ≈ 0.22 on the hips
+   around `[1.5, 6.0]`. **That number is not reportable as it stands**: it comes
+   from a post-hoc sweep on 38 recordings with 6 positives, and the sweep also
+   passes through settings where the effect reverses. Any re-derived band needs
+   to be fixed by a rule that does not look at the labels — e.g. anchoring
+   `minr` at a fixed percentile of the cohort's own amplitude distribution —
+   and stated as an adaptation, which moves the hips out of the "unadapted
+   published path" column of §3.
+3. **Fix the input, not the threshold.** The rigid skeleton (§13.4) and the
+   binary confidence (§6.4) are both upstream. Raw per-frame keypoints with
+   real detector scores would remove the two deepest deviations at once, and
+   `a10_fidgetyfind.py` needs no change to consume them.

@@ -556,6 +556,13 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
           f"{conf_src}")
     print(f"  windows per recording: {int(ds['n_windows'].min())}..."
           f"{int(ds['n_windows'].max())}")
+
+    # Before any group contrast: did the detector fire at all? A band that does
+    # not fit this cohort drives every window to the legitimate score 0.0, and
+    # the contrast below then reports AUC 0.5 / p = 1 -- which reads like "no
+    # group difference" but means "no measurement". See FF.diagnose.
+    diag = FF.diagnose(ds, p)
+    print(FF.format_diagnosis(diag))
     print("  per-chain median window entropy (0 = one direction, 1 = uniform), "
           "median over recordings:")
     for ci, nm in enumerate(ds["chains"]):
@@ -597,6 +604,12 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
               f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}], p = {r['p']:.4g}")
     print("     AUC below 0.5 is the expected direction: absent fidgety "
           "movement means less direction variety.")
+    if diag["degenerate"]:
+        print("  NOTE: the contrasts above are computed on a degenerate score "
+              "(see the measurement\n  check). They do not support any "
+              "statement about fidgety movement in this cohort,\n  in either "
+              "direction, and must not be reported as a negative result for "
+              "FidgetyFind.")
 
     # Is the literature construct measuring what ours measures? Descriptive.
     logL = np.log(np.asarray([pose[v].shape[0] for v in vids], float))
@@ -632,7 +645,7 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
         "score_distal": ds["score_distal"],
         "positive_rate_mean": ds["positive_rate_mean"],
         "coverage_mean": ds["coverage_mean"],
-        "params": ds["params"], "chain_test": test,
+        "params": ds["params"], "chain_test": test, "diagnosis": diag,
         "chain_tests": chain_tests, "tests": tests,
         "redundancy": redundancy, "agreement": agreement,
         "window_entropy": [np.asarray(e, float) for e in ds["E"]],

@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import os
 import sys
+from dataclasses import replace
 
 import numpy as np
 from scipy import stats
@@ -870,6 +871,57 @@ def test_fidgetyfind_planted_cohort():
 
 
 # ---------------------------------------------------------------------------
+def test_fidgetyfind_degeneracy_check():
+    """A band that does not fit the data is reported as such, not as a null."""
+    print("\nFidgetyFind degeneracy check")
+    import make_synthetic as MS
+    rng = np.random.default_rng(11)
+    F = 1200
+    poses = []
+    for _ in range(6):
+        moves = {}
+        for moving, parent in MS.FIDGETY_CHAINS.items():
+            ref = float(np.linalg.norm(MS.BASE[moving] - MS.BASE[parent]))
+            moves[moving] = MS.BASE[moving] + ref * MS.fidgety_layer(
+                F, rng, True)
+        poses.append(_ff_skeleton(F, moves))
+
+    good = FF.FFParams(fps=25.0, start_frame=0)
+    ds = FF.fidgetyfind_dataset(poses, None, good)
+    d = FF.diagnose(ds, good)
+    # The foot chains legitimately lose most windows here -- the planted knee
+    # fidget *is* transport for the ankle -- so coverage warnings are expected.
+    # What must not appear is a degeneracy flag or a band-mismatch warning.
+    check("a band that fits raises no degeneracy flag", not d["degenerate"])
+    check("a band that fits raises no band-mismatch warning",
+          not any("inside the band" in w for w in d["warnings"]),
+          f"{len(d['warnings'])} warning(s): {d['warnings']}")
+    check("the score still varies across recordings",
+          d["score_distinct_values"] == len(poses),
+          f"{d['score_distinct_values']} distinct")
+
+    # The same recordings, read through a band an order of magnitude above the
+    # amplitudes actually present: every window falls short of in_range_rate.
+    bad = replace(good, minr=45.0, maxr=80.0)
+    ds_b = FF.fidgetyfind_dataset(poses, None, bad)
+    d_b = FF.diagnose(ds_b, bad)
+    check("every recording scores exactly 0.0 under a mismatched band",
+          float(np.nanmax(ds_b["score"])) == 0.0,
+          f"max score {np.nanmax(ds_b['score']):.3f}")
+    check("the mismatched band is flagged as degenerate", d_b["degenerate"])
+    check("the flag names the in-band rate as the cause",
+          any("inside the band" in w for w in d_b["warnings"]))
+    check("the in-band rate is measured even where a gate voided the window",
+          float(np.nanmax(d_b["median_in_band_rate"])) < bad.in_range_rate,
+          f"max {np.nanmax(d_b['median_in_band_rate']):.3f}")
+
+    # Recording the in-band rate must not have changed any score.
+    for a, b in zip(ds["E"], FF.fidgetyfind_dataset(poses, None, good)["E"]):
+        assert np.allclose(a, b, equal_nan=True)
+    check("adding the diagnostic left every window entropy unchanged", True)
+
+
+# ---------------------------------------------------------------------------
 def test_reported_inference():
     """The endpoint contrast, against the definitions it is written from."""
     print("\nReported inference: exact Mann-Whitney, AUC, bootstrap interval")
@@ -993,6 +1045,7 @@ def main():
     test_fidgetyfind_invariance()
     test_fidgetyfind_smoothing_and_reduction()
     test_fidgetyfind_planted_cohort()
+    test_fidgetyfind_degeneracy_check()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

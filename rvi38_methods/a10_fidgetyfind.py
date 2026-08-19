@@ -97,6 +97,14 @@ What is adapted, and why
    priori (halfway up the normalised entropy scale: a window whose directions
    fill two of eight bins scores 0.33, four of eight 0.67).
 
+Does it fire? The band is a *calibration*, not a definition, and a cohort whose
+per-frame amplitudes sit elsewhere drives every window to the legitimate score
+0.0 and every recording to 0.0 -- reported by exactly the numbers a genuine
+null result would produce. On ``rvi38_analysis.csv`` that is what happens at the
+published band. Call ``diagnose`` after ``fidgetyfind_dataset`` and read its
+verdict before any contrast; ``docs/FIDGETYFIND_FIDELITY.md`` section 13 has
+the evidence and the causes.
+
 Directionality. High entropy = fidgety movement present = the *normal* pole.
 The GMA label marks *absence*, so the abnormal group is expected **lower**, and
 the reported AUC is expected below 0.5. Nothing here is one-sided; the tests
@@ -391,6 +399,11 @@ def window_entropies(feat: dict, params: FFParams = FFParams(),
     starts = window_starts(n_feat + 1, params)
     E = np.full((len(starts), len(chains)), np.nan)
     gates = np.zeros((len(starts), len(chains)), int)   # 0 ok, 1 conf, 2 motion
+    # How much of each window fell inside the small-movement band, recorded for
+    # every window whether or not a gate later voided it. This is the number
+    # that says whether the *band* fits the cohort at all, independently of the
+    # gates, and ``diagnose`` reads it. See the note there on silent failure.
+    in_band_rate = np.zeros((len(starts), len(chains)))
 
     for wi, s0 in enumerate(starts):
         sl = slice(int(s0), int(s0) + params.window)
@@ -398,10 +411,15 @@ def window_entropies(feat: dict, params: FFParams = FFParams(),
         if n == 0:
             continue
         for ci, name in enumerate(chains):
+            sc = score[sl, ci]
+            lo, hi = params.band(name)
+            m = mag[sl, ci]
+            in_band = (sc > 0) & (m >= lo) & (m <= hi)
+            frac = in_band.sum() / n
+            in_band_rate[wi, ci] = frac
             if scoreable is not None and not bool(np.asarray(scoreable).ravel()[wi]):
                 gates[wi, ci] = 3
                 continue
-            sc = score[sl, ci]
             if np.mean(sc < 0.1) > params.lowconf(name):
                 gates[wi, ci] = 1
                 continue
@@ -410,14 +428,12 @@ def window_entropies(feat: dict, params: FFParams = FFParams(),
             if np.mean(gated > thr) > rate:
                 gates[wi, ci] = 2
                 continue
-            lo, hi = params.band(name)
-            m = mag[sl, ci]
-            in_band = (sc > 0) & (m >= lo) & (m <= hi)
-            if in_band.sum() / n < params.in_range_rate:
+            if frac < params.in_range_rate:
                 E[wi, ci] = 0.0        # assessable, and no fidgety movement
                 continue
             E[wi, ci] = direction_entropy(ang[sl, ci][in_band], params.bins)
-    return {"E": E, "starts": starts, "chains": chains, "gates": gates}
+    return {"E": E, "starts": starts, "chains": chains, "gates": gates,
+            "in_band_rate": in_band_rate}
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +525,8 @@ def fidgetyfind_dataset(poses, observeds=None, params: FFParams = FFParams()
             "chain_class": tuple(CHAIN_CLASS[c] for c in chains),
             "E": E_list,
             "starts": [r["starts"] for r in per],
+            "gates": [r["gates"] for r in per],
+            "in_band_rate": [r["in_band_rate"] for r in per],
             "median_entropy": np.vstack([r["median_entropy"] for r in per]),
             "positive_rate": np.vstack([r["positive_rate"] for r in per]),
             "coverage": np.vstack([r["coverage"] for r in per]),
@@ -520,3 +538,133 @@ def fidgetyfind_dataset(poses, observeds=None, params: FFParams = FFParams()
             "coverage_mean": col("coverage_mean"),
             "params": {k: (list(v) if isinstance(v, tuple) else v)
                        for k, v in vars(params).items()}}
+
+
+# ---------------------------------------------------------------------------
+# is the construct measuring anything at all?
+# ---------------------------------------------------------------------------
+GATE_NAMES = {0: "scored", 1: "low confidence", 2: "large motion",
+              3: "external mask"}
+
+
+def diagnose(ds: dict, params: FFParams = FFParams()) -> dict:
+    """Check that FidgetyFind actually fired on this cohort.
+
+    FidgetyFind fails *silently*, and the failure is indistinguishable from a
+    real negative result unless you look for it. Its band ``[minr, maxr]`` is a
+    calibration: 4.5-8.0 % of the parent limb per frame is what a fidgety
+    movement looked like through the authors' detector on the authors' cohort.
+    Point the same band at data whose per-frame amplitudes live an order of
+    magnitude lower and every window falls short of ``in_range_rate``, every
+    window takes the legitimate score ``0.0`` ("assessable, nothing fidgety"),
+    and every recording reduces to ``0.0``. The group contrast then reports
+    AUC 0.5 and p = 1 -- which reads exactly like "the published detector found
+    no difference between the groups", when what happened is that the detector
+    never fired. One is a finding; the other is a broken measurement. Nothing
+    downstream can tell them apart, so it has to be checked here.
+
+    ``ds`` is the dict returned by ``fidgetyfind_dataset``. Returns per-chain
+    diagnostics and a list of ``warnings``; ``degenerate`` is True when the
+    per-recording score carries essentially no information.
+    """
+    E = [np.asarray(e, float) for e in ds["E"]]
+    chains = tuple(ds["chains"])
+    C = len(chains)
+    allE = (np.concatenate(E, axis=0) if len(E)
+            else np.zeros((0, C)))
+    gates = (np.concatenate([np.asarray(g) for g in ds["gates"]], axis=0)
+             if ds.get("gates") else np.zeros((0, C), int))
+    ibr = (np.concatenate([np.asarray(r, float) for r in ds["in_band_rate"]],
+                          axis=0) if ds.get("in_band_rate")
+           else np.zeros((0, C)))
+
+    scoreable = np.isfinite(allE)
+    n_win = allE.shape[0]
+    out = {
+        "chains": chains,
+        "n_windows": int(n_win),
+        "coverage": scoreable.mean(axis=0) if n_win else np.full(C, np.nan),
+        "gate_rate": np.array([[float((gates[:, ci] == g).mean()) if n_win
+                                else np.nan for g in (0, 1, 2, 3)]
+                               for ci in range(C)]),
+        "median_in_band_rate": (np.median(ibr, axis=0) if n_win
+                                else np.full(C, np.nan)),
+        "zero_rate": np.array([
+            float((allE[scoreable[:, ci], ci] == 0.0).mean())
+            if scoreable[:, ci].any() else np.nan for ci in range(C)]),
+    }
+
+    score = np.asarray(ds["score"], float)
+    finite = score[np.isfinite(score)]
+    out["score_zero_fraction"] = (float((finite == 0.0).mean())
+                                  if finite.size else np.nan)
+    out["score_distinct_values"] = int(np.unique(finite).size)
+
+    # One line per *kind* of failure, naming the chains it hit -- the per-chain
+    # numbers are already in the table, and a warning block longer than the
+    # report it warns about gets skimmed.
+    w = []
+    lo, hi = params.minr, params.maxr
+
+    def _hit(mask, msg):
+        names = [chains[ci] for ci in range(C) if mask[ci]]
+        if names:
+            w.append(f"{', '.join(names)}: {msg}")
+
+    r = out["median_in_band_rate"]
+    thin = np.isfinite(r) & (r < params.in_range_rate)
+    if thin.any():
+        _hit(thin,
+             f"the median window puts {100 * np.nanmedian(r[thin]):.0f}% of its "
+             f"frames inside the band [{lo}, {hi}], against the "
+             f"{100 * params.in_range_rate:.0f}% this construct needs before it "
+             f"will compute an entropy at all, so the typical window takes the "
+             f"score 0.0 by the rate rule and not by measurement")
+    z = out["zero_rate"]
+    _hit(np.isfinite(z) & (z > 0.9),
+         "over 90% of assessable windows scored exactly 0.0 -- the direction "
+         "entropy is essentially never evaluated")
+    c = out["coverage"]
+    low = np.isfinite(c) & (c < 0.5)
+    if low.any():
+        g = out["gate_rate"]
+        worst = int(np.argmax(np.nanmean(g[low][:, 1:], axis=0))) + 1
+        _hit(low, f"fewer than half the windows were assessable; the "
+                  f"{GATE_NAMES[worst]} gate is the main cause "
+                  f"({100 * np.nanmean(g[low][:, worst]):.0f}% of windows)")
+
+    zf = out["score_zero_fraction"]
+    out["degenerate"] = bool(
+        (np.isfinite(zf) and zf > 0.9) or out["score_distinct_values"] < 3)
+    if out["degenerate"]:
+        w.insert(0,
+                 f"the per-recording score is degenerate: "
+                 f"{100 * zf:.0f}% of recordings score exactly 0.0 and the "
+                 f"score takes {out['score_distinct_values']} distinct "
+                 f"value(s) across the cohort. Any AUC, p-value or correlation "
+                 f"computed from it is a statement about the band "
+                 f"[{lo}, {hi}] not fitting this data, NOT about the infants.")
+    out["warnings"] = w
+    return out
+
+
+def format_diagnosis(d: dict) -> str:
+    """The diagnosis as a printable block."""
+    L = ["  measurement check (does the construct fire on this cohort?):",
+         f"     {'chain':8s} {'assessable':>11} {'in-band rate':>13} "
+         f"{'windows = 0':>12}  gates (conf / motion)"]
+    for ci, nm in enumerate(d["chains"]):
+        g = d["gate_rate"][ci]
+        L.append(f"     {nm:8s} {100 * d['coverage'][ci]:10.1f}% "
+                 f"{100 * d['median_in_band_rate'][ci]:12.1f}% "
+                 f"{100 * d['zero_rate'][ci]:11.1f}%  "
+                 f"{100 * g[1]:.0f}% / {100 * g[2]:.0f}%")
+    if d["warnings"]:
+        L.append("  " + "!" * 68)
+        for msg in d["warnings"]:
+            L.append(f"  !! {msg}")
+        L.append("  " + "!" * 68)
+    else:
+        L.append("     no degeneracy detected: the band fits and the entropy "
+                 "is being computed")
+    return "\n".join(L)

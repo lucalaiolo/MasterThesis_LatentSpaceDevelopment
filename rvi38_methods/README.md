@@ -271,6 +271,13 @@ found), the histogram entropy and its normalisation, the window geometry
 (`--ff-minr 4.5 --ff-maxr 8.0`) and the score-weighted 5-frame Gaussian
 keypoint smoothing.
 
+> **On `rvi38_analysis.csv` this construct does not fire at the published
+> band.** 37 of 38 recordings score exactly `0.0`, because 2–6 % of a typical
+> window's frames land in `[4.5, 8.0]` against the 20 % the construct needs.
+> The run prints a measurement check above the group contrasts and refuses to
+> let the resulting AUC 0.5 / p = 1 be read as a negative result. Causes and
+> evidence: [`docs/FIDGETYFIND_FIDELITY.md` §13](../docs/FIDGETYFIND_FIDELITY.md#13-what-the-construct-actually-does-on-rvi38_analysiscsv).
+
 What is adapted, and why — a full audit, claim by claim against the reference
 code, is in [`docs/FIDGETYFIND_FIDELITY.md`](../docs/FIDGETYFIND_FIDELITY.md);
 the short version:

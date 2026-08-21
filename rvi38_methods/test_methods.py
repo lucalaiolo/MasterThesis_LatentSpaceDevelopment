@@ -482,6 +482,45 @@ def test_shrinkage():
     check("moving block bootstrap preserves length", len(blocks) == 500)
 
 
+def test_wclrpp_spec_defaults():
+    """The shipped defaults are the METHODS §Synchrony values, verbatim.
+
+    Two of these drifted from the specification once already (the limb signal
+    ran on the end-effector alone and dtau on 1), and neither drift is visible
+    in any output: the pipeline reports whatever it was configured with. Pin
+    them here so a change has to be deliberate, and pin the CLI defaults too --
+    a run goes through run_analysis, not through WCLRParams().
+    """
+    print("\nWCLR-PP defaults against METHODS §Synchrony")
+    import a9_wclrpp as WP
+    import run_analysis
+
+    p = WP.WCLRParams()
+    check("J_L is the distal joints (elbow+wrist, knee+ankle)",
+          p.limb_signal == "distal"
+          and WP.LIMB_SIGNALS["distal"] == {"RA": (3, 4), "LA": (6, 7),
+                                            "RL": (10, 11), "LL": (13, 14)},
+          f"limb_signal = {p.limb_signal!r}")
+    check("w = 50 frames (2 s at 25 fps)", p.w == 50)
+    check("tau_max = 13 frames (~0.52 s)", p.tau_max == 13)
+    check("c = 0.25", p.c == 0.25)
+    check("ell_min = 19 frames (0.76 s)", p.ell_min == 19)
+    check("dtau = 3 frames", p.dtau == 3, f"dtau = {p.dtau}")
+    check("peak_pick carries the same dtau default",
+          WP.peak_pick.__defaults__[1] == p.dtau)
+
+    cli = {a.dest: a.default
+           for a in run_analysis.build_parser()._actions}
+    check("the CLI defaults agree with WCLRParams on every spec value",
+          (cli["wclr_limb_signal"] == p.limb_signal
+           and cli["wclr_w"] == p.w and cli["wclr_tau_max"] == p.tau_max
+           and cli["wclr_c"] == p.c and cli["wclr_ell_min"] == p.ell_min
+           and cli["wclr_dtau"] == p.dtau),
+          f"limb_signal {cli['wclr_limb_signal']!r}, dtau {cli['wclr_dtau']}")
+    check("omega defaults to 1/2, fixed a priori",
+          cli["fluency_omega"] == 0.5, f"omega = {cli['fluency_omega']}")
+
+
 def test_wclrpp_peakpick():
     print("\nWCLR-PP peak-picking (spec test vector)")
     import a9_wclrpp as WP
@@ -1096,6 +1135,7 @@ def main():
     test_fluency()
     test_fluency_curve()
     test_shrinkage()
+    test_wclrpp_spec_defaults()
     test_wclrpp_peakpick()
     test_wclrpp_reduction()
     test_wclrpp_coupling()

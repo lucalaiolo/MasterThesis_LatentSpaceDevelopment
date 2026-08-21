@@ -163,14 +163,15 @@ split and the fluency figures are all unaffected. The WCLR-PP window and
 peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
 `--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
 `--wclr-ell-min` (minimum coupled run, default 19) and `--wclr-dtau` (peak-lag
-continuity tolerance, default 1 — consecutive windows chain into one coupled run
-only while their peak lags stay within this many frames, so raising it tolerates
-more lag wander and F rises); vary `w`, `tau_max` and `c`
+continuity tolerance, default 3 — consecutive windows chain into one coupled run
+only while their peak lags stay within this many frames, so lowering it breaks a
+run at every lag step and F falls); vary `w`, `tau_max` and `c`
 over declared grids for the robustness pass. `--wclr-limb-signal` chooses which
-joints define a limb's velocity — `end_effector` (default: wrist/ankle alone,
-the specified construct), `distal` (elbow+wrist, knee+ankle) or `limb` (the
-whole chain). Use the averages as a robustness check, not as an upgrade: they
-buy far less noise suppression than they appear to (see `LIMB_SIGNALS` in
+joints define a limb's velocity — `distal` (default: elbow+wrist, knee+ankle,
+the specified construct), `end_effector` (wrist/ankle alone) or `limb` (the
+whole chain). Read `end_effector` as the robustness check against the default
+rather than as an upgrade to it: the limb average buys far less noise
+suppression than it appears to (see `LIMB_SIGNALS` in
 `a9_wclrpp.py`), and `limb` additionally folds in shoulder and hip, whose
 torso-normalised velocities are near-negations of each other across the
 midline — ΔR² ignores the sign of a relation, so that reads as coupling in

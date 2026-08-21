@@ -29,11 +29,12 @@ per-pair scalars: ``F`` (fraction of assessable time spent coupled, the
 pathological quantity) and ``R2`` (mean coupling strength when coupled).
 
 What counts as "a limb's velocity" is a construct choice, exposed as
-:data:`LIMB_SIGNALS` and selected by ``WCLRParams.limb_signal``: the distal
-end-effector alone (``"end_effector"``, the original specification), the mean
-over the distal two joints (``"distal"``), or the mean over the whole chain
-including shoulder or hip (``"limb"``). The proximal joints are not a free
-choice here — see the warning on :data:`LIMB_SIGNALS`.
+:data:`LIMB_SIGNALS` and selected by ``WCLRParams.limb_signal``: the mean over
+the distal two joints (``"distal"``, elbow+wrist and knee+ankle — the specified
+construct, METHODS §Synchrony, which fixes ``J_L`` as the distal joints a
+priori), the distal end-effector alone (``"end_effector"``), or the mean over
+the whole chain including shoulder or hip (``"limb"``). The proximal joints are
+not a free choice here — see the warning on :data:`LIMB_SIGNALS`.
 """
 
 from __future__ import annotations
@@ -59,11 +60,12 @@ LIMB_ORDER: tuple[str, ...] = ("RA", "LA", "RL", "LL")
 #: A limb's velocity signal is the **mean signed** frame-to-frame displacement
 #: of the joints listed here, so which joints are listed is a construct choice:
 #:
-#: ``"end_effector"``
-#:     the distal keypoint alone (wrist, ankle) — the original specification;
 #: ``"distal"``
 #:     elbow+wrist and knee+ankle — the limb average without the proximal
-#:     joints, and the recommended way to read "the velocity of the arm/leg";
+#:     joints, and the specified construct: METHODS §Synchrony fixes ``J_L`` as
+#:     the distal joints a priori;
+#: ``"end_effector"``
+#:     the distal keypoint alone (wrist, ankle);
 #: ``"limb"``
 #:     the whole chain, shoulder or hip included.
 #:
@@ -77,9 +79,10 @@ LIMB_ORDER: tuple[str, ...] = ("RA", "LA", "RL", "LL")
 #: relative to the ankle alone is **1.18x** for ``"distal"`` and **1.03x** for
 #: ``"limb"`` under iid per-keypoint noise -- and *below* 1 (0.74x and 0.47x)
 #: once the detector's errors are correlated along the limb, as they are
-#: whenever a mislocated segment moves its joints together. Prefer these
-#: variants as a robustness check on the end-effector result, not as an
-#: upgrade to it.
+#: whenever a mislocated segment moves its joints together. So ``"distal"`` is
+#: the specified construct on anatomical grounds, not because averaging buys
+#: much noise suppression; read ``"end_effector"`` as the robustness check
+#: against it rather than as a degraded version of it.
 #:
 #: **The proximal joints are not a free choice.** The pose is torso-normalised
 #: (:mod:`build_pose`: MidHip pinned at ``(0,0)``, Neck at ``(0,1)``), which
@@ -100,7 +103,7 @@ LIMB_SIGNALS: dict[str, dict[str, tuple[int, ...]]] = {
     "limb": {"RA": (2, 3, 4), "LA": (5, 6, 7),
              "RL": (9, 10, 11), "LL": (12, 13, 14)},
 }
-DEFAULT_LIMB_SIGNAL = "end_effector"
+DEFAULT_LIMB_SIGNAL = "distal"
 
 END_EFFECTORS: dict[str, int] = {
     "RWrist": 4, "LWrist": 7, "RAnkle": 11, "LAnkle": 14,
@@ -146,16 +149,20 @@ class WCLRParams:
     methods). ``h`` = 1 means one assessable row per frame, so ``F`` is a
     frame-fraction.
 
+    ``dtau`` = 3 is the specified peak-lag continuity tolerance: consecutive
+    rows chain into one coupled run only while their peak lags stay within this
+    many frames, so lowering it breaks runs at every lag step and ``F`` falls.
+
     ``limb_signal`` selects which joints define a limb's velocity — a key of
     :data:`LIMB_SIGNALS` or an explicit ``{limb: joint indices}`` map. It
-    defaults to the specified ``"end_effector"``; changing it changes the
-    construct, not just an estimator setting.
+    defaults to the specified ``"distal"`` (elbow+wrist, knee+ankle); changing
+    it changes the construct, not just an estimator setting.
     """
 
     w: int = 50
     tau_max: int = 13
     h: int = 1
-    dtau: int = 1
+    dtau: int = 3
     ell_min: int = 19
     c: float = 0.25
     fps: float = 25.0
@@ -282,7 +289,7 @@ def _m2_from_shift(vA, vB, rows, k, w, taus, P1_unused, SSR1, TSS,
 # ---------------------------------------------------------------------------
 # 2. peak-picking (method-agnostic; operates on any ΔR² matrix)
 # ---------------------------------------------------------------------------
-def peak_pick(M: np.ndarray, c: float = 0.25, dtau: int = 1,
+def peak_pick(M: np.ndarray, c: float = 0.25, dtau: int = 3,
               ell_min: int = 19, h: int = 1, D: int | None = None) -> dict:
     """Reduce a ``ΔR²`` matrix to the two per-pair scalars ``F`` and ``R2``.
 

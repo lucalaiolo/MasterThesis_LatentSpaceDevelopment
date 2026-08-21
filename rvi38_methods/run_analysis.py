@@ -664,7 +664,15 @@ def model_specs(args) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-def main(argv=None):
+def build_parser() -> argparse.ArgumentParser:
+    """The command line, as its own function so a test can read the defaults.
+
+    Several of these defaults *are* the specification -- the WCLR-PP limb
+    signal and peak-picking constants, the fluency omega -- and a run
+    reports whatever it was configured with, so a drift from METHODS is
+    invisible in the output. Exposing the parser lets
+    ``test_wclrpp_spec_defaults`` pin them.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="rvi38_analysis.csv")
     ap.add_argument("--model", action="append", metavar="[NAME=]PATH",
@@ -745,18 +753,18 @@ def main(argv=None):
     ap.add_argument("--wclr-ell-min", type=int, default=19,
                     help="WCLR-PP minimum coupled-run length in frames "
                          "(default 19 = 0.76 s).")
-    ap.add_argument("--wclr-dtau", type=int, default=1,
+    ap.add_argument("--wclr-dtau", type=int, default=3,
                     help="WCLR-PP peak-lag continuity tolerance in frames "
-                         "(default 1, the spec value): consecutive windows "
+                         "(default 3, the spec value): consecutive windows "
                          "chain into one coupled run only while their peak "
-                         "lags stay within this many frames. Raising it "
-                         "tolerates more lag wander, so runs survive more "
-                         "often and F rises.")
+                         "lags stay within this many frames. Lowering it "
+                         "breaks a run at every lag step, so fewer runs clear "
+                         "ell_min and F falls.")
     ap.add_argument("--wclr-limb-signal", choices=sorted(WP.LIMB_SIGNALS),
                     default=WP.DEFAULT_LIMB_SIGNAL,
                     help="which joints define a limb's velocity: "
-                         "'end_effector' (wrist/ankle only, the specified "
-                         "construct), 'distal' (elbow+wrist, knee+ankle) or "
+                         "'distal' (elbow+wrist, knee+ankle -- the specified "
+                         "construct), 'end_effector' (wrist/ankle only) or "
                          "'limb' (whole chain). 'limb' folds in shoulder and "
                          "hip, whose torso-normalised velocities are close to "
                          "negations of each other across the midline and so "
@@ -777,6 +785,11 @@ def main(argv=None):
                          "A1 null so the flat-kernel curve equals Phi exactly; "
                          "the reported scalar stays the transition-averaged Phi.")
     ap.add_argument("--no-figures", action="store_true")
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     args = ap.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)

@@ -314,6 +314,175 @@ def test_exact_mannwhitney():
           abs(r2["p"] - 2 / comb(38, 6)) < 1e-12, f"p = {r2['p']:.3g}")
 
 
+def _logsumexp_t(x):
+    m = float(np.max(x))
+    return m + float(np.log(np.exp(np.asarray(x, float) - m).sum()))
+
+
+def test_smirnov_shuffle():
+    """The Phi null draws uniformly from the orderings the subject could produce.
+
+    §7.1 run-length compresses the path, so a visit sequence never repeats a
+    state and the null must not either. Uniformity is checked against an
+    exhaustive enumeration on multisets small enough to enumerate, including
+    the rigid alternating case where a cyclic rotation is the only accepted
+    move.
+    """
+    print("\n§7.2 null: uniform over the no-repeat reorderings")
+    from itertools import permutations
+
+    def brute(seq):
+        return sorted({w for w in map(tuple, (np.asarray(seq)[list(p)]
+                                              for p in permutations(range(len(seq)))))
+                       if all(w[t] != w[t + 1] for t in range(len(w) - 1))})
+
+    for seq, label in (([0, 0, 1, 2], "AABC"),
+                       ([0, 1, 0, 1, 0, 1], "rigid ABABAB"),
+                       ([0, 0, 0, 1, 1, 2, 2], "AAABBCC")):
+        seq = np.array(seq)
+        target = brute(seq)
+        X = A.smirnov_shuffle(seq, 20000, np.random.default_rng(1))
+        check(f"[{label}] no draw repeats a state",
+              bool((np.diff(X, axis=1) != 0).all()))
+        check(f"[{label}] every draw is a reordering of the same multiset",
+              bool((np.sort(X, axis=1) == np.sort(seq)).all()))
+        idx = {w: i for i, w in enumerate(target)}
+        cnt = np.zeros(len(target))
+        extra = 0
+        for row in map(tuple, X):
+            if row in idx:
+                cnt[idx[row]] += 1
+            else:
+                extra += 1
+        check(f"[{label}] the support is exactly the {len(target)} valid orderings",
+              extra == 0 and bool((cnt > 0).all()),
+              f"{int((cnt > 0).sum())}/{len(target)} reached, {extra} invalid")
+        p = float(stats.chisquare(cnt).pvalue) if len(target) > 1 else 1.0
+        check(f"[{label}] the draws are uniform over them",
+              p > 0.001, f"chi-square p = {p:.3f}")
+
+    # The exact count certifies the samplers: the support enumerated above is
+    # the same number the block inclusion-exclusion gives, and the importance
+    # sampler's weights estimate it without either enumerating or sampling it.
+    for counts, want in (([2, 1, 1], 6), ([3, 3], 2), ([3, 2, 2], 38),
+                         ([2, 2, 2, 1], 246)):
+        check(f"exact count of no-repeat arrangements for {counts} is {want}",
+              A.smirnov_count(counts) == want, f"{A.smirnov_count(counts)}")
+
+    # Convergence: the null must not remember the word the chain started from.
+    rng = np.random.default_rng(4)
+    K = 8
+    Sm = np.clip(rng.normal(0, 0.4, (K, K)), -1, 1)
+    Sm = (Sm + Sm.T) / 2
+    np.fill_diagonal(Sm, 1.0)
+    q = [int(rng.integers(0, K))]
+    while len(q) < 240:
+        c = int(rng.integers(0, K))
+        if c != q[-1]:
+            q.append(c)
+    q = np.array(q)
+    alt = A.smirnov_shuffle(q, 1, np.random.default_rng(5), n_steps=50 * len(q))[0]
+
+    def null_of(start):
+        X = A.smirnov_shuffle(start, 2000, np.random.default_rng(6))
+        return float(Sm[X[:, :-1], X[:, 1:]].mean())
+
+    d = abs(null_of(q) - null_of(alt))
+    check("the null is independent of the starting ordering", d < 0.005,
+          f"|difference| = {d:.2e}")
+
+
+def test_smirnov_sis():
+    """The null's estimator: independent weighted draws, with a size it checks.
+
+    Sequential importance sampling replaces the chain for the reported null, so
+    three things have to hold. Every draw must be a valid arrangement; the
+    weights must reproduce the *uniform* law over those arrangements, not the
+    proposal's own; and the weight-implied count of valid arrangements must
+    match the exact one, which is what turns the sampler from an assumption
+    into a checkable claim.
+    """
+    print("\n§7.2 null: independent importance draws")
+    from itertools import permutations
+
+    def brute(seq):
+        return sorted({w for w in map(tuple, (np.asarray(seq)[list(p)]
+                                              for p in permutations(range(len(seq)))))
+                       if all(w[t] != w[t + 1] for t in range(len(w) - 1))})
+
+    for seq, label in (([0, 0, 1, 2], "AABC"),
+                       ([0, 1, 0, 1, 0, 1], "rigid ABABAB"),
+                       ([0, 0, 0, 1, 1, 2, 2], "AAABBCC")):
+        seq = np.array(seq)
+        counts = np.bincount(seq)
+        target = brute(seq)
+        W, lw = A.smirnov_sis(counts, 20000, np.random.default_rng(2))
+        check(f"[{label}] every importance draw is a valid arrangement",
+              bool((np.diff(W, axis=1) != 0).all())
+              and bool((np.sort(W, axis=1) == np.sort(seq)).all()))
+        # Weighted histogram: under the weights every valid ordering must carry
+        # the same mass, which the raw draws do not.
+        idx = {w: i for i, w in enumerate(target)}
+        wt = np.exp(lw - lw.max())
+        mass = np.zeros(len(target))
+        for row, u in zip(map(tuple, W), wt):
+            mass[idx[row]] += u
+        mass /= mass.sum()
+        dev = float(np.abs(mass - 1.0 / len(target)).max() * len(target))
+        # Tolerance from the effective sample size rather than a magic constant:
+        # each of the N cells carries p = 1/N of an effective ESS draws, so its
+        # mass has relative standard deviation sqrt((1-p)/(p ESS)), and the
+        # largest of N such deviations sits a few of those out.
+        ess = float(np.exp(2 * _logsumexp_t(lw) - _logsumexp_t(2 * lw)))
+        pc = 1.0 / len(target)
+        tol = 4.0 * float(np.sqrt((1 - pc) / (pc * ess)))
+        check(f"[{label}] the weights flatten the proposal onto the uniform law",
+              dev < tol, f"max relative deviation {dev:.4f} against a "
+                         f"4-sigma tolerance of {tol:.4f} at ESS {ess:.0f}")
+        exact = A.smirnov_count(counts)
+        est = float(np.exp(_logsumexp_t(lw) - np.log(len(lw))))
+        check(f"[{label}] the weights recover the exact count {exact}",
+              abs(est - exact) / exact < 0.02, f"estimated {est:.2f}")
+
+    # At length, the two samplers must agree: they share no machinery, so
+    # agreement is mutual validation rather than a repeated assumption.
+    rng = np.random.default_rng(4)
+    K = 9
+    Sm = np.clip(rng.normal(0, 0.4, (K, K)), -1, 1)
+    Sm = (Sm + Sm.T) / 2
+    np.fill_diagonal(Sm, 1.0)
+    q = [int(rng.integers(0, K))]
+    while len(q) < 200:
+        c = int(rng.integers(0, K))
+        if c != q[-1]:
+            q.append(c)
+    q = np.array(q)
+    sis = A.smirnov_null(q, Sm, 2000, np.random.default_rng(0))
+    X = A.smirnov_shuffle(q, 2000, np.random.default_rng(1))
+    chain = float(Sm[X[:, :-1], X[:, 1:]].mean())
+    check("importance sampling and the chain agree on the null",
+          abs(sis["null"] - chain) < 0.01,
+          f"|Δ| = {abs(sis['null'] - chain):.2e}")
+    check("the estimator took the independent route here",
+          sis["method"] == "sis", f"method {sis['method']}, ESS {sis['ess']:.0f}")
+    check("the weight-implied count matches the exact one",
+          abs(sis["log_count_sis"] - sis["log_count_exact"]) < 0.05,
+          f"log count {sis['log_count_sis']:.3f} vs exact "
+          f"{sis['log_count_exact']:.3f}")
+
+    # Degeneracy is detected, not ignored. A long sequence alternating between
+    # two states leaves the weights concentrated on almost nothing, and the
+    # estimator must fall back to the unweighted chain rather than report an
+    # effective sample size of a handful as if it were two thousand.
+    rigid = np.tile([0, 1], 400)
+    S2 = np.array([[1.0, -0.3], [-0.3, 1.0]])
+    deg = A.smirnov_null(rigid, S2, 2000, np.random.default_rng(0),
+                         max_batches=1)
+    check("weight degeneracy falls back to the chain instead of reporting it",
+          deg["method"] == "chain" and np.isfinite(deg["null"]),
+          f"method {deg['method']}, ESS {deg['ess']:.1f}")
+
+
 def test_fluency():
     print("\n§7 fluency estimator")
     rng = np.random.default_rng(6)
@@ -343,20 +512,39 @@ def test_fluency():
     check("clustered sequence has positive excess", r["excess"][0] > 0.1,
           f"{r['excess'][0]:+.3f}")
 
-    # The §7.2 uniform null admits adjacent-equal pairs that the run-length
-    # compressed observation cannot contain, and each contributes S_kk = 1.
-    # A genuinely random sequence therefore scores negative under the spec's
-    # null and ~zero once the null is conditioned on adjacent entries differing.
-    check("uniform null is inflated by its diagonal pairs (documented bias)",
-          r["excess"][1] < -0.05 and r["null_repeat_rate"][1] > 0.05,
-          f"excess {r['excess'][1]:+.3f}, null repeat rate "
+    # A sequence with no structure beyond its occupancy must score ~zero: it is
+    # one draw from the null itself. The unconstrained permutation null cannot
+    # deliver that -- it admits adjacent-equal pairs the run-length compressed
+    # observation cannot contain, each worth S_kk = 1 -- so it drives the same
+    # sequence negative, which is the bias the reported null removes.
+    check("a structureless sequence scores ~zero under the reported null",
+          abs(r["excess"][1]) < 0.06, f"{r['excess'][1]:+.3f}")
+    check("the unconstrained null is inflated by its diagonal pairs",
+          r["excess_uniform"][1] < -0.05 and r["null_repeat_rate"][1] > 0.05,
+          f"excess {r['excess_uniform'][1]:+.3f}, repeat rate "
           f"{r['null_repeat_rate'][1]:.1%}")
-    check("off-diagonal-conditioned null gives ~zero for a random sequence",
-          abs(r["excess_offdiag"][1]) < 0.06,
-          f"{r['excess_offdiag'][1]:+.3f}")
-    check("the null preserves occupancy exactly",
-          np.array_equal(np.sort(np.bincount(smooth, minlength=K)),
-                         np.sort(np.bincount(smooth, minlength=K))))
+    check("the reported null sits below the unconstrained one for every subject",
+          bool(np.all(r["null_mean"] < r["null_uniform"])),
+          f"gap {float(np.mean(r['null_uniform'] - r['null_mean'])):+.3f}")
+
+    # Eq. 30: the split of Phi into channels is exact, not approximate. Both
+    # calls draw from the same seeded stream in the same order, so the two
+    # channel nulls come from the identical reorderings and the identity holds
+    # to floating point rather than to Monte-Carlo error.
+    rr = np.random.default_rng(11)
+    def _sym(seed):
+        M = np.clip(np.random.default_rng(seed).normal(0, .4, (K, K)), -1, 1)
+        M = (M + M.T) / 2
+        np.fill_diagonal(M, 1.0)
+        return M
+    S_mag, S_shape, w = _sym(1), _sym(2), 0.5
+    kw = dict(n_perm=200, seed=0)
+    lhs = A.phi_excess(states, vid, w * S_mag + (1 - w) * S_shape, 2, **kw)["excess"]
+    rhs = (w * A.phi_excess(states, vid, S_mag, 2, **kw)["excess"]
+           + (1 - w) * A.phi_excess(states, vid, S_shape, 2, **kw)["excess"])
+    check("Phi splits exactly into its magnitude and shape channels",
+          float(np.abs(lhs - rhs).max()) < 1e-12,
+          f"max|Δ| = {float(np.abs(lhs - rhs).max()):.1e}")
 
     # §7.5 terciles need a similarity matrix with enough distinct values for
     # three non-empty terciles; a two-valued S is reported as degenerate.
@@ -480,6 +668,45 @@ def test_shrinkage():
     rng2 = np.random.default_rng(9)
     blocks = G.moving_block_bootstrap(np.arange(500), 50, rng2)
     check("moving block bootstrap preserves length", len(blocks) == 500)
+
+
+def test_wclrpp_spec_defaults():
+    """The shipped defaults are the METHODS §Synchrony values, verbatim.
+
+    Two of these drifted from the specification once already (the limb signal
+    ran on the end-effector alone and dtau on 1), and neither drift is visible
+    in any output: the pipeline reports whatever it was configured with. Pin
+    them here so a change has to be deliberate, and pin the CLI defaults too --
+    a run goes through run_analysis, not through WCLRParams().
+    """
+    print("\nWCLR-PP defaults against METHODS §Synchrony")
+    import a9_wclrpp as WP
+    import run_analysis
+
+    p = WP.WCLRParams()
+    check("J_L is the distal joints (elbow+wrist, knee+ankle)",
+          p.limb_signal == "distal"
+          and WP.LIMB_SIGNALS["distal"] == {"RA": (3, 4), "LA": (6, 7),
+                                            "RL": (10, 11), "LL": (13, 14)},
+          f"limb_signal = {p.limb_signal!r}")
+    check("w = 50 frames (2 s at 25 fps)", p.w == 50)
+    check("tau_max = 13 frames (~0.52 s)", p.tau_max == 13)
+    check("c = 0.25", p.c == 0.25)
+    check("ell_min = 19 frames (0.76 s)", p.ell_min == 19)
+    check("dtau = 3 frames", p.dtau == 3, f"dtau = {p.dtau}")
+    check("peak_pick carries the same dtau default",
+          WP.peak_pick.__defaults__[1] == p.dtau)
+
+    cli = {a.dest: a.default
+           for a in run_analysis.build_parser()._actions}
+    check("the CLI defaults agree with WCLRParams on every spec value",
+          (cli["wclr_limb_signal"] == p.limb_signal
+           and cli["wclr_w"] == p.w and cli["wclr_tau_max"] == p.tau_max
+           and cli["wclr_c"] == p.c and cli["wclr_ell_min"] == p.ell_min
+           and cli["wclr_dtau"] == p.dtau),
+          f"limb_signal {cli['wclr_limb_signal']!r}, dtau {cli['wclr_dtau']}")
+    check("omega defaults to 1/2, fixed a priori",
+          cli["fluency_omega"] == 0.5, f"omega = {cli['fluency_omega']}")
 
 
 def test_wclrpp_peakpick():
@@ -1093,9 +1320,12 @@ def main():
     test_exact_mannwhitney()
     test_reported_inference()
     test_correlation_analysis()
+    test_smirnov_shuffle()
+    test_smirnov_sis()
     test_fluency()
     test_fluency_curve()
     test_shrinkage()
+    test_wclrpp_spec_defaults()
     test_wclrpp_peakpick()
     test_wclrpp_reduction()
     test_wclrpp_coupling()

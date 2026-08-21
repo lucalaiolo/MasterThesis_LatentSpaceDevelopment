@@ -27,9 +27,12 @@ are documented where they occur:
   delta windows overlap by ``l`` frames, so concatenating their spans instead
   double-counts the shared frames of every run of two or more same-state
   windows, over-weighting long dwells in the RMS.
-* :func:`phi_excess` draws its permutation null in one vectorised block rather
-  than a Python loop, which is what makes the full 2,000-draw null of §12.3
-  affordable for every subject and every lag.
+* :func:`phi_excess` draws its null in one vectorised block rather than a
+  Python loop, which is what makes the full 2,000-draw null of §12.3 affordable
+  for every subject and every lag. That null reorders the visits under the
+  constraint the visit sequence itself carries -- no state twice in a row --
+  rather than over all ``n!`` permutations; see :func:`smirnov_sis` for why the
+  unconstrained version is not occupancy-neutral despite preserving occupancy.
 """
 
 from __future__ import annotations
@@ -533,60 +536,342 @@ def per_subject_states(states, vidid, n_sub: int) -> list[np.ndarray]:
     return [states[vidid == i] for i in range(n_sub)]
 
 
+def _swap_value(X, rows, i, j, p):
+    """Value at position ``p`` of each row after swapping positions ``i``, ``j``.
+
+    Written out rather than applied, so a proposal can be tested before it is
+    accepted. ``i``, ``j`` and ``p`` are per-row and ``p`` must already be in
+    range; the two ``where`` calls cover the case ``|i - j| = 1``, where one of
+    the affected edges has both its endpoints moved.
+    """
+    v = X[rows, p]
+    v = np.where(p == i, X[rows, j], v)
+    v = np.where(p == j, X[rows, i], v)
+    return v
+
+
+def smirnov_shuffle(seq: np.ndarray, n_draw: int, rng, n_steps: int | None = None,
+                    rot_every: int | None = None) -> np.ndarray:
+    """Draw ``n_draw`` reorderings of ``seq`` that never repeat a state (§7.2).
+
+    The null of §7.2 reorders a subject's visits, and §7.1 run-length
+    compresses the path, so a visit sequence *cannot* place a state next to
+    itself. The orderings the subject could have produced are therefore the
+    arrangements of its visit multiset with no two adjacent entries equal
+    (Smirnov words), and those, not all ``n!`` permutations, are what the null
+    must draw from. Drawing uniform permutations instead admits adjacent-equal
+    pairs, each contributing ``S_kk = 1`` -- the largest value in ``S`` -- at a
+    rate set by the subject's occupancy concentration, which pushes the null
+    above the range the observed statistic can occupy by an amount that varies
+    from subject to subject with exactly the quantity the null exists to hold
+    fixed.
+
+    Sampling is by Metropolis, because the two exact routes are both closed.
+    Rejection sampling from uniform permutations accepts with probability of
+    order ``exp(-n sum_k o_k^2)`` -- around ``1e-8`` at ``n = 200`` over eleven
+    states -- and sequential sampling needs the number of valid completions of
+    a partial word, whose exact evaluation costs ``O(K n^3)`` in big integers
+    per draw. Both are hopeless at this scale, and neither buys anything a
+    converged chain does not.
+
+    The chain starts from ``seq`` itself, which is valid by construction, and
+    proposes two symmetric moves, so accepting whenever the result is still
+    valid leaves the uniform distribution over valid arrangements stationary:
+
+    * a transposition of two positions, rejected when it would put two equal
+      states side by side (only the at most four affected edges are examined);
+    * a cyclic rotation by one place in either direction, which preserves every
+      edge except the join it creates and so is valid exactly when the first and
+      last entries differ. Each chain tosses its own coin for this, since a
+      rotation applied to every chain on the same step is a fixed parity: on a
+      rigid multiset such as ``0101...``, where rotation is the only move that
+      is ever accepted, that would leave every draw on the same word.
+
+    ``n_steps`` defaults to ``10 n``; the null estimate is stable from about
+    ``2 n`` and independent of the starting word from there on.
+    """
+    seq = np.asarray(seq)
+    n = len(seq)
+    X = np.broadcast_to(seq, (int(n_draw), n)).copy()
+    if n < 3:
+        return X
+    n_steps = max(2000, 10 * n) if n_steps is None else int(n_steps)
+    rot_every = max(n // 2, 1) if rot_every is None else int(rot_every)
+    rows = np.arange(int(n_draw))
+    ar = np.arange(n)
+    for step in range(n_steps):
+        i = rng.integers(0, n, int(n_draw))
+        j = rng.integers(0, n, int(n_draw))
+        ok = i != j
+        for p0 in (i - 1, i, j - 1, j):
+            inrange = (p0 >= 0) & (p0 < n - 1)
+            p = np.clip(p0, 0, n - 2)
+            ok &= ~(inrange & (_swap_value(X, rows, i, j, p)
+                               == _swap_value(X, rows, i, j, p + 1)))
+        sel = np.flatnonzero(ok)
+        if sel.size:
+            si, sj = i[sel], j[sel]
+            tmp = X[sel, si].copy()
+            X[sel, si] = X[sel, sj]
+            X[sel, sj] = tmp
+        if (step + 1) % rot_every == 0:
+            can = (X[:, 0] != X[:, -1]) & (rng.random(int(n_draw)) < 0.5)
+            if can.any():
+                d = rng.integers(0, 2, int(n_draw)) * 2 - 1
+                X[can] = np.take_along_axis(
+                    X, (ar[None, :] - d[:, None]) % n, axis=1)[can]
+    return X
+
+
+def _logsumexp(x: np.ndarray) -> float:
+    x = np.asarray(x, float)
+    m = float(x.max())
+    if not np.isfinite(m):
+        return m
+    return m + float(np.log(np.exp(x - m).sum()))
+
+
+def smirnov_count(counts) -> int:
+    """Exact number of arrangements of a multiset with no two adjacent equal.
+
+    Block inclusion-exclusion: merging the ``n_k`` copies of state ``k`` into
+    ``j_k`` ordered blocks can be done ``C(n_k - 1, j_k - 1)`` ways with sign
+    ``(-1)^(n_k - j_k)``, and ``J = sum j_k`` blocks arrange freely in
+    ``J! / prod(j_k!)`` ways; summed with those signs, the arrangements that
+    repeat a state cancel. Writing each state's sum as the polynomial
+    ``p_n(t) = sum_j (-1)^(n-j) C(n-1, j-1) t^j / j!`` turns the ``K``-fold sum
+    into one polynomial product, and the count is ``sum_J c_J J!`` over the
+    product's coefficients.
+
+    Exact in ``Fraction`` and ``O(n^2)`` -- under a second up to a few hundred
+    visits, a few seconds at a thousand. Its use is certification: the
+    importance sampler of :func:`smirnov_sis` estimates this same number from
+    its weights, so the two together check each other, which a sampler alone
+    cannot do.
+    """
+    from fractions import Fraction
+    from math import comb, factorial
+
+    counts = [int(c) for c in counts if int(c) > 0]
+    if not counts:
+        return 1
+    poly = [Fraction(1)]
+    for n in counts:
+        pk = [Fraction(0)] * (n + 1)
+        for j in range(1, n + 1):
+            pk[j] = Fraction((-1) ** (n - j) * comb(n - 1, j - 1), factorial(j))
+        out = [Fraction(0)] * (len(poly) + n)
+        for i, x in enumerate(poly):
+            if x:
+                for j, y in enumerate(pk):
+                    if y:
+                        out[i + j] += x * y
+        poly = out
+    total = sum(c * factorial(J) for J, c in enumerate(poly) if c)
+    assert total.denominator == 1
+    return int(total.numerator)
+
+
+def smirnov_sis(counts, n_draw: int, rng):
+    """Independent draws of no-repeat arrangements, with their log weights.
+
+    Sequential importance sampling. The word is built left to right; at each
+    step the next state is drawn from those that remain, differ from the one
+    just placed, and would not strand the remainder, with probability
+    proportional to how many copies are left. Every draw is therefore valid,
+    but the proposal is not uniform, so each carries the log weight
+    ``-log q(w)``; a weighted mean under those weights estimates any expectation
+    under the uniform law over valid arrangements.
+
+    The feasibility test is what makes the proposal dead-end-free. After placing
+    ``c`` the remainder has ``r - 1`` slots and ``c`` is barred from the first
+    of them, so at most ``(r-1)//2`` copies of ``c`` still fit, while any other
+    state has ``r//2``. Both bounds are checked before ``c`` is offered.
+
+    All draws walk in step, so ``r`` is shared and each step is one vectorised
+    comparison over a ``(n_draw, K)`` table. Returns ``(words, log_weights)``.
+
+    Independence is the point: there is no chain to converge, and the mean of
+    ``exp(log_weights)`` estimates :func:`smirnov_count`, which is computable
+    exactly. What the method does not promise is a useful *effective* sample
+    size on every input -- weights degenerate as the sequence grows long and
+    the occupancy concentrates -- so :func:`smirnov_null` measures the effective
+    size rather than assuming it.
+    """
+    m0 = np.asarray(counts, int)
+    K = len(m0)
+    n = int(m0.sum())
+    B = int(n_draw)
+    if n == 0 or B == 0:
+        return np.zeros((B, n), int), np.zeros(B)
+    m = np.repeat(m0[None, :], B, axis=0)
+    word = np.empty((B, n), int)
+    logq = np.zeros(B)
+    last = np.full(B, -1)
+    br = np.arange(B)
+    kk = np.arange(K)[None, :]
+    for t in range(n):
+        r = n - t
+        if K > 1:
+            srt = np.sort(m, axis=1)
+            top1, top2 = srt[:, -1], srt[:, -2]
+        else:
+            top1 = top2 = m[:, 0]
+        am = np.argmax(m, axis=1)
+        max_excl = np.where(kk == am[:, None], top2[:, None], top1[:, None])
+        ok = m > 0
+        if t:
+            ok = ok & (kk != last[:, None])
+        ok = ok & (m - 1 <= (r - 1) // 2) & (max_excl <= r // 2)
+        w = np.where(ok, m, 0).astype(float)
+        tot = w.sum(axis=1)
+        if not np.all(tot > 0):
+            raise ValueError(
+                "no valid arrangement of this multiset: some state occupies "
+                "more than half the sequence, so it cannot avoid itself")
+        p = w / tot[:, None]
+        u = (rng.random(B)[:, None] < np.cumsum(p, axis=1)).argmax(axis=1)
+        logq += np.log(p[br, u])
+        word[:, t] = u
+        m[br, u] -= 1
+        last = u
+    return word, -logq
+
+
+def smirnov_null(seq: np.ndarray, S: np.ndarray, n_draw: int = 2000, rng=None,
+                 lag: int = 1, max_batches: int = 16, certify: int = 400) -> dict:
+    """Null mean of the adjacent similarity over uniform no-repeat reorderings.
+
+    The estimator behind ``Phi``'s null term (§7.2). Draws come from
+    :func:`smirnov_sis`, which is independent sampling rather than a chain, so
+    what has to be watched is not convergence but weight degeneracy: the
+    *effective* sample size
+    ``ESS = (sum w)^2 / sum w^2`` falls as the visit sequence lengthens and its
+    occupancy concentrates. Batches are drawn until ``ESS`` reaches ``n_draw``,
+    and if ``max_batches`` is not enough the estimate is taken from
+    :func:`smirnov_shuffle` instead, whose draws are unweighted and so cannot
+    degenerate. Which route was used is returned in ``method`` and reported.
+
+    Words are discarded batch by batch and only their statistic is kept, so the
+    memory cost does not grow with the number of batches.
+
+    When the sequence is short enough to certify (``certify`` visits or fewer),
+    the sampler's weight-implied count of valid arrangements is compared against
+    the exact :func:`smirnov_count`; ``log_count_sis`` and ``log_count_exact``
+    carry both, and their agreement is a direct check that the draws are what
+    they claim to be. Set ``certify=0`` to skip it.
+    """
+    import math
+
+    seq = np.asarray(seq)
+    n = len(seq)
+    rng = np.random.default_rng() if rng is None else rng
+    out = {"null": np.nan, "tail": np.nan, "ess": np.nan, "n_drawn": 0,
+           "method": "none", "log_count_sis": np.nan,
+           "log_count_exact": np.nan}
+    if n <= lag + 1:
+        return out
+    obs = float(S[seq[:-lag], seq[lag:]].mean())
+    counts = np.bincount(seq, minlength=int(S.shape[0]))
+
+    lw_all: list[np.ndarray] = []
+    stat_all: list[np.ndarray] = []
+    ess = 0.0
+    for _ in range(max(int(max_batches), 1)):
+        words, lw = smirnov_sis(counts, n_draw, rng)
+        stat_all.append(S[words[:, :-lag], words[:, lag:]].mean(axis=1))
+        lw_all.append(lw)
+        lw_cat = np.concatenate(lw_all)
+        ess = float(np.exp(2 * _logsumexp(lw_cat) - _logsumexp(2 * lw_cat)))
+        if ess >= n_draw:
+            break
+
+    if ess >= n_draw:
+        lw_cat = np.concatenate(lw_all)
+        stat = np.concatenate(stat_all)
+        w = np.exp(lw_cat - lw_cat.max())
+        tot = w.sum()
+        out.update({"null": float((w * stat).sum() / tot),
+                    "tail": float(w[stat >= obs].sum() / tot),
+                    "ess": ess, "n_drawn": int(len(stat)), "method": "sis",
+                    "log_count_sis": float(_logsumexp(lw_cat)
+                                           - math.log(len(lw_cat)))})
+        if certify and n <= int(certify):
+            out["log_count_exact"] = math.log(smirnov_count(counts))
+    else:
+        # Weights degenerated: a long sequence whose occupancy concentrates on
+        # a few states. The chain's draws are unweighted, so it is unaffected.
+        draws = smirnov_shuffle(seq, n_draw, rng)
+        stat = S[draws[:, :-lag], draws[:, lag:]].mean(axis=1)
+        out.update({"null": float(stat.mean()),
+                    "tail": float((1 + int(np.sum(stat >= obs)))
+                                  / (n_draw + 1)),
+                    "ess": ess, "n_drawn": int(n_draw), "method": "chain"})
+    return out
+
+
 def _phi_one(seq: np.ndarray, S: np.ndarray, n_perm: int, rng, lag: int = 1):
     """Observed mean similarity at ``lag`` and its order-permutation null.
 
-    Two nulls are returned. ``uniform`` is the estimator exactly as §7.2 defines
-    it. ``offdiag`` conditions the null on adjacent entries differing.
+    The reported null reorders the visits under the one constraint the visit
+    sequence itself carries -- no state twice in a row -- drawing uniformly
+    from the arrangements of the multiset that satisfy it
+    (:func:`smirnov_null`). It preserves occupancy exactly, as §7.3 requires,
+    and every draw lies in the same space as the observation, so ``Phi`` is the
+    excess over orderings the subject could actually have produced.
 
-    The distinction matters. §7.1 run-length compresses the path, so the
-    observed sequence can never place a state next to itself; a uniform
-    permutation of that same multiset can, and does so at a rate set by the
-    subject's occupancy concentration. Every such pair contributes ``S_kk = 1``,
-    the largest value in ``S``, so the uniform null sits above the range the
-    observed statistic can occupy and ``Phi`` acquires a negative offset that
-    varies across subjects with their occupancy. Since removing the occupancy
-    confound is precisely what §7.3 claims for this null, both are reported.
+    ``null_uniform`` is the unconstrained permutation null, reported alongside
+    for comparison only. It admits adjacent-equal pairs at rate
+    ``null_repeat_rate``, each worth ``S_kk = 1``, so it sits above the reported
+    null by an offset that grows with the subject's occupancy concentration --
+    the confound the constrained null removes.
     """
+    keys = ("observed", "null_mean", "null_uniform", "p", "excess",
+            "excess_uniform", "null_repeat_rate", "null_ess", "null_method")
     if len(seq) <= lag + 1:
-        return {k: np.nan for k in
-                ("observed", "null_uniform", "null_offdiag", "p",
-                 "excess", "excess_offdiag", "null_repeat_rate")}
+        return {k: np.nan for k in keys}
     obs = float(S[seq[:-lag], seq[lag:]].mean())
+
+    nul = smirnov_null(seq, S, n_perm, rng, lag)
+
     perms = rng.permuted(np.broadcast_to(seq, (n_perm, len(seq))).copy(), axis=1)
     a, b = perms[:, :-lag], perms[:, lag:]
-    pair = S[a, b]
-    null_u = pair.mean(axis=1)
-    neq = a != b
-    cnt = neq.sum(axis=1)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        null_o = np.where(cnt > 0, (pair * neq).sum(axis=1) / np.maximum(cnt, 1),
-                          np.nan)
+    null_u = S[a, b].mean(axis=1)
+
     return {"observed": obs,
+            "null_mean": nul["null"],
             "null_uniform": float(null_u.mean()),
-            "null_offdiag": float(np.nanmean(null_o)),
-            "p": (1 + int(np.sum(null_u >= obs))) / (n_perm + 1),
-            "excess": obs - float(null_u.mean()),
-            "excess_offdiag": obs - float(np.nanmean(null_o)),
-            "null_repeat_rate": float(1.0 - neq.mean())}
+            "p": nul["tail"],
+            "excess": obs - nul["null"],
+            "excess_uniform": obs - float(null_u.mean()),
+            "null_repeat_rate": float(1.0 - (a != b).mean()),
+            "null_ess": nul["ess"],
+            "null_method": nul["method"]}
 
 
 def phi_excess(states, vidid, S, n_sub: int, n_perm: int = 2000, seed: int = 0,
                lag: int = 1, max_win: int | None = None, window: str = "all"):
     """§7.2 excess similarity ``Phi``, per subject.
 
-    The null uniformly permutes the visit sequence, which preserves the multiset
+    The null reorders the visit sequence uniformly over the arrangements that
+    never repeat a state (:func:`smirnov_null`), which preserves the multiset
     of states exactly, so occupancy and every occupancy-derived statistic are
-    identical between the observed sequence and every draw (§7.3). ``Phi`` is
-    the difference on the ``S`` scale — the z-score form must not be used (§7.4).
+    identical between the observed sequence and every draw (§7.3), and which
+    keeps every draw inside the space the observation lives in. ``Phi`` is the
+    difference on the ``S`` scale — the z-score form must not be used (§7.4).
+    ``excess_uniform`` carries the unconstrained-permutation version for
+    comparison; it is not the reported statistic. ``null_ess`` and
+    ``null_method`` say how each subject's null was obtained -- independent
+    importance draws, or the chain where their weights degenerated.
 
     ``window`` selects a contiguous portion for the split-half of §10.8:
     ``'all'``, ``'first'`` or ``'second'``.
     """
     rng = np.random.default_rng(seed)
-    keys = ("observed", "null_uniform", "null_offdiag", "p", "excess",
-            "excess_offdiag", "null_repeat_rate")
+    keys = ("observed", "null_mean", "null_uniform", "p", "excess",
+            "excess_uniform", "null_repeat_rate", "null_ess")
     acc = {k: np.full(n_sub, np.nan) for k in keys}
+    acc["null_method"] = np.array(["none"] * n_sub, dtype=object)
     nvis = np.zeros(n_sub, int)
     for i in range(n_sub):
         st = states[vidid == i]
@@ -601,7 +886,7 @@ def phi_excess(states, vidid, S, n_sub: int, n_perm: int = 2000, seed: int = 0,
         r = _phi_one(seq, S, n_perm, rng, lag)
         for k in keys:
             acc[k][i] = r[k]
-    acc["null_mean"] = acc["null_uniform"]          # §7.2 name
+        acc["null_method"][i] = r["null_method"]
     acc.update({"n_visits": nvis, "lag": lag, "n_perm": n_perm})
     return acc
 
@@ -612,6 +897,8 @@ def dwell_stratified(states, vidid, S, n_sub: int,
     """§7.6 dwell stratification: excess similarity by source-state run length.
 
     Over-segmentation predicts the effect concentrating in the shortest dwells.
+    The null is the same no-repeat reordering :func:`phi_excess` uses, so the
+    stratified excesses are on the same scale as ``Phi``.
     """
     rng = np.random.default_rng(seed)
     out = []
@@ -625,9 +912,7 @@ def dwell_stratified(states, vidid, S, n_sub: int,
             if msk.sum() < min_transitions:
                 continue
             obs_all.append(S[s_[:-1][msk], s_[1:][msk]])
-            perms = rng.permuted(
-                np.broadcast_to(s_, (n_perm, len(s_))).copy(), axis=1)
-            null_all.append(S[perms[:, :-1], perms[:, 1:]].mean())
+            null_all.append(smirnov_null(s_, S, n_perm, rng)["null"])
             n_sub_used += 1
         if not obs_all:
             out.append({"bin": f"{lo}-{hi}", "n": 0, "excess": np.nan,

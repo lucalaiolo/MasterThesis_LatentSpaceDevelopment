@@ -218,6 +218,35 @@ def analyse_model(model, vids, pose, spd, vel, labels, geom, cfg, tag,
     print(f"  §7 fluency: Phi > 0 in {int(np.sum(exc > 0))}/"
           f"{int(np.isfinite(exc).sum())} infants, median "
           f"{np.nanmedian(exc):+.4f}")
+    # The null reorders each subject's visits without ever repeating a state,
+    # which is the constraint the visit sequence itself carries. Reordering over
+    # all n! permutations instead admits adjacent-equal pairs worth S_kk = 1 at
+    # a rate set by the subject's own occupancy concentration, so it inflates
+    # the null by a subject-specific amount. Both are printed so the size of
+    # that correction on this cohort is on the record.
+    gap = (np.asarray(phi["null_uniform"], float)
+           - np.asarray(phi["null_mean"], float))
+    rep = np.asarray(phi["null_repeat_rate"], float)
+    print(f"     null: no-repeat reorderings of each visit sequence. The "
+          f"unconstrained permutation null sits\n           "
+          f"{np.nanmedian(gap):+.4f} higher (median over infants, range "
+          f"[{np.nanmin(gap):+.4f}, {np.nanmax(gap):+.4f}]) because "
+          f"{np.nanmedian(rep):.0%} of its\n           adjacent pairs repeat a "
+          f"state; Phi under it is reported as phi_excess_uniform.")
+    # The null is drawn by independent importance sampling, so what is at risk
+    # is not convergence but weight degeneracy. The effective sample size says
+    # how many of the draws actually counted; where it fell short the estimator
+    # switched to the unweighted chain, and that is reported per infant.
+    ess = np.asarray(phi["null_ess"], float)
+    meth = np.asarray(phi["null_method"], dtype=object)
+    n_chain = int(np.sum(meth == "chain"))
+    print(f"           draws: independent importance sampling, effective size "
+          f"{np.nanmin(ess):,.0f}..{np.nanmax(ess):,.0f} "
+          f"(median {np.nanmedian(ess):,.0f}) against a target of "
+          f"{cfg['n_phi']:,}"
+          + ("" if not n_chain else
+             f"; {n_chain} infant{'s' if n_chain > 1 else ''} fell back to the "
+             f"Metropolis chain"))
 
     out["tercile"] = A.tercile_decomposition(st, vid, S, n_sub)
     if "top_over_bottom" in out["tercile"]:
@@ -664,7 +693,15 @@ def model_specs(args) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-def main(argv=None):
+def build_parser() -> argparse.ArgumentParser:
+    """The command line, as its own function so a test can read the defaults.
+
+    Several of these defaults *are* the specification -- the WCLR-PP limb
+    signal and peak-picking constants, the fluency omega -- and a run
+    reports whatever it was configured with, so a drift from METHODS is
+    invisible in the output. Exposing the parser lets
+    ``test_wclrpp_spec_defaults`` pin them.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="rvi38_analysis.csv")
     ap.add_argument("--model", action="append", metavar="[NAME=]PATH",
@@ -745,18 +782,18 @@ def main(argv=None):
     ap.add_argument("--wclr-ell-min", type=int, default=19,
                     help="WCLR-PP minimum coupled-run length in frames "
                          "(default 19 = 0.76 s).")
-    ap.add_argument("--wclr-dtau", type=int, default=1,
+    ap.add_argument("--wclr-dtau", type=int, default=3,
                     help="WCLR-PP peak-lag continuity tolerance in frames "
-                         "(default 1, the spec value): consecutive windows "
+                         "(default 3, the spec value): consecutive windows "
                          "chain into one coupled run only while their peak "
-                         "lags stay within this many frames. Raising it "
-                         "tolerates more lag wander, so runs survive more "
-                         "often and F rises.")
+                         "lags stay within this many frames. Lowering it "
+                         "breaks a run at every lag step, so fewer runs clear "
+                         "ell_min and F falls.")
     ap.add_argument("--wclr-limb-signal", choices=sorted(WP.LIMB_SIGNALS),
                     default=WP.DEFAULT_LIMB_SIGNAL,
                     help="which joints define a limb's velocity: "
-                         "'end_effector' (wrist/ankle only, the specified "
-                         "construct), 'distal' (elbow+wrist, knee+ankle) or "
+                         "'distal' (elbow+wrist, knee+ankle -- the specified "
+                         "construct), 'end_effector' (wrist/ankle only) or "
                          "'limb' (whole chain). 'limb' folds in shoulder and "
                          "hip, whose torso-normalised velocities are close to "
                          "negations of each other across the midline and so "
@@ -777,6 +814,11 @@ def main(argv=None):
                          "A1 null so the flat-kernel curve equals Phi exactly; "
                          "the reported scalar stays the transition-averaged Phi.")
     ap.add_argument("--no-figures", action="store_true")
+    return ap
+
+
+def main(argv=None):
+    ap = build_parser()
     args = ap.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -1033,6 +1075,11 @@ def main(argv=None):
         + (m["lengths"] if "lengths" in m else np.bincount(m["vidid"])),
         "n_visits": res["phi"]["n_visits"],
         "phi_excess": res["phi"]["excess"], "phi_observed": res["phi"]["observed"],
+        "phi_null": res["phi"]["null_mean"],
+        "phi_null_ess": res["phi"]["null_ess"],
+        "phi_null_method": res["phi"]["null_method"],
+        "phi_excess_uniform": res["phi"]["excess_uniform"],
+        "phi_null_uniform": res["phi"]["null_uniform"],
         "kemeny_jumps": res["kemeny_per_subject"],
         "occupancy_entropy": cl["occupancy_entropy"],
         "mean_dwell_windows": cl["mean_dwell"]})

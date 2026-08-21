@@ -314,6 +314,11 @@ def test_exact_mannwhitney():
           abs(r2["p"] - 2 / comb(38, 6)) < 1e-12, f"p = {r2['p']:.3g}")
 
 
+def _logsumexp_t(x):
+    m = float(np.max(x))
+    return m + float(np.log(np.exp(np.asarray(x, float) - m).sum()))
+
+
 def test_smirnov_shuffle():
     """The Phi null draws uniformly from the orderings the subject could produce.
 
@@ -356,6 +361,14 @@ def test_smirnov_shuffle():
         check(f"[{label}] the draws are uniform over them",
               p > 0.001, f"chi-square p = {p:.3f}")
 
+    # The exact count certifies the samplers: the support enumerated above is
+    # the same number the block inclusion-exclusion gives, and the importance
+    # sampler's weights estimate it without either enumerating or sampling it.
+    for counts, want in (([2, 1, 1], 6), ([3, 3], 2), ([3, 2, 2], 38),
+                         ([2, 2, 2, 1], 246)):
+        check(f"exact count of no-repeat arrangements for {counts} is {want}",
+              A.smirnov_count(counts) == want, f"{A.smirnov_count(counts)}")
+
     # Convergence: the null must not remember the word the chain started from.
     rng = np.random.default_rng(4)
     K = 8
@@ -377,6 +390,97 @@ def test_smirnov_shuffle():
     d = abs(null_of(q) - null_of(alt))
     check("the null is independent of the starting ordering", d < 0.005,
           f"|difference| = {d:.2e}")
+
+
+def test_smirnov_sis():
+    """The null's estimator: independent weighted draws, with a size it checks.
+
+    Sequential importance sampling replaces the chain for the reported null, so
+    three things have to hold. Every draw must be a valid arrangement; the
+    weights must reproduce the *uniform* law over those arrangements, not the
+    proposal's own; and the weight-implied count of valid arrangements must
+    match the exact one, which is what turns the sampler from an assumption
+    into a checkable claim.
+    """
+    print("\n§7.2 null: independent importance draws")
+    from itertools import permutations
+
+    def brute(seq):
+        return sorted({w for w in map(tuple, (np.asarray(seq)[list(p)]
+                                              for p in permutations(range(len(seq)))))
+                       if all(w[t] != w[t + 1] for t in range(len(w) - 1))})
+
+    for seq, label in (([0, 0, 1, 2], "AABC"),
+                       ([0, 1, 0, 1, 0, 1], "rigid ABABAB"),
+                       ([0, 0, 0, 1, 1, 2, 2], "AAABBCC")):
+        seq = np.array(seq)
+        counts = np.bincount(seq)
+        target = brute(seq)
+        W, lw = A.smirnov_sis(counts, 20000, np.random.default_rng(2))
+        check(f"[{label}] every importance draw is a valid arrangement",
+              bool((np.diff(W, axis=1) != 0).all())
+              and bool((np.sort(W, axis=1) == np.sort(seq)).all()))
+        # Weighted histogram: under the weights every valid ordering must carry
+        # the same mass, which the raw draws do not.
+        idx = {w: i for i, w in enumerate(target)}
+        wt = np.exp(lw - lw.max())
+        mass = np.zeros(len(target))
+        for row, u in zip(map(tuple, W), wt):
+            mass[idx[row]] += u
+        mass /= mass.sum()
+        dev = float(np.abs(mass - 1.0 / len(target)).max() * len(target))
+        # Tolerance from the effective sample size rather than a magic constant:
+        # each of the N cells carries p = 1/N of an effective ESS draws, so its
+        # mass has relative standard deviation sqrt((1-p)/(p ESS)), and the
+        # largest of N such deviations sits a few of those out.
+        ess = float(np.exp(2 * _logsumexp_t(lw) - _logsumexp_t(2 * lw)))
+        pc = 1.0 / len(target)
+        tol = 4.0 * float(np.sqrt((1 - pc) / (pc * ess)))
+        check(f"[{label}] the weights flatten the proposal onto the uniform law",
+              dev < tol, f"max relative deviation {dev:.4f} against a "
+                         f"4-sigma tolerance of {tol:.4f} at ESS {ess:.0f}")
+        exact = A.smirnov_count(counts)
+        est = float(np.exp(_logsumexp_t(lw) - np.log(len(lw))))
+        check(f"[{label}] the weights recover the exact count {exact}",
+              abs(est - exact) / exact < 0.02, f"estimated {est:.2f}")
+
+    # At length, the two samplers must agree: they share no machinery, so
+    # agreement is mutual validation rather than a repeated assumption.
+    rng = np.random.default_rng(4)
+    K = 9
+    Sm = np.clip(rng.normal(0, 0.4, (K, K)), -1, 1)
+    Sm = (Sm + Sm.T) / 2
+    np.fill_diagonal(Sm, 1.0)
+    q = [int(rng.integers(0, K))]
+    while len(q) < 200:
+        c = int(rng.integers(0, K))
+        if c != q[-1]:
+            q.append(c)
+    q = np.array(q)
+    sis = A.smirnov_null(q, Sm, 2000, np.random.default_rng(0))
+    X = A.smirnov_shuffle(q, 2000, np.random.default_rng(1))
+    chain = float(Sm[X[:, :-1], X[:, 1:]].mean())
+    check("importance sampling and the chain agree on the null",
+          abs(sis["null"] - chain) < 0.01,
+          f"|Δ| = {abs(sis['null'] - chain):.2e}")
+    check("the estimator took the independent route here",
+          sis["method"] == "sis", f"method {sis['method']}, ESS {sis['ess']:.0f}")
+    check("the weight-implied count matches the exact one",
+          abs(sis["log_count_sis"] - sis["log_count_exact"]) < 0.05,
+          f"log count {sis['log_count_sis']:.3f} vs exact "
+          f"{sis['log_count_exact']:.3f}")
+
+    # Degeneracy is detected, not ignored. A long sequence alternating between
+    # two states leaves the weights concentrated on almost nothing, and the
+    # estimator must fall back to the unweighted chain rather than report an
+    # effective sample size of a handful as if it were two thousand.
+    rigid = np.tile([0, 1], 400)
+    S2 = np.array([[1.0, -0.3], [-0.3, 1.0]])
+    deg = A.smirnov_null(rigid, S2, 2000, np.random.default_rng(0),
+                         max_batches=1)
+    check("weight degeneracy falls back to the chain instead of reporting it",
+          deg["method"] == "chain" and np.isfinite(deg["null"]),
+          f"method {deg['method']}, ESS {deg['ess']:.1f}")
 
 
 def test_fluency():
@@ -1217,6 +1321,7 @@ def main():
     test_reported_inference()
     test_correlation_analysis()
     test_smirnov_shuffle()
+    test_smirnov_sis()
     test_fluency()
     test_fluency_curve()
     test_shrinkage()

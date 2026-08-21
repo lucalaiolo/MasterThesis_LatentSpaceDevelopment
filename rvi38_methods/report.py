@@ -144,6 +144,10 @@ def summarise(results: dict, outdir: str) -> dict:
             "null_offset_range": [_f(np.nanmin(gap)), _f(np.nanmax(gap))],
             "repeat_rate_median": _f(np.nanmedian(
                 np.asarray(ph.get("null_repeat_rate", []), float))),
+            "ess_min": _f(np.nanmin(np.asarray(ph.get("null_ess", [np.nan]),
+                                               float))),
+            "n_chain_fallback": int(np.sum(
+                np.asarray(ph.get("null_method", []), dtype=object) == "chain")),
             "note": ("Phi under the unconstrained permutation null, for "
                      "comparison only; the reported Phi reorders the visits "
                      "without ever repeating a state")}
@@ -328,7 +332,12 @@ def summary_markdown(s: dict) -> str:
               f"by between {_fmt(lo)} and {_fmt(hi)} across recordings; median "
               f"Phi under it is {_fmt(sens['phi_median'])}. That offset varies "
               f"with each infant's own occupancy concentration, which is what "
-              f"the reported null holds fixed."]
+              f"the reported null holds fixed.",
+              f"- draws: independent importance sampling, smallest effective "
+              f"sample size {_fmt(sens.get('ess_min'), 0)}"
+              + ("" if not sens.get("n_chain_fallback") else
+                 f"; {sens['n_chain_fallback']} recording(s) fell back to the "
+                 f"Metropolis chain where the weights degenerated")]
     L += [""]
 
     fc = s["fluency_curve"]

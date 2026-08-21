@@ -233,6 +233,20 @@ def analyse_model(model, vids, pose, spd, vel, labels, geom, cfg, tag,
           f"[{np.nanmin(gap):+.4f}, {np.nanmax(gap):+.4f}]) because "
           f"{np.nanmedian(rep):.0%} of its\n           adjacent pairs repeat a "
           f"state; Phi under it is reported as phi_excess_uniform.")
+    # The null is drawn by independent importance sampling, so what is at risk
+    # is not convergence but weight degeneracy. The effective sample size says
+    # how many of the draws actually counted; where it fell short the estimator
+    # switched to the unweighted chain, and that is reported per infant.
+    ess = np.asarray(phi["null_ess"], float)
+    meth = np.asarray(phi["null_method"], dtype=object)
+    n_chain = int(np.sum(meth == "chain"))
+    print(f"           draws: independent importance sampling, effective size "
+          f"{np.nanmin(ess):,.0f}..{np.nanmax(ess):,.0f} "
+          f"(median {np.nanmedian(ess):,.0f}) against a target of "
+          f"{cfg['n_phi']:,}"
+          + ("" if not n_chain else
+             f"; {n_chain} infant{'s' if n_chain > 1 else ''} fell back to the "
+             f"Metropolis chain"))
 
     out["tercile"] = A.tercile_decomposition(st, vid, S, n_sub)
     if "top_over_bottom" in out["tercile"]:
@@ -1062,6 +1076,8 @@ def main(argv=None):
         "n_visits": res["phi"]["n_visits"],
         "phi_excess": res["phi"]["excess"], "phi_observed": res["phi"]["observed"],
         "phi_null": res["phi"]["null_mean"],
+        "phi_null_ess": res["phi"]["null_ess"],
+        "phi_null_method": res["phi"]["null_method"],
         "phi_excess_uniform": res["phi"]["excess_uniform"],
         "phi_null_uniform": res["phi"]["null_uniform"],
         "kemeny_jumps": res["kemeny_per_subject"],

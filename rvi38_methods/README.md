@@ -3,7 +3,7 @@
 Implementation of `METHODS_3.md` — fluency (A1) and mixing structure (A7) on the
 RVI-38 cohort, plus the raw-kinematic constructs (WCLR-PP inter-limb
 coordination for cramped-synchronised movements, and the per-state velocity
-profiles), with the §10 inference layer and the §11 pre-specified gates.
+profiles), with the inference layer of METHODS §Inference.
 Alongside them sits **FidgetyFind** (`a10_fidgetyfind.py`), the published
 detector of the fidgety movements the GMA label is about: a construct nobody
 here designed, computed from the keypoints alone, against which the
@@ -23,15 +23,15 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `build_pose.py` | long CSV to per-video `(F,15,2)`; verifies frame contiguity and the constant-joint property |
 | `a1_core.py` | window-to-frame geometry, state profiles, the direction-aware second-moment signature (`M`, its double-angle shape coordinate `u`) and the magnitude+shape similarity, fluency estimators |
 | `fluency_curve.py` | exploratory temporal decomposition of `Φ`: the Gaussian-on-index curve `φ(t)` whose flat-kernel limit is `Φ` (reuses `S`, the visit sequence and the cached null) |
-| `a1_stats.py` | exact/permutation Mann-Whitney, Holm, maxT, split-half, ICC, BCa, Freedman-Lane, Mantel, power |
-| `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage, block bootstrap |
+| `a1_stats.py` | the whole reported inference and nothing else: exact Mann-Whitney U, AUC, the stratified percentile bootstrap, and the Pearson/Spearman correlation table |
+| `a57_graph.py` | jump chain, fundamental matrix, MFPT, Kemeny, shrinkage |
 | `a8_movement.py` | raw kinematics: per-state velocity profiles |
-| `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, label-permutation and circular-shift surrogate inference |
-| `a10_fidgetyfind.py` | FidgetyFind (Morais et al., 2023): the literature's fidgety-movement detector — small-amplitude displacement direction entropy per window, on six limb chains |
+| `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, circular-shift surrogate null |
+| `a10_fidgetyfind.py` | FidgetyFind (Morais et al., 2023, as adapted in METHODS §FidgetyFind): small-amplitude displacement direction entropy per window on six limb chains, reduced to `FF`, `FF_hip`, `FF_dist` |
 | `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 124 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 136 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 
 ## Run
@@ -105,9 +105,8 @@ trace-normalised part is the double-angle axis coordinate
 `u = (ρ cos 2θ, ρ sin 2θ)` — anisotropy `ρ = ‖u‖ ∈ [0,1]` and principal axis
 `θ = ∠u / 2` (mod π). `S` then combines a **magnitude** channel (the log-RMS-speed
 correlation, unchanged) with a **shape** channel (the residual-axis cosine). This
-is local to the signature: no model is refitted, the confirmatory family stays
-`{Φ, 𝒦}`, and the maxT correction is untouched — one statistic enters and one
-leaves.
+is local to the signature: no model is refitted and one statistic enters where
+one left.
 
 * `--fluency-similarity {separated,concatenated,scalar}` — how the channels are
   combined (default `separated`). `separated` (preferred) is
@@ -160,8 +159,7 @@ analysis and the whole §5–§11 clinical layer, but skips the raw-kinematic bl
 — WCLR-PP inter-limb coordination (the synchrony construct, and the slow part
 of a run) and the per-state velocity profiles. Use it
 for a fast fluency turnaround; the `Φ` result, its group contrast, the channel
-split, split-half reliability, the gates and the fluency figures are all
-unaffected. The WCLR-PP window and
+split and the fluency figures are all unaffected. The WCLR-PP window and
 peak-picking are exposed as `--wclr-w` (window frames, default 50 = 2 s),
 `--wclr-tau-max` (max lag, default 13), `--wclr-c` (ΔR² cutoff, default 0.25) and
 `--wclr-ell-min` (minimum coupled run, default 19) and `--wclr-dtau` (peak-lag
@@ -208,13 +206,11 @@ whole of the reported inference:
   `[0, 1]`.
 
 Endpoints: fluency `Φ`, the Kemeny constant `𝒦`, whole-body synchrony
-(`mean F`) and the FidgetyFind score, plus each of the six WCLR-PP pairs and
-each of the six FidgetyFind chains. **Nothing is corrected for multiplicity**
-and **no nuisance is partialled out of a contrast**. (For the two six-member
-families a Westfall-Young maximum-statistic p is printed alongside the
-per-pair/per-chain contrasts, clearly marked, since the co-movement construct
-is specified that way in the companion; it is reported beside the endpoint
-tests, never in place of them.)
+(`mean F`) and the three FidgetyFind numbers `FF`, `FF_hip`, `FF_dist`, plus
+each of the six WCLR-PP pairs and the two similarity channels of `Φ`. Every one
+of them goes through exactly the procedure above and nothing else. **Nothing is
+corrected for multiplicity**, **no nuisance is partialled out of a contrast**,
+and **no endpoint has to clear an admission gate to be reported**.
 
 The nuisances are reported as correlations instead: `correlation_analysis`
 gives every endpoint's **Pearson and Spearman** correlation with occupancy
@@ -222,11 +218,12 @@ entropy `H = -Σ o_k log o_k`, mean dwell time, and log recording length,
 written to `results['correlations']` and drawn as `correlations.png`. The label
 enters no fit.
 
-The Hanley-McNeil normal approximation, the Holm and maxT corrections, the
-minimum detectable effect and the Freedman-Lane adjustment are **not** part of
-this and nothing in the pipeline calls them; the functions survive in
-`a1_stats.py`, marked, because they were used while the analysis was being
-developed.
+That is the entire inferential layer, and `a1_stats.py` now contains nothing
+else. There is no multiplicity correction (no Holm, no Westfall-Young
+maximum-statistic), no normal approximation to the AUC, no nuisance adjustment,
+no BCa interval on a group median, no leave-one-out sweep, no split-half
+reliability, no truncation control, no estimability gate and no pre-specified
+gate table. All of those were removed rather than kept and marked.
 
 ### FidgetyFind: the literature's detector (`a10_fidgetyfind.py`)
 
@@ -236,98 +233,119 @@ developed.
 > IEEE JBHI 27(10), 5042–5053. Reference code:
 > `github.com/RomeroBarata/fidgetyfind`.
 
-Fidgety movements are *small* and *directionally variable*. FidgetyFind
-measures exactly that: for each frame-to-frame displacement of a joint of
-interest it records the amplitude as a percentage of the parent limb's length
-(so the measure is scale-free) and the direction *relative to that limb's own
-axis*; inside a 50-frame window it keeps the displacements in a small-movement
-band and takes the Shannon entropy of their direction histogram, normalised by
-`log(bins)` to `[0, 1]`. Near 1: the limb wandered in every direction, fidgety
-movement is present — the normal pole. Near 0: one direction only, or too few
-small movements to judge — absent fidgety movement, which is what the GMA label
-marks. **The abnormal group is therefore expected below the normal one, and the
+Fidgety movements are *small* and *directionally variable*. FidgetyFind asks one
+question of each limb: are its small movements varied in direction, or do they
+all point the same way? Varied direction is fidgety movement; a single direction
+is its absence. Near 1: the limb wandered in every direction, fidgety movement
+is present — the normal pole. Near 0: one direction only, or too few small
+movements to judge — absent fidgety movement, which is what the GMA label marks.
+**The abnormal group is therefore expected below the normal one, and the
 reported AUC below 0.5.**
 
-Six chains are scored: the knees against the thighs (the reference's own
-proximal path), the wrists against the forearms and the ankles against the
-shanks. Per chain the run reports the median window entropy, the fraction of
-windows above `--ff-theta`, and the coverage (how much of the recording was
-assessable at all); per recording it reports their means, and the group
-contrast on each, plus a max-statistic-corrected permutation test across the
-six chains, in which **every chain is reported whatever any one shows**. It
-also reports the Spearman agreement between FidgetyFind and Φ, the Kemeny
-constant and whole-body coupling — three independent measurements of the same
-recordings, where disagreement is as informative as agreement.
+This module implements the **adapted** construct of METHODS §FidgetyFind, which
+is what the thesis specifies and what the code follows. The adaptation exists
+because this cohort has no RGB data.
 
-What transfers from the reference implementation verbatim: the per-frame
-`(angle, magnitude, score)` triple, the rescaling of every magnitude by
-`fps / 30` before any threshold (the published thresholds are calibrated at
-30 fps and a per-frame displacement is not fps-invariant), the window gates
-(too many low-confidence frames, or too many frames above `--ff-large-motion`,
-void a window as *unscoreable*), the rule that a window with too little in-band
-movement scores **0.0 rather than NaN** (it was assessable, and nothing was
-found), the histogram entropy and its normalisation, the window geometry
-(`--ff-start-frame 100 --ff-window 50 --ff-stride 20`), the band
-(`--ff-minr 4.5 --ff-maxr 8.0`) and the score-weighted 5-frame Gaussian
-keypoint smoothing.
+**Per frame.** For a moving joint `c` and its parent `b`, the displacement
+`v_c(t) = x_c(t+1) − x_c(t)` gives
 
-> **The band is calibrated to this cohort by default.** The published band
-> `[4.5, 8.0]` sits an order of magnitude above the per-frame amplitudes here
-> (a consequence of the smoothing and the rigid-skeleton input), so the run
-> places the band on the cohort's own amplitude scale. `--ff-no-calibrate`
-> gives the published band, which is all-zero on this data. Full account:
-> [`docs/FIDGETYFIND_FIDELITY.md` §13](../docs/FIDGETYFIND_FIDELITY.md#13-what-the-construct-actually-does-on-rvi38_analysiscsv).
+```
+r(t)     = 100 ‖v_c(t)‖ / ℓ,          ℓ = ‖x_c − x_b‖   (constant: rigid skeleton)
+α(t)     = ∠(u(t), v_c(t)) ∈ (−π, π], u(t) = x_c(t+1) − x_b(t+1)
+q_b(t)   = 100 ‖x_b(t+1) − x_b(t)‖ / ‖x_Neck − x_MidHip‖
+```
 
-What is adapted, and why — a full audit, claim by claim against the reference
-code, is in [`docs/FIDGETYFIND_FIDELITY.md`](../docs/FIDGETYFIND_FIDELITY.md);
-the short version:
+Dividing by the limb length removes body size and camera distance; measuring the
+angle against the limb removes the infant's pose; `q_b` separates a limb being
+transported by its parent from a limb fidgeting on a still one. The published
+thresholds are read as **percentages** (hence the explicit 100), and the
+published arccosine — whose range is `[0, π]` — is replaced by the **signed**
+angle, which is what eight bins over `(−π, π]` are consistent with.
 
-* **The distal path.** The reference scores hands and feet from dense optical
-  flow over segmented hand/foot pixels, since OpenPose detects neither. We have
-  no video, so the wrist against the forearm and the ankle against the shank
-  are scored by the same skeleton-only estimator — the very axis and reference
-  length the flow path normalises by. The distal gates keep the reference's
-  intent: a window is voided when the *parent* joint is transporting the limb,
-  because then the distal motion is carriage, not fidget.
-* **Bins.** 8 for every chain. The reference's 16 distal bins count thousands
-  of flow vectors per frame; ours counts one displacement per frame, and 16
-  bins over 50 samples reads sparsity as order.
-* **Confidence** is the `observed` flag of the pose table (interior gaps are
-  interpolated upstream); without it every frame counts as detected and the
-  confidence gates never fire.
-* **The camera-motion gate is omitted** — it needs the video. These are
-  fixed-camera cot recordings; a caller who can compute the mask may pass it.
-* **The reduction to one number per recording** is ours: the released code
-  stops at the per-window entropies. `--ff-theta 0.5` (fixed a priori, halfway
-  up the normalised entropy scale) is the only free choice in it.
+**Per window** of `L` frames (so `L − 1` displacements, the denominator of every
+rate), with `B_i = {t : r_min ≤ r(t) ≤ r_max}`:
 
-Read `docs/FIDGETYFIND_FIDELITY.md` before quoting any of these numbers as
-"FidgetyFind": it says which of them are the published measurement (the hips),
-which are our substitution (the hands and feet), and which are ours outright
-(the per-recording score).
+```
+E_c(i) = NaN   if  |{t : g_c(t) ≤ τ_m1}| / (L−1) < τ_m     unassessable
+E_c(i) = 0     if  |B_i| / (L−1) < ν                       assessable, nothing found
+E_c(i) = Σ(−p log p) / log B   otherwise, over the directions {α(t) : t ∈ B_i}
+```
+
+with `(g_c, τ_m1, τ_m) = (r, τ_hip, 0.2)` on the hip chains, `(q_b, τ_hand, 0.3)`
+on the hands and `(q_b, τ_foot, 0.1)` on the feet, and `B = 8` equal bins of
+`(−π, π]`. The paper prints the distal inequality the other way round, which
+would keep only windows dominated by large movements; that is treated as a
+misprint and the proximal direction is applied to every chain.
+
+**Per recording**, three levels, mirroring how a rater judges a recording —
+fidgety movement counts if any joint on a side shows it, if it recurs through
+the recording, and if it is present on both sides. With
+`C_R = {R hip, R hand, R foot}` and `C_L` likewise:
+
+```
+s_σ(i) = max{ E_c(i) : c ∈ C_σ assessable }      window scorable iff one chain is
+S_σ    = Q₉₀({ s_σ(i) })                          ~15 s of fidgety movement in 3 min
+FF     = min(S_L, S_R)
+```
+
+A recording is scored only when **at least a quarter** of its windows on each
+side are scorable; below that FidgetyFind declines and the recording is held as
+`NaN` rather than forced to a value. The same three levels restricted to the two
+hip chains give `FF_hip` (the part of the published method that needs no
+adaptation) and restricted to the four limb chains give `FF_dist`. Those three
+numbers are the endpoints; nothing else in the block is tested.
+
+**Calibration.** The published band `[4.5, 8.0]` % of the parent limb per frame
+is tuned to raw OpenPose output. These keypoints are smoothed and rigidified
+upstream, so per-frame amplitudes are smaller — the published floor 4.5 sits near
+this cohort's 85th percentile and almost nothing lands in the band. Every
+threshold is rescaled by one factor: pool `r(t)` over all recordings and chains,
+take `Q₇₅`, and set
+
+```
+ς = Q₇₅ / √(r_min r_max),   (r_min, r_max, τ_hip, τ_hand, τ_foot) ← ς (4.5, 8.0, 10.0, 1.0, 2.5)
+```
+
+The first three are fractions of the parent limb and the last two of the trunk,
+so a single factor across all five assumes the two scales shifted together. On
+the real cohort ς = 0.45, giving the band `[2.04, 3.63]`. Smaller amplitudes then
+need a longer window to collect the same count: with the published `L = 50` and
+`ν = 0.2` a window needs ten in-band frames, so
+
+```
+L = min{ L' ∈ {50, 70, 100, 150} : median over all length-L' windows |B_i(L')| ≥ 10 },  ν = 10/L
+```
+
+which gives `L = 100`, `ν = 0.1`; the stride is set to `0.4 L = 40` frames, the
+published overlap ratio. Calibration is part of the construct here, not an
+option — `FF.calibrate` runs on every call and its factor, percentile and window
+grid are recorded in `results.json`.
+
+**What the adaptation is.** The reference scores hands and feet from dense
+optical flow over segmented hand/foot pixels, since OpenPose detects neither. We
+have no video, so the wrist against the forearm and the ankle against the shank
+are scored by the same keypoint-only estimator — the very axis and reference
+length the flow path normalises by. The published distal gate is defined on the
+distal joint's own displacement over the trunk; here it is the *parent* joint's,
+so `τ_hand` and `τ_foot` are the published values applied to a different
+quantity. All six chains use 8 bins: the reference's 16 distal bins count
+thousands of flow vectors per frame, ours counts one displacement per frame. The
+camera-motion gate needs the video and is not implemented — these are
+fixed-camera cot recordings. There is **no internal smoothing** (the keypoints
+arrive smoothed), **no frame-rate rescaling** (the specified `r(t)` is a plain
+ratio of two lengths) and **no confidence gate** (the three branches above are
+the whole gate list).
+
+Read [`docs/FIDGETYFIND_FIDELITY.md`](../docs/FIDGETYFIND_FIDELITY.md) before
+quoting any of these numbers as "FidgetyFind": it says which are the published
+measurement (`FF_hip`), which are our substitution (`FF_dist`) and where the
+rigid-skeleton input limits the construct.
 
 `--skip-fidgetyfind` omits the block; `--ff-panels` additionally writes one
 timeline panel per recording under `figures/fidgetyfind/`. Outputs:
-`fidgetyfind_per_subject.csv` (per-chain median entropy and coverage, the
-per-recording scores) and the four cohort figures `fidgetyfind_subject`,
-`fidgetyfind_chains`, `fidgetyfind_windows` and `fidgetyfind_agreement`.
-
-The published amplitude band `[4.5, 8.0]` sits an order of magnitude above the
-per-frame amplitudes in this cohort, so by default the band is **calibrated to
-the cohort's own scale** (`FF.calibrate_band`, centre at the 75th amplitude
-percentile) and the low-confidence gate runs at `0.5` — the configuration that
-actually fires here (hip coverage ~65 %). The plain command therefore produces
-FidgetyFind with its figures:
-
-```
-python run_analysis.py --csv rvi38_analysis.csv \
-    --model "K=11=arhmm_k11.pkl" --model "K=14=arhmm_k14.pkl" --outdir out
-```
-
-`--ff-centre-pct` moves the band's centre percentile; `--ff-lowconf-rate` the
-confidence gate; `--ff-no-calibrate` reverts to the published band (which is
-all-zero on this data, kept for comparison only). The provenance of the band
-used is recorded in `results.json` and `FIDGETYFIND_FIDELITY.md` §13.
+`fidgetyfind_per_subject.csv` (the three endpoints, the per-side `S_σ` and
+scorable fractions, and each chain's assessable fraction) and the three cohort
+figures `fidgetyfind_subject`, `fidgetyfind_chains` and `fidgetyfind_windows`.
 
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and
@@ -394,12 +412,13 @@ primitives, but as delivered:
   `mfpt_jump.npy` — **no script in the archive writes any of them**, so the
   figure scripts cannot run.
 * Figure titles hard-code results (`ARI = 1.000`, `p = 5e-11`, `crispness 0.78`,
-  the gate PASS/FAIL list, and eleven state names). A stale number would survive
-  any change upstream. Here every annotation is computed from the run.
+  and eleven state names). A stale number would survive any change upstream.
+  Here every annotation is computed from the run.
 * `run_analysis.py` runs A1 and A2 only; A5 and A7 have no runner.
 * Output paths are hard-coded to `/mnt/user-data/outputs/`.
 * `choose_alpha` rebuilds the group matrix inside its inner loop, making the
   selection quadratic in the number of subjects for no change in result.
-* Most of §10 and all of §11 are absent: split-half/Spearman-Brown, ICC, BCa,
-  maxT, Freedman-Lane, Mantel, AMI, minimum detectable effect, the duration and
-  truncation controls, and the gates table.
+* Most of §10 is absent. That no longer matters: METHODS §Inference specifies
+  the exact Mann-Whitney contrast, its bootstrap interval and the correlation
+  table as the whole of the reported statistics, and this implementation carries
+  exactly those.

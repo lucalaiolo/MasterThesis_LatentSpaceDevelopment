@@ -43,7 +43,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-import a1_stats as ST
 
 
 def _nanmean(a, axis=None):
@@ -403,38 +402,6 @@ def wclrpp_dataset(vids, params: WCLRParams = WCLRParams()) -> dict:
     return {"F": Fmat, "R2": R2mat, "pairs": pair_names(params.limb_signal),
             "pair_class": list(PAIR_CLASSES),
             "limb_signal": params.limb_signal, **agg}
-
-
-# ---------------------------------------------------------------------------
-# 5. group contrast: label permutation with a maximum-statistic correction
-# ---------------------------------------------------------------------------
-def _contrast(M: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Median difference (abnormal − normal), one value per pair.
-
-    A positive entry is the pathological direction: cramped-synchronised
-    movement couples limbs *more*, so higher F in the abnormal group.
-    """
-    return ST.median_contrast(M, y)
-
-
-def wclrpp_test(Fmatrix: np.ndarray, labels, n_perm: int = 10000,
-                seed: int = 0, pairs=None) -> dict:
-    """Label-permutation test over the six pairs, max-statistic corrected.
-
-    The per-recording ``F`` is the exchangeable unit; the labels are permuted.
-    Family-wise error across the six pairs is controlled by the Westfall-Young
-    maximum-statistic procedure, and **all six pairs are reported whatever any
-    one shows**. Every ``F`` lives on the same ``[0,1]`` scale, so the maximum is
-    taken without standardisation. The procedure itself is
-    :func:`a1_stats.maxstat_label_test`, shared with the FidgetyFind family.
-
-    ``pairs`` names the columns for the report; pass ``dataset["pairs"]`` so the
-    labels match the limb signal the ``F`` matrix was built with.
-    """
-    out = ST.maxstat_label_test(Fmatrix, labels, n_perm=n_perm, seed=seed,
-                                names=PAIR_NAMES if pairs is None else pairs)
-    out["pairs"] = out.pop("names")
-    return out
 
 
 # ---------------------------------------------------------------------------

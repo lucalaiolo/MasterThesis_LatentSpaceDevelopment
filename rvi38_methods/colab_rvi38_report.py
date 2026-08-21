@@ -14,7 +14,7 @@
 # =====================================================================
 
 # ---- 0. Repo + dependencies (uncomment on a fresh Colab runtime) ----
-# !git clone -b claude/fidgetyfind-analysis-function-pe8tu0 \
+# !git clone -b claude/fidgetyfind-movement-detection-tv4zqv \
 #     https://github.com/lucalaiolo/MasterThesis_LatentSpaceDevelopment.git
 # !pip -q install numpy scipy pandas joblib scikit-learn matplotlib
 #
@@ -48,7 +48,6 @@ STREAM    = "auto"    # "delta" | "pose" | "auto" (infer from stored lengths)
 
 # Optional overrides, passed straight to run_analysis (None = published default)
 FLUENCY_OMEGA = None  # magnitude weight in S = w*S_mag + (1-w)*S_shape (0.5)
-FF_THETA      = None  # entropy above which a window counts as fidgety (0.5)
 WCLR_LIMB     = None  # "end_effector" | "distal" | "limb"
 # ====================================================================
 
@@ -60,7 +59,6 @@ sys.path.insert(0, os.path.join(REPO, "rvi38_methods"))
 from report import run_report
 
 overrides = {k: v for k, v in (("fluency_omega", FLUENCY_OMEGA),
-                               ("ff_theta", FF_THETA),
                                ("wclr_limb_signal", WCLR_LIMB)) if v is not None}
 
 out = run_report(
@@ -92,7 +90,9 @@ line("kemeny", s["kemeny"]["group"])
 if not s["synchrony"].get("skipped"):
     line("synchrony", s["synchrony"]["whole_body"])
 if not s["fidgetyfind"].get("skipped"):
-    line("FidgetyFind", s["fidgetyfind"]["group"])
+    for key, nm in (("FF", "FidgetyFind"), ("FF_hip", "  ... hips"),
+                    ("FF_dist", "  ... limbs")):
+        line(nm, s["fidgetyfind"]["endpoints"][key])
     print("             (below 0.5 is the expected direction for FidgetyFind)")
 
 # To re-display one construct's figures later, without rerunning anything:

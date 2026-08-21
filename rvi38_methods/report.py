@@ -54,16 +54,14 @@ import run_analysis                                        # noqa: E402
 # ``/`` are directories of per-recording panels.
 FIGURE_GROUPS: dict[str, tuple[str, ...]] = {
     "fluency": ("state_signature", "similarity_matrix", "similarity_channels",
-                "fluency_per_subject", "fluency_by_dwell",
-                "split_half_reliability"),
+                "fluency_per_subject", "fluency_by_dwell"),
     "fluency_curve": ("fluency_curve/",),
     "kemeny": ("degenerate_statistics", "mfpt_matrix", "graph_companions",
                "kemeny_per_subject", "shrinkage_selection"),
     "synchrony": ("wclrpp_pairs", "wclrpp_summary"),
     "fidgetyfind": ("fidgetyfind_subject", "fidgetyfind_chains",
-                    "fidgetyfind_windows", "fidgetyfind_agreement",
-                    "fidgetyfind/"),
-    "clinical": ("auc_effect_sizes", "loo_stability", "correlations", "gates",
+                    "fidgetyfind_windows", "fidgetyfind/"),
+    "clinical": ("auc_effect_sizes", "correlations",
                  "state_velocity_regions", "state_velocity_lateral"),
 }
 PER_RECORDING = ("fluency_curve/", "fidgetyfind/")
@@ -117,13 +115,11 @@ def summarise(results: dict, outdir: str) -> dict:
 
     # 1. fluency -------------------------------------------------------------
     phi = np.asarray(res.get("phi", {}).get("excess", []), float)
-    w = res.get("phi_wilcoxon", {})
     y = np.asarray(results.get("labels", []), int)
     fl = {"phi_median": _f(np.median(phi)) if phi.size else float("nan"),
-          "phi_positive": f"{w.get('n_positive', 0)}/{w.get('n', 0)}",
-          "within_infant_p": _f(w.get("p")),
-          "split_half_r_sb": _f(cl.get("phi_split_half", {}).get("r_sb")),
-          "icc": _f(cl.get("phi_split_half", {}).get("icc_a1")),
+          "phi_positive": (f"{int(np.sum(phi > 0))}/"
+                           f"{int(np.isfinite(phi).sum())}") if phi.size
+          else "0/0",
           "group": _auc_row(cl.get("phi_test"))}
     if phi.size and y.size == phi.size:
         fl["phi_median_normal"] = _f(np.median(phi[y == 0]))
@@ -153,9 +149,6 @@ def summarise(results: dict, outdir: str) -> dict:
           "kemeny_jump_chain": _f(cj.get("kemeny")),
           "per_subject_median": _f(np.median(kem)) if kem.size else float("nan"),
           "shrinkage_alpha": _f(res.get("alpha", {}).get("alpha")),
-          "estimability_ratio": _f(res.get("estimability", {}).get("ratio")),
-          "estimability_passed": bool(res.get("estimability", {})
-                                      .get("passed", False)),
           "identity_check": _f(res.get("kemeny_identity", {}).get("abs_diff")),
           "group": _auc_row(cl.get("kemeny_test"))}
     if kem.size and y.size == kem.size:
@@ -167,7 +160,6 @@ def summarise(results: dict, outdir: str) -> dict:
     wc = results.get("wclrpp")
     if wc:
         F = np.asarray(wc.get("F", []), float)
-        t = wc.get("test", {})
         pairs = list(wc.get("pairs", []))
         ptests = wc.get("pair_tests") or []
         per_pair = []
@@ -179,69 +171,63 @@ def summarise(results: dict, outdir: str) -> dict:
                 "median_normal": _f(np.nanmedian(F[y == 0, i]))
                 if F.size else float("nan"),
                 "median_abnormal": _f(np.nanmedian(F[y == 1, i]))
-                if F.size else float("nan"),
-                "delta": _f(np.asarray(t.get("observed", []), float)[i])
-                if t else float("nan"),
-                "p_familywise": _f(np.asarray(t.get("p_corrected", []),
-                                              float)[i]) if t else float("nan")})
+                if F.size else float("nan")})
+            row["delta"] = _f(row["median_abnormal"] - row["median_normal"])
             per_pair.append(row)
         out["synchrony"] = {
             "limb_signal": wc.get("params", {}).get("limb_signal"),
             "window_frames": wc.get("params", {}).get("w"),
             "per_pair": per_pair,
-            "whole_body": _auc_row(wc.get("mean_F_test")),
-            "n_perm": int(t.get("n_perm", 0)) if t else 0}
+            "whole_body": _auc_row(wc.get("mean_F_test"))}
     else:
         out["synchrony"] = {"skipped": True}
 
     # 5. FidgetyFind ---------------------------------------------------------
     ff = results.get("fidgetyfind")
     if ff:
-        M = np.asarray(ff.get("median_entropy", []), float)
-        t = ff.get("chain_test", {})
+        cov = np.asarray(ff.get("coverage", []), float)
         chains = list(ff.get("chains", []))
-        ctests = ff.get("chain_tests") or []
         per_chain = []
         for i, nm in enumerate(chains):
-            row = _auc_row(ctests[i] if i < len(ctests) else None)
-            row.update({
+            per_chain.append({
                 "chain": nm,
-                "class": list(ff.get("chain_class", []))[i] if
-                ff.get("chain_class") is not None else "",
-                "median_normal": _f(np.nanmedian(M[y == 0, i]))
-                if M.size else float("nan"),
-                "median_abnormal": _f(np.nanmedian(M[y == 1, i]))
-                if M.size else float("nan"),
-                "delta": _f(np.asarray(t.get("observed", []), float)[i])
-                if t else float("nan"),
-                "p_familywise": _f(np.asarray(t.get("p_corrected", []),
-                                              float)[i]) if t else float("nan"),
-                "coverage": _f(np.nanmedian(
-                    np.asarray(ff.get("coverage", []), float)[:, i]))})
-            per_chain.append(row)
-        score = np.asarray(ff.get("score", []), float)
+                "class": list(ff.get("chain_class", []))[i]
+                if ff.get("chain_class") is not None else "",
+                "assessable": _f(np.nanmedian(cov[:, i]))
+                if cov.size else float("nan")})
+        cal = ff.get("calibration", {})
+        endpoints = {}
+        for g in ("FF", "FF_hip", "FF_dist"):
+            v = np.asarray(ff.get(g, []), float)
+            row = _auc_row(ff.get("tests", {}).get(g))
+            row.update({
+                "median_normal": _f(np.nanmedian(v[y == 0])) if v.size
+                else float("nan"),
+                "median_abnormal": _f(np.nanmedian(v[y == 1])) if v.size
+                else float("nan"),
+                "n_scored": int(np.isfinite(v).sum()) if v.size else 0,
+                "n_total": int(v.size)})
+            endpoints[g] = row
         out["fidgetyfind"] = {
-            "score_median_normal": _f(np.nanmedian(score[y == 0]))
-            if score.size else float("nan"),
-            "score_median_abnormal": _f(np.nanmedian(score[y == 1]))
-            if score.size else float("nan"),
-            "group": _auc_row(ff.get("tests", {}).get("score")),
-            "group_hips_only": _auc_row(ff.get("tests", {})
-                                        .get("score_proximal")),
-            "group_window_rate": _auc_row(ff.get("tests", {})
-                                          .get("positive_rate_mean")),
+            "endpoints": endpoints,
+            "group": endpoints.get("FF", {}),
             "per_chain": per_chain,
-            "assessable_fraction": _f(np.nanmedian(
-                np.asarray(ff.get("coverage_mean", []), float))),
-            "agreement": {k: {"rho": _f(v.get("rho")), "p": _f(v.get("p"))}
-                          for k, v in ff.get("agreement", {}).items()},
+            "band": ff.get("band_label", ""),
+            "calibration": {"scale": _f(cal.get("scale")),
+                            "q75": _f(cal.get("q75")),
+                            "percentile": _f(cal.get("percentile")),
+                            "window": cal.get("window"),
+                            "window_reached": bool(cal.get("window_reached",
+                                                           False))},
+            "window_frames": ff.get("params", {}).get("window"),
+            "stride": ff.get("params", {}).get("stride"),
+            "nu": _f(ff.get("params", {}).get("nu")),
             "direction": ("AUC below 0.5 is the expected direction: absent "
                           "fidgety movement means less direction variety")}
     else:
         out["fidgetyfind"] = {"skipped": True}
 
     out["correlations"] = results.get("correlations", {})
-    out["gates"] = cl.get("gates", {})
     out["checks"] = results.get("checks", {})
     return out
 
@@ -290,23 +276,23 @@ def summary_markdown(s: dict) -> str:
           "(the probability that a random abnormal infant exceeds a random "
           "normal one; 0.5 is no separation), the p-value is two-sided, and "
           "the interval is the percentile interval of a stratified "
-          "nonparametric bootstrap. Nothing is corrected for multiplicity and "
-          "no nuisance is partialled out of a contrast.",
+          "nonparametric bootstrap. Nothing is corrected for multiplicity, no "
+          "nuisance is partialled out of a contrast, and no endpoint has to "
+          "clear an admission gate to be reported; the nuisances are reported "
+          "as correlations, where the label enters no fit.",
           ""]
 
     f = s["fluency"]
     g = f.get("group", {})
     L += ["## 1. Fluency (Phi)", "",
           f"- within infants: Phi > 0 in {f['phi_positive']}, median "
-          f"{_fmt(f['phi_median'])}, p = {_fmt_p(f['within_infant_p'])}",
+          f"{_fmt(f['phi_median'])}",
           f"- normal {_fmt(f.get('phi_median_normal'))} vs abnormal "
           f"{_fmt(f.get('phi_median_abnormal'))}",
           f"- group contrast: AUC {_fmt(g.get('auc'))} "
           f"[{_fmt(g.get('auc_ci', [np.nan])[0])}, "
           f"{_fmt(g.get('auc_ci', [np.nan, np.nan])[1])}], "
-          f"p = {_fmt_p(g.get('p'))} ({g.get('method', '')})",
-          f"- reliability: split-half r_SB = {_fmt(f['split_half_r_sb'])}, "
-          f"ICC(A,1) = {_fmt(f['icc'])}"]
+          f"p = {_fmt_p(g.get('p'))} ({g.get('method', '')})"]
     if "channel_split" in f:
         parts = ", ".join(f"{k} AUC {_fmt(v['auc'])} (p {_fmt_p(v['p'])})"
                           for k, v in f["channel_split"].items())
@@ -335,9 +321,7 @@ def summary_markdown(s: dict) -> str:
           f"[{_fmt(g.get('auc_ci', [np.nan])[0])}, "
           f"{_fmt(g.get('auc_ci', [np.nan, np.nan])[1])}], "
           f"p = {_fmt_p(g.get('p'))}",
-          f"- shrinkage alpha {_fmt(k['shrinkage_alpha'])}, estimability "
-          f"ratio {_fmt(k['estimability_ratio'], 2)} "
-          f"({'PASS' if k['estimability_passed'] else 'FAIL'}), spectral "
+          f"- shrinkage alpha {_fmt(k['shrinkage_alpha'])}, spectral "
           f"identity |diff| = {k['identity_check']:.1e}", ""]
 
     sy = s["synchrony"]
@@ -347,55 +331,55 @@ def summary_markdown(s: dict) -> str:
     else:
         g = sy.get("whole_body", {})
         L += [f"- limb signal `{sy['limb_signal']}`, window "
-              f"{sy['window_frames']} frames, {sy['n_perm']:,} label "
-              f"permutations",
+              f"{sy['window_frames']} frames",
               f"- whole-body coupling (mean F): AUC {_fmt(g.get('auc'))}, "
               f"p = {_fmt_p(g.get('p'))}",
-              "", "| pair | class | normal | abnormal | AUC [95% CI] | p | "
-              "p (family-wise) |", "|---|---|---|---|---|---|---|"]
+              "", "| pair | class | normal | abnormal | AUC [95% CI] | p |",
+              "|---|---|---|---|---|---|"]
         for r in sy["per_pair"]:
             ci = r.get("auc_ci", [np.nan, np.nan])
             L += [f"| {r['pair']} | {r['class']} | "
                   f"{_fmt(r['median_normal'])} | {_fmt(r['median_abnormal'])} "
                   f"| {_fmt(r.get('auc'))} [{_fmt(ci[0])}, {_fmt(ci[1])}] "
-                  f"| {_fmt_p(r.get('p'))} | {_fmt_p(r['p_familywise'])} |"]
-        L += ["", "The family-wise column is a Westfall-Young maximum-statistic "
-              "correction over the six pairs, reported alongside the endpoint "
-              "contrasts rather than in place of them.", ""]
+                  f"| {_fmt_p(r.get('p'))} |"]
+        L += [""]
 
     ff = s["fidgetyfind"]
     L += ["## 5. FidgetyFind (Morais et al., 2023)", ""]
     if ff.get("skipped"):
         L += ["- skipped", ""]
     else:
-        g = ff.get("group", {})
-        h = ff.get("group_hips_only", {})
-        L += [f"- score: normal {_fmt(ff['score_median_normal'])} vs abnormal "
-              f"{_fmt(ff['score_median_abnormal'])}",
-              f"- group contrast: AUC {_fmt(g.get('auc'))} "
-              f"[{_fmt(g.get('auc_ci', [np.nan])[0])}, "
-              f"{_fmt(g.get('auc_ci', [np.nan, np.nan])[1])}], "
-              f"p = {_fmt_p(g.get('p'))}",
-              f"- hips only (the unadapted published path): AUC "
-              f"{_fmt(h.get('auc'))}, p = {_fmt_p(h.get('p'))}",
+        cal = ff.get("calibration", {})
+        L += [f"- {ff.get('band', '')}: the published ladder rescaled by "
+              f"varsigma = {_fmt(cal.get('scale'))}, from the "
+              f"{_fmt(cal.get('percentile'), 0)}th percentile "
+              f"{_fmt(cal.get('q75'), 2)}% of the pooled per-frame amplitudes",
+              f"- window L = {ff.get('window_frames')} frames, stride "
+              f"{ff.get('stride')}, nu = {_fmt(ff.get('nu'))}"
+              + ("" if cal.get("window_reached") else
+                 " (no window length in the grid reached ten in-band frames, "
+                 "so the longest was taken)"),
               f"- {ff['direction']}",
-              f"- median fraction of windows assessable: "
-              f"{_fmt(ff['assessable_fraction'])}"]
-        if ff.get("agreement"):
-            L += ["- agreement with the other constructs (Spearman): "
-                  + ", ".join(f"{k} rho {_fmt(v['rho'], 2)} "
-                              f"(p {_fmt_p(v['p'])})"
-                              for k, v in ff["agreement"].items())]
-        L += ["", "| chain | class | normal | abnormal | AUC [95% CI] | p | "
-              "p (family-wise) | assessable |",
-              "|---|---|---|---|---|---|---|---|"]
-        for r in ff["per_chain"]:
+              "",
+              "| endpoint | normal | abnormal | AUC [95% CI] | p | scored |",
+              "|---|---|---|---|---|---|"]
+        for g, lab in (("FF", "FF (all six chains)"),
+                       ("FF_hip", "FF_hip (hip chains)"),
+                       ("FF_dist", "FF_dist (limb chains)")):
+            r = ff.get("endpoints", {}).get(g, {})
             ci = r.get("auc_ci", [np.nan, np.nan])
+            L += [f"| {lab} | {_fmt(r.get('median_normal'))} | "
+                  f"{_fmt(r.get('median_abnormal'))} | "
+                  f"{_fmt(r.get('auc'))} [{_fmt(ci[0])}, {_fmt(ci[1])}] | "
+                  f"{_fmt_p(r.get('p'))} | "
+                  f"{r.get('n_scored', 0)}/{r.get('n_total', 0)} |"]
+        L += ["",
+              "Windows in which each chain's amplitude gate left it assessable "
+              "(median over recordings):", "",
+              "| chain | class | assessable |", "|---|---|---|"]
+        for r in ff["per_chain"]:
             L += [f"| {r['chain']} | {r['class']} | "
-                  f"{_fmt(r['median_normal'])} | {_fmt(r['median_abnormal'])} "
-                  f"| {_fmt(r.get('auc'))} [{_fmt(ci[0])}, {_fmt(ci[1])}] "
-                  f"| {_fmt_p(r.get('p'))} | {_fmt_p(r['p_familywise'])} | "
-                  f"{_fmt(r['coverage'], 2)} |"]
+                  f"{_fmt(r['assessable'], 2)} |"]
         L += [""]
 
     co = s.get("correlations") or {}
@@ -418,11 +402,6 @@ def summary_markdown(s: dict) -> str:
             L += [f"| {e} | " + " | ".join(cells) + " |"]
         L += [""]
 
-    if s.get("gates"):
-        L += ["## Pre-specified gates", ""]
-        for name, ok in s["gates"].items():
-            L += [f"- {'PASS' if ok else 'FAIL'} — {name}"]
-        L += [""]
     return "\n".join(L)
 
 
@@ -574,10 +553,9 @@ def run_report(csv: str = "rvi38_analysis.csv",
     ``"synchrony"``, ``"fidgetyfind"``, ``"clinical"``).
 
     Any further keyword goes straight through to the runner:
-    ``fluency_omega=0.7`` becomes ``--fluency-omega 0.7``, ``ff_theta=0.6``
-    becomes ``--ff-theta 0.6``, ``wclr_limb_signal="distal"`` becomes
-    ``--wclr-limb-signal distal``. A boolean keyword becomes a bare flag when
-    it is true.
+    ``fluency_omega=0.7`` becomes ``--fluency-omega 0.7`` and
+    ``wclr_limb_signal="distal"`` becomes ``--wclr-limb-signal distal``. A
+    boolean keyword becomes a bare flag when it is true.
     """
     argv = ["--csv", str(csv), "--outdir", str(outdir), "--fps", str(fps),
             "--stream", str(stream), "--controls", str(controls)]

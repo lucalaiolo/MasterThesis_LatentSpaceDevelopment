@@ -218,6 +218,21 @@ def analyse_model(model, vids, pose, spd, vel, labels, geom, cfg, tag,
     print(f"  §7 fluency: Phi > 0 in {int(np.sum(exc > 0))}/"
           f"{int(np.isfinite(exc).sum())} infants, median "
           f"{np.nanmedian(exc):+.4f}")
+    # The null reorders each subject's visits without ever repeating a state,
+    # which is the constraint the visit sequence itself carries. Reordering over
+    # all n! permutations instead admits adjacent-equal pairs worth S_kk = 1 at
+    # a rate set by the subject's own occupancy concentration, so it inflates
+    # the null by a subject-specific amount. Both are printed so the size of
+    # that correction on this cohort is on the record.
+    gap = (np.asarray(phi["null_uniform"], float)
+           - np.asarray(phi["null_mean"], float))
+    rep = np.asarray(phi["null_repeat_rate"], float)
+    print(f"     null: no-repeat reorderings of each visit sequence. The "
+          f"unconstrained permutation null sits\n           "
+          f"{np.nanmedian(gap):+.4f} higher (median over infants, range "
+          f"[{np.nanmin(gap):+.4f}, {np.nanmax(gap):+.4f}]) because "
+          f"{np.nanmedian(rep):.0%} of its\n           adjacent pairs repeat a "
+          f"state; Phi under it is reported as phi_excess_uniform.")
 
     out["tercile"] = A.tercile_decomposition(st, vid, S, n_sub)
     if "top_over_bottom" in out["tercile"]:
@@ -1046,6 +1061,9 @@ def main(argv=None):
         + (m["lengths"] if "lengths" in m else np.bincount(m["vidid"])),
         "n_visits": res["phi"]["n_visits"],
         "phi_excess": res["phi"]["excess"], "phi_observed": res["phi"]["observed"],
+        "phi_null": res["phi"]["null_mean"],
+        "phi_excess_uniform": res["phi"]["excess_uniform"],
+        "phi_null_uniform": res["phi"]["null_uniform"],
         "kemeny_jumps": res["kemeny_per_subject"],
         "occupancy_entropy": cl["occupancy_entropy"],
         "mean_dwell_windows": cl["mean_dwell"]})

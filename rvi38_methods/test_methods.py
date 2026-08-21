@@ -314,6 +314,71 @@ def test_exact_mannwhitney():
           abs(r2["p"] - 2 / comb(38, 6)) < 1e-12, f"p = {r2['p']:.3g}")
 
 
+def test_smirnov_shuffle():
+    """The Phi null draws uniformly from the orderings the subject could produce.
+
+    §7.1 run-length compresses the path, so a visit sequence never repeats a
+    state and the null must not either. Uniformity is checked against an
+    exhaustive enumeration on multisets small enough to enumerate, including
+    the rigid alternating case where a cyclic rotation is the only accepted
+    move.
+    """
+    print("\n§7.2 null: uniform over the no-repeat reorderings")
+    from itertools import permutations
+
+    def brute(seq):
+        return sorted({w for w in map(tuple, (np.asarray(seq)[list(p)]
+                                              for p in permutations(range(len(seq)))))
+                       if all(w[t] != w[t + 1] for t in range(len(w) - 1))})
+
+    for seq, label in (([0, 0, 1, 2], "AABC"),
+                       ([0, 1, 0, 1, 0, 1], "rigid ABABAB"),
+                       ([0, 0, 0, 1, 1, 2, 2], "AAABBCC")):
+        seq = np.array(seq)
+        target = brute(seq)
+        X = A.smirnov_shuffle(seq, 20000, np.random.default_rng(1))
+        check(f"[{label}] no draw repeats a state",
+              bool((np.diff(X, axis=1) != 0).all()))
+        check(f"[{label}] every draw is a reordering of the same multiset",
+              bool((np.sort(X, axis=1) == np.sort(seq)).all()))
+        idx = {w: i for i, w in enumerate(target)}
+        cnt = np.zeros(len(target))
+        extra = 0
+        for row in map(tuple, X):
+            if row in idx:
+                cnt[idx[row]] += 1
+            else:
+                extra += 1
+        check(f"[{label}] the support is exactly the {len(target)} valid orderings",
+              extra == 0 and bool((cnt > 0).all()),
+              f"{int((cnt > 0).sum())}/{len(target)} reached, {extra} invalid")
+        p = float(stats.chisquare(cnt).pvalue) if len(target) > 1 else 1.0
+        check(f"[{label}] the draws are uniform over them",
+              p > 0.001, f"chi-square p = {p:.3f}")
+
+    # Convergence: the null must not remember the word the chain started from.
+    rng = np.random.default_rng(4)
+    K = 8
+    Sm = np.clip(rng.normal(0, 0.4, (K, K)), -1, 1)
+    Sm = (Sm + Sm.T) / 2
+    np.fill_diagonal(Sm, 1.0)
+    q = [int(rng.integers(0, K))]
+    while len(q) < 240:
+        c = int(rng.integers(0, K))
+        if c != q[-1]:
+            q.append(c)
+    q = np.array(q)
+    alt = A.smirnov_shuffle(q, 1, np.random.default_rng(5), n_steps=50 * len(q))[0]
+
+    def null_of(start):
+        X = A.smirnov_shuffle(start, 2000, np.random.default_rng(6))
+        return float(Sm[X[:, :-1], X[:, 1:]].mean())
+
+    d = abs(null_of(q) - null_of(alt))
+    check("the null is independent of the starting ordering", d < 0.005,
+          f"|difference| = {d:.2e}")
+
+
 def test_fluency():
     print("\n§7 fluency estimator")
     rng = np.random.default_rng(6)
@@ -343,20 +408,39 @@ def test_fluency():
     check("clustered sequence has positive excess", r["excess"][0] > 0.1,
           f"{r['excess'][0]:+.3f}")
 
-    # The §7.2 uniform null admits adjacent-equal pairs that the run-length
-    # compressed observation cannot contain, and each contributes S_kk = 1.
-    # A genuinely random sequence therefore scores negative under the spec's
-    # null and ~zero once the null is conditioned on adjacent entries differing.
-    check("uniform null is inflated by its diagonal pairs (documented bias)",
-          r["excess"][1] < -0.05 and r["null_repeat_rate"][1] > 0.05,
-          f"excess {r['excess'][1]:+.3f}, null repeat rate "
+    # A sequence with no structure beyond its occupancy must score ~zero: it is
+    # one draw from the null itself. The unconstrained permutation null cannot
+    # deliver that -- it admits adjacent-equal pairs the run-length compressed
+    # observation cannot contain, each worth S_kk = 1 -- so it drives the same
+    # sequence negative, which is the bias the reported null removes.
+    check("a structureless sequence scores ~zero under the reported null",
+          abs(r["excess"][1]) < 0.06, f"{r['excess'][1]:+.3f}")
+    check("the unconstrained null is inflated by its diagonal pairs",
+          r["excess_uniform"][1] < -0.05 and r["null_repeat_rate"][1] > 0.05,
+          f"excess {r['excess_uniform'][1]:+.3f}, repeat rate "
           f"{r['null_repeat_rate'][1]:.1%}")
-    check("off-diagonal-conditioned null gives ~zero for a random sequence",
-          abs(r["excess_offdiag"][1]) < 0.06,
-          f"{r['excess_offdiag'][1]:+.3f}")
-    check("the null preserves occupancy exactly",
-          np.array_equal(np.sort(np.bincount(smooth, minlength=K)),
-                         np.sort(np.bincount(smooth, minlength=K))))
+    check("the reported null sits below the unconstrained one for every subject",
+          bool(np.all(r["null_mean"] < r["null_uniform"])),
+          f"gap {float(np.mean(r['null_uniform'] - r['null_mean'])):+.3f}")
+
+    # Eq. 30: the split of Phi into channels is exact, not approximate. Both
+    # calls draw from the same seeded stream in the same order, so the two
+    # channel nulls come from the identical reorderings and the identity holds
+    # to floating point rather than to Monte-Carlo error.
+    rr = np.random.default_rng(11)
+    def _sym(seed):
+        M = np.clip(np.random.default_rng(seed).normal(0, .4, (K, K)), -1, 1)
+        M = (M + M.T) / 2
+        np.fill_diagonal(M, 1.0)
+        return M
+    S_mag, S_shape, w = _sym(1), _sym(2), 0.5
+    kw = dict(n_perm=200, seed=0)
+    lhs = A.phi_excess(states, vid, w * S_mag + (1 - w) * S_shape, 2, **kw)["excess"]
+    rhs = (w * A.phi_excess(states, vid, S_mag, 2, **kw)["excess"]
+           + (1 - w) * A.phi_excess(states, vid, S_shape, 2, **kw)["excess"])
+    check("Phi splits exactly into its magnitude and shape channels",
+          float(np.abs(lhs - rhs).max()) < 1e-12,
+          f"max|Δ| = {float(np.abs(lhs - rhs).max()):.1e}")
 
     # §7.5 terciles need a similarity matrix with enough distinct values for
     # three non-empty terciles; a two-valued S is reported as degenerate.
@@ -1132,6 +1216,7 @@ def main():
     test_exact_mannwhitney()
     test_reported_inference()
     test_correlation_analysis()
+    test_smirnov_shuffle()
     test_fluency()
     test_fluency_curve()
     test_shrinkage()

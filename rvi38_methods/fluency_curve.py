@@ -16,14 +16,14 @@ its ``omega``), the run-length-compressed Viterbi visit sequence ``q``
 ``c`` and scalar ``Phi`` (``phi['null_mean']`` / ``phi['excess']`` from
 :func:`a1_core.phi_excess`). Reusing the cache makes the flat-kernel identity of
 step 2 hold to floating-point exactness; recomputing ``c`` here (``B = 2000``
-uniform order-permutations, the §7.2 null) reproduces it up to Monte-Carlo
-noise. The wall-clock transition time ``T_t`` is the plot axis only, derived from
+reorderings that never repeat a state, the §7.2 null of
+:func:`a1_core.smirnov_shuffle`) reproduces it up to Monte-Carlo noise. The wall-clock transition time ``T_t`` is the plot axis only, derived from
 A1's window geometry (:class:`a1_core.Geometry`) and the visit dwell lengths.
 
 Definitions (METHODS §7 notation)::
 
     s_t      = S[q_t, q_{t+1}]                              t = 1..n-1
-    c        ~ (1/B) sum_b  mean_t S[q_pi_b(t), q_pi_b(t+1)]   pi_b ~ U(S_n)
+    c        ~ (1/B) sum_b  mean_t S[q_pi_b(t), q_pi_b(t+1)]   pi_b ~ U(no-repeat)
     phi(t)   = ( sum_t' k_sig(t'-t) s_t' ) / ( sum_t' k_sig(t'-t) )  -  c
     Phi      = ( 1/(n-1) sum_t s_t )  -  c
     k_sig(u) = exp(-u^2 / 2 sig^2)
@@ -45,7 +45,8 @@ import os
 
 import numpy as np
 
-from a1_core import GEOM, Geometry, run_lengths, visit_sequence
+from a1_core import (GEOM, Geometry, run_lengths, smirnov_shuffle,
+                     visit_sequence)
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +91,12 @@ def null_offset(S: np.ndarray, q: np.ndarray, B: int = 2000, seed: int = 0,
                 cache: float | None = None) -> float:
     """A1's §7.2 occupancy-matched null mean ``c`` for a single visit sequence.
 
-    ``c = (1/B) sum_b mean_t S[q_pi_b(t), q_pi_b(t+1)]`` over ``B`` uniform
-    permutations ``pi_b`` of ``q``. This is exactly the ``null_uniform`` mean
-    that :func:`a1_core._phi_one` accumulates, so ``mean(s) - c`` equals A1's
-    ``Phi`` up to the Monte-Carlo error of the two independent draws.
+    ``c = (1/B) sum_b mean_t S[q_pi_b(t), q_pi_b(t+1)]`` over ``B`` reorderings
+    ``pi_b`` of ``q`` drawn uniformly from those that never repeat a state, the
+    space ``q`` itself lives in (:func:`a1_core.smirnov_shuffle`). This is
+    exactly the ``null_mean`` that :func:`a1_core._phi_one` accumulates, so
+    ``mean(s) - c`` equals A1's ``Phi`` up to the Monte-Carlo error of the two
+    independent draws.
 
     Pass ``cache`` (A1's ``phi['null_mean'][i]``) to reuse the identical value
     A1 already computed; then the step-2 flat-kernel identity holds exactly.
@@ -105,7 +108,7 @@ def null_offset(S: np.ndarray, q: np.ndarray, B: int = 2000, seed: int = 0,
     if q.shape[0] < 2:
         return float("nan")
     rng = np.random.default_rng(seed)
-    perms = rng.permuted(np.broadcast_to(q, (int(B), q.shape[0])).copy(), axis=1)
+    perms = smirnov_shuffle(q, int(B), rng)
     pair = S[perms[:, :-1], perms[:, 1:]]              # (B, n-1)
     return float(pair.mean(axis=1).mean())
 

@@ -128,6 +128,25 @@ def summarise(results: dict, outdir: str) -> dict:
     if ch:
         fl["channel_split"] = {k: {"auc": _f(v.get("auc")), "p": _f(v.get("p"))}
                                for k, v in ch.items()}
+    # Sensitivity: Phi under the unconstrained permutation null. Not the
+    # reported statistic -- it reorders the visits over all n! permutations,
+    # which admits adjacent-equal pairs a visit sequence cannot contain -- but
+    # carried here so the size of the correction is on the record rather than
+    # asserted. The offset is per-recording, so its spread is the point.
+    ph = res.get("phi", {})
+    uni = np.asarray(ph.get("excess_uniform", []), float)
+    gap = (np.asarray(ph.get("null_uniform", []), float)
+           - np.asarray(ph.get("null_mean", []), float))
+    if uni.size:
+        fl["uniform_null_sensitivity"] = {
+            "phi_median": _f(np.nanmedian(uni)),
+            "null_offset_median": _f(np.nanmedian(gap)),
+            "null_offset_range": [_f(np.nanmin(gap)), _f(np.nanmax(gap))],
+            "repeat_rate_median": _f(np.nanmedian(
+                np.asarray(ph.get("null_repeat_rate", []), float))),
+            "note": ("Phi under the unconstrained permutation null, for "
+                     "comparison only; the reported Phi reorders the visits "
+                     "without ever repeating a state")}
     out["fluency"] = fl
 
     # 2. fluency curve -------------------------------------------------------
@@ -297,6 +316,19 @@ def summary_markdown(s: dict) -> str:
         parts = ", ".join(f"{k} AUC {_fmt(v['auc'])} (p {_fmt_p(v['p'])})"
                           for k, v in f["channel_split"].items())
         L += [f"- magnitude vs direction: {parts}"]
+    sens = f.get("uniform_null_sensitivity")
+    if sens:
+        lo, hi = sens["null_offset_range"]
+        L += [f"- null: the visits are reordered without ever repeating a "
+              f"state, the constraint the visit sequence itself carries. "
+              f"*Sensitivity* — reordering over all `n!` permutations instead "
+              f"admits adjacent-equal pairs ({_fmt(sens['repeat_rate_median'])} "
+              f"of them at the median), each worth `S_kk = 1`, which lifts the "
+              f"null by {_fmt(sens['null_offset_median'])} at the median and "
+              f"by between {_fmt(lo)} and {_fmt(hi)} across recordings; median "
+              f"Phi under it is {_fmt(sens['phi_median'])}. That offset varies "
+              f"with each infant's own occupancy concentration, which is what "
+              f"the reported null holds fixed."]
     L += [""]
 
     fc = s["fluency_curve"]

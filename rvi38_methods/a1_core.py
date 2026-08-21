@@ -268,48 +268,6 @@ def shape_coordinates(M: np.ndarray) -> np.ndarray:
     return np.stack([u1, u2], axis=-1)
 
 
-GROUPS = {
-    "head": ["Nose"],
-    "R arm": ["RShoulder", "RElbow", "RWrist"],
-    "L arm": ["LShoulder", "LElbow", "LWrist"],
-    "R leg": ["RHip", "RKnee", "RAnkle"],
-    "L leg": ["LHip", "LKnee", "LAnkle"],
-}
-
-
-def state_descriptors(a: np.ndarray, free=FREE) -> dict:
-    """Vigour and spatial pattern of each state, kept as separate quantities.
-
-    Two independent facts describe a state and must not be conflated:
-
-    * **how much** it moves — the mean RMS speed in units/second, reported
-      relative to the median state so it is comparable across fits;
-    * **which joints** move — the body-group means of the *double-centred* log
-      profile, the same representation §6 correlates. Row-centring removes
-      vigour, so this is pure spatial pattern.
-
-    Collapsing the two into one standardised score is what makes a naming rule
-    misfire: on a skewed speed distribution a moderately fast state can exceed a
-    z-score cutoff meant for the outlier burst.
-    """
-    if a.shape[0] == 11:
-        out = [
-          "whole body mild",
-          "left leg",
-          "right arm",
-          "legs",
-          "whole body",
-          "quiet",
-          "whole body burst",
-          "still",
-          "right leg",
-          "left arm",
-          "left arm mild"
-        ]
-    else:
-      out = range(0, a.shape[0])
-    return out
-
 # ---------------------------------------------------------------------------
 # §6 kinematic similarity
 # ---------------------------------------------------------------------------

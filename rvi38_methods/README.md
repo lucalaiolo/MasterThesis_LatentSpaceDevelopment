@@ -181,6 +181,15 @@ delta|pose|auto` selects the frame-attribution convention; `auto` infers it from
 the stored `lengths`, since the delta trajectory is exactly one window per
 subject shorter than the pose trajectory. Either model may be omitted.
 
+`--state-names FILE` labels the states in the figures, as a JSON list or one
+name per line, and must carry exactly `K` of them. Without it the states are
+numbered. There is deliberately no fallback that invents names: a name like
+"left leg" is a reading of one particular fit, identified by its stream, its
+`K`, its seed and its data, so a table keyed on `K` alone attaches one fit's
+reading to another's states. Because names are figure text that no statistic
+reads, nothing downstream would disagree — the figures would simply be wrong
+and the run would say nothing. The run logs which source it used.
+
 ### Inference (`a1_stats.py`)
 
 Every clinical endpoint is **one scalar per recording**, contrasted between the
@@ -414,7 +423,8 @@ primitives, but as delivered:
   figure scripts cannot run.
 * Figure titles hard-code results (`ARI = 1.000`, `p = 5e-11`, `crispness 0.78`,
   and eleven state names). A stale number would survive any change upstream.
-  Here every annotation is computed from the run.
+  Here every annotation is computed from the run, and state names come from a
+  file the caller passes or not at all (see `--state-names`).
 * `run_analysis.py` runs A1 and A2 only; A5 and A7 have no runner.
 * Output paths are hard-coded to `/mnt/user-data/outputs/`.
 * `choose_alpha` rebuilds the group matrix inside its inner loop, making the

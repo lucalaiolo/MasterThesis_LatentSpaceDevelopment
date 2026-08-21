@@ -319,6 +319,51 @@ def _logsumexp_t(x):
     return m + float(np.log(np.exp(np.asarray(x, float) - m).sum()))
 
 
+def test_state_names():
+    """Figure labels come from a file the run names, or from the numbers.
+
+    A state name is a reading of one particular fit. Deriving names from
+    anything but the fit in hand -- a table keyed on K, which is what used to
+    happen -- attaches one fit's reading to another's states, and because names
+    are figure text that no statistic reads, nothing downstream disagrees: the
+    figures are wrong and the run is silent. So the only two sources allowed
+    are an explicit file and the state numbers.
+    """
+    print("\nState names: no fit inherits another fit's labels")
+    import json as _json
+    import run_analysis
+
+    check("a1_core exposes no name table for the runner to find",
+          not hasattr(A, "state_descriptors") and not hasattr(A, "state_labels"))
+
+    for k in (7, 11, 14):
+        amp = np.abs(np.random.default_rng(0).normal(1, 0.3, (k, 15))) + 0.05
+        names, src = run_analysis.resolve_state_names(amp, k, None)
+        check(f"K={k} falls back to the state numbers, not to names",
+              src == "state numbers" and names == [str(i) for i in range(k)],
+              f"{src}: {names[:3]}...")
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        good = os.path.join(d, "names.json")
+        with open(good, "w") as fh:
+            _json.dump([f"state {i}" for i in range(11)], fh)
+        amp = np.abs(np.random.default_rng(0).normal(1, 0.3, (11, 15))) + 0.05
+        names, src = run_analysis.resolve_state_names(amp, 11, good)
+        check("a names file is used and the run records which file",
+              names[0] == "state 0" and src == "names.json", f"{src}")
+
+        bad = os.path.join(d, "short.txt")
+        with open(bad, "w") as fh:
+            fh.write("\n".join(f"s{i}" for i in range(9)))
+        try:
+            run_analysis.resolve_state_names(amp, 11, bad)
+            raised = False
+        except ValueError:
+            raised = True
+        check("a names file of the wrong length is refused, not padded", raised)
+
+
 def test_smirnov_shuffle():
     """The Phi null draws uniformly from the orderings the subject could produce.
 
@@ -1320,6 +1365,7 @@ def main():
     test_exact_mannwhitney()
     test_reported_inference()
     test_correlation_analysis()
+    test_state_names()
     test_smirnov_shuffle()
     test_smirnov_sis()
     test_fluency()

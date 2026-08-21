@@ -93,16 +93,19 @@ def _json_safe(o):
 
 
 def resolve_state_names(amp, k: int, path: str | None = None):
-    """Names for the states, in order of preference.
+    """Names for the states: ``--state-names FILE`` if given, else the numbers.
 
-    1. ``--state-names FILE`` — a JSON list or one name per line. Keeping the
-       names in a data file means they survive any edit to the analysis code.
-    2. ``a1_core.state_labels(amp)``, if that function exists.
-    3. ``a1_core.state_descriptors(amp)``, if it returns a sequence of names
-       rather than the descriptor dict.
-    4. plain state numbers.
+    A name like "left leg" is a reading of one particular fit, and a fit is
+    identified by its stream, its ``K``, its seed and its data. Deriving names
+    from anything but the fit in hand -- a table keyed on ``K``, say -- attaches
+    one fit's reading to another's states, and since names are figure text that
+    no statistic reads, nothing downstream disagrees: the figures are simply
+    wrong and the run says nothing. So there is no fallback that invents names.
+    Without a file the states are numbered, and any naming is a deliberate act
+    recorded in a file the run names in its log.
 
-    Names are only ever figure text; no statistic reads them.
+    ``FILE`` is a JSON list or one name per line, and must carry exactly ``k``
+    of them.
     """
     if path:
         with open(path) as fh:
@@ -113,20 +116,6 @@ def resolve_state_names(amp, k: int, path: str | None = None):
             raise ValueError(f"{path} has {len(names)} names but the model has "
                              f"{k} states")
         return [str(n) for n in names], os.path.basename(path)
-    for fn, src in ((getattr(A, "state_labels", None), "a1_core.state_labels"),
-                    (getattr(A, "state_descriptors", None),
-                     "a1_core.state_descriptors")):
-        if fn is None:
-            continue
-        try:
-            out = fn(amp)
-        except Exception:                                   # noqa: BLE001
-            continue
-        if isinstance(out, dict):                # the descriptor dict, not names
-            continue
-        out = [str(v) for v in out]
-        if len(out) == k:
-            return out, src
     return [str(i) for i in range(k)], "state numbers"
 
 

@@ -78,13 +78,15 @@ def _json_safe(o):
         return [_json_safe(v) for v in o]
     if isinstance(o, np.ndarray):
         return _json_safe(o.tolist())
+    # bool before int: bool is a subclass of int, so the int branch would
+    # otherwise turn every flag in results.json into 0/1.
+    if isinstance(o, (np.bool_, bool)):
+        return bool(o)
     if isinstance(o, (np.floating, float)):
         v = float(o)
         return None if not np.isfinite(v) else v
     if isinstance(o, (np.integer, int)):
         return int(o)
-    if isinstance(o, (np.bool_, bool)):
-        return bool(o)
     if o is None or isinstance(o, str):
         return o
     return str(o)
@@ -212,12 +214,10 @@ def analyse_model(model, vids, pose, spd, vel, labels, geom, cfg, tag,
     # ---- §7 fluency ----
     phi = A.phi_excess(st, vid, S, n_sub, n_perm=cfg["n_phi"], seed=0)
     out["phi"] = phi
-    exc = phi["excess"]
-    out["phi_wilcoxon"] = ST.wilcoxon_signed(exc, "greater")
-    w = out["phi_wilcoxon"]
-    print(f"  §7 fluency: Phi > 0 in {w['n_positive']}/{w['n']}, "
-          f"median {w.get('median', float('nan')):+.4f}, "
-          f"Wilcoxon p = {w['p']:.3g}")
+    exc = np.asarray(phi["excess"], float)
+    print(f"  §7 fluency: Phi > 0 in {int(np.sum(exc > 0))}/"
+          f"{int(np.isfinite(exc).sum())} infants, median "
+          f"{np.nanmedian(exc):+.4f}")
 
     out["tercile"] = A.tercile_decomposition(st, vid, S, n_sub)
     if "top_over_bottom" in out["tercile"]:
@@ -271,60 +271,39 @@ def analyse_model(model, vids, pose, spd, vel, labels, geom, cfg, tag,
     kem = np.array([G.subject_kemeny(st[vid == i], K, Abar_jump, al["alpha"])
                     for i in range(n_sub)])
     out["kemeny_per_subject"] = kem
-
-    lo = np.full(n_sub, np.nan)
-    hi = np.full(n_sub, np.nan)
-    for i in range(n_sub):
-        b = G.block_bootstrap_kemeny(st[vid == i], K, Abar_jump, al["alpha"],
-                                     block=cfg["block"], n_boot=cfg["n_block"],
-                                     seed=i)
-        b = b[np.isfinite(b)]
-        if len(b) > 10:
-            lo[i], hi[i] = np.percentile(b, [2.5, 97.5])
-    out["kemeny_lo"], out["kemeny_hi"] = lo, hi
-    out["estimability"] = G.estimability_gate(kem, lo, hi)
-    e = out["estimability"]
-    print(f"  §9.3 estimability: median CI width {e['median_width']:.2f} vs "
-          f"between-subject range {e['between_subject_range']:.2f} -> ratio "
-          f"{e['ratio']:.2f} ({'PASS' if e['passed'] else 'FAIL'})")
+    print(f"  §9.3 per-infant Kemeny (jump chain): median "
+          f"{np.nanmedian(kem):.2f}, range [{np.nanmin(kem):.2f}, "
+          f"{np.nanmax(kem):.2f}]")
     return out
 
 
 # ---------------------------------------------------------------------------
-# clinical layer (§10, §11) — labels enter only here
+# clinical layer — labels enter only here
 # ---------------------------------------------------------------------------
 def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
-    pos = labels == 1
+    """The reported contrast for every model-based endpoint (METHODS §Inference).
+
+    Each endpoint is one scalar per recording. It is contrasted between the
+    abnormal and normal groups by the exact Mann-Whitney U test, enumerating
+    every one of the C(38,6) label assignments; the effect size is the AUC and
+    the interval is the percentile interval of a stratified nonparametric
+    bootstrap. That is the entire inferential procedure: nothing is corrected
+    for multiplicity, no nuisance is partialled out of a contrast, and no
+    endpoint has to clear an admission gate to be reported. The nuisances are
+    reported as correlations instead (see :func:`correlation_analysis`), where
+    the label enters no fit.
+
+    Also computes the two state-path covariates the correlation table consumes:
+    occupancy entropy and mean dwell.
+    """
+    pos = np.asarray(labels) == 1
     out = {}
-    phi = res["phi"]["excess"]
-    kem = res["kemeny_per_subject"]
-    logL = np.log(np.asarray(lengths, float))
+    phi = np.asarray(res["phi"]["excess"], float)
+    kem = np.asarray(res["kemeny_per_subject"], float)
 
-    # §10.8 split-half reliability of Phi (contiguous halves).
-    h1 = A.phi_excess(st, vid, S, n_sub, n_perm=cfg["n_phi"], seed=1,
-                      window="first")["excess"]
-    h2 = A.phi_excess(st, vid, S, n_sub, n_perm=cfg["n_phi"], seed=2,
-                      window="second")["excess"]
-    out["phi_split_half"] = ST.split_half(h1, h2)
-    out["phi_halves"] = (h1, h2)
-    sh = out["phi_split_half"]
-    print(f"  §10.8 Phi split-half r = {sh['r_half']:+.3f} -> Spearman-Brown "
-          f"r_SB = {sh['r_sb']:+.3f} [{sh['r_sb_lo']:+.3f}, {sh['r_sb_hi']:+.3f}]"
-          f", ICC(A,1) = {sh['icc_a1']:+.3f}")
-
-    # §2.3 duration controls.
-    trunc = A.phi_excess(st, vid, S, n_sub, n_perm=cfg["n_phi"], seed=3,
-                         max_win=cfg["truncate"])["excess"]
-    out["duration"] = {
-        "phi_vs_logL": ST.duration_control(phi, logL),
-        "kemeny_vs_logL": ST.duration_control(kem, logL),
-        "phi_truncation": ST.ordering_stability(phi, trunc),
-        "truncate_to": cfg["truncate"]}
-    du = out["duration"]
-    print(f"  §2.3 truncation to {cfg['truncate']} windows: ordering rho = "
-          f"{du['phi_truncation']['rho']:+.3f}")
-
-    # §11 redundancy: occupancy entropy and mean dwell.
+    # Covariates for the correlation analysis: occupancy entropy is the Shannon
+    # entropy -sum_k o_k log o_k of the fraction of the record spent in each
+    # state, and mean dwell is the mean run length of the state path.
     ent = np.zeros(n_sub)
     dwl = np.zeros(n_sub)
     for i in range(n_sub):
@@ -335,19 +314,7 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
         _, rl = A.run_lengths(s_i)
         dwl[i] = rl.mean() if len(rl) else np.nan
     out["occupancy_entropy"], out["mean_dwell"] = ent, dwl
-    out["redundancy"] = {
-        "phi_vs_entropy": ST.duration_control(phi, ent),
-        "phi_vs_dwell": ST.duration_control(phi, dwl),
-        "kemeny_vs_entropy": ST.duration_control(kem, ent),
-        "kemeny_vs_dwell": ST.duration_control(kem, dwl)}
-    rd = out["redundancy"]
 
-    # The reported endpoint contrast: exact Mann-Whitney U on every label
-    # assignment, AUC as the effect size, and the stratified percentile
-    # bootstrap as the interval. Nothing is corrected for multiplicity and no
-    # nuisance is partialled out of the contrast: the nuisances are reported
-    # as correlations instead (see correlation_analysis), and the label enters
-    # no fit.
     out["phi_test"] = ST.mannwhitney(phi[pos], phi[~pos],
                                      boot=cfg["n_boot_auc"])
     out["kemeny_test"] = ST.mannwhitney(kem[pos], kem[~pos],
@@ -358,10 +325,10 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
               f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}\n"
               f"          null: {r['method']};  interval: {r['ci_method']}")
 
-    # §7 magnitude-vs-direction split: is the fluency signal carried by how much
-    # a joint moves or by the axis along which it moves? Recompute Phi under
-    # each channel of the direction-aware similarity and contrast the groups.
-    # Descriptive only -- the confirmatory family stays {Phi, Kemeny}.
+    # Magnitude-vs-direction split: is the fluency signal carried by how much a
+    # joint moves or by the axis along which it moves? Phi is recomputed under
+    # each channel of the direction-aware similarity, and each recomputed Phi is
+    # one scalar per recording put through the same contrast as above.
     out["channel_split"] = {"combined": out["phi_test"]}
     for nm, s_key in (("magnitude", "S_mag"), ("shape", "S_shape")):
         if s_key in res:
@@ -370,48 +337,13 @@ def clinical(res, labels, lengths, cfg, geom, st, vid, S, n_sub):
             out["channel_split"][nm] = ST.mannwhitney(phi_c[pos], phi_c[~pos],
                                                       boot=cfg["n_boot_auc"])
     cs = out["channel_split"]
-    print("  §7 fluency channel split (Phi group contrast per similarity "
+    print("  fluency channel split (Phi group contrast per similarity "
           "channel):")
     for nm in ("combined", "magnitude", "shape"):
         if nm in cs:
             r = cs[nm]
             print(f"     {nm:9s}: AUC = {r['auc']:.3f}, rank-biserial "
                   f"{r['rank_biserial']:+.3f}, p = {r['p']:.4g}")
-
-    # BCa intervals on the group medians (descriptive, not the endpoint
-    # interval, which is the stratified bootstrap on the AUC above).
-    if cfg["controls"] == "full":
-        out["bca"] = {"phi_median": ST.bca_ci(phi, np.median, cfg["n_bca"]),
-                      "kemeny_median": ST.bca_ci(kem, np.median, cfg["n_bca"])}
-    if cfg["controls"] == "full":
-        out["loo"] = {"phi": ST.loo_auc(phi[pos], phi[~pos]),
-                      "kemeny": ST.loo_auc(kem[pos], kem[~pos])}
-        for nm in ("phi", "kemeny"):
-            ps = [r["p"] for r in out["loo"][nm]]
-            print(f"  LOO {nm:7s}: p ranges {min(ps):.4g} to {max(ps):.4g}")
-
-    # §11 gates.
-    gates = {
-        "reliability (r_SB >= 0.6) [Phi]": bool(
-            np.isfinite(sh["r_sb"]) and sh["r_sb"] >= 0.6),
-        "estimability (CI/range < 0.5) [Kemeny]": bool(
-            res["estimability"]["passed"]),
-        "redundancy (|rho| < 0.8 vs entropy/dwell) [Phi]": bool(
-            max(abs(rd["phi_vs_entropy"]["rho"]),
-                abs(rd["phi_vs_dwell"]["rho"])) < 0.8),
-        "redundancy (|rho| < 0.8 vs entropy/dwell) [Kemeny]": bool(
-            max(abs(rd["kemeny_vs_entropy"]["rho"]),
-                abs(rd["kemeny_vs_dwell"]["rho"])) < 0.8),
-        "duration (ordering stable under truncation) [Phi]": bool(
-            np.isfinite(du["phi_truncation"]["rho"])
-            and du["phi_truncation"]["rho"] >= 0.5),
-        "shrinkage not degenerate (alpha < 0.9) [Kemeny]": bool(
-            not res["alpha"]["degenerate"]),
-    }
-    out["gates"] = gates
-    print("\n  §11 pre-specified gates")
-    for k, v in gates.items():
-        print(f"     {'PASS' if v else 'FAIL'}  {k}")
     return out
 
 
@@ -463,9 +395,6 @@ def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
               f"median F over subjects {np.nanmedian(wc['F'][:, p]):.3f}  "
               f"(R2 {np.nanmedian(wc['R2'][:, p]):.3f})")
 
-    wt = WP.wclrpp_test(wc["F"], labels, n_perm=cfg["n_wclr"], seed=0,
-                        pairs=wc["pairs"])
-    results["wclrpp"]["test"] = wt
     y = np.asarray(labels).astype(int)
     Fm = np.asarray(wc["F"], float)
     pair_tests = [ST.mannwhitney(Fm[y == 1, i], Fm[y == 0, i],
@@ -476,15 +405,10 @@ def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
           "exact Mann-Whitney;\n  all six reported whatever any one shows:")
     for i, nm in enumerate(wc["pairs"]):
         r = pair_tests[i]
+        d = (np.nanmedian(Fm[y == 1, i]) - np.nanmedian(Fm[y == 0, i]))
         print(f"     {nm:8s}: AUC {r['auc']:.3f} [{r['auc_lo']:.3f}, "
               f"{r['auc_hi']:.3f}]  p = {r['p']:.4g}   "
-              f"dF (abnormal-normal) = {wt['observed'][i]:+.3f}")
-    print(f"  a family-wise p over the six pairs, from the same labels "
-          f"permuted {wt['n_perm']:,} times with a\n  maximum-statistic "
-          f"(Westfall-Young) correction, is reported alongside but is not the "
-          f"endpoint test:")
-    print("     " + "  ".join(f"{nm}={wt['p_corrected'][i]:.3f}"
-                              for i, nm in enumerate(wc["pairs"])))
+              f"dF (abnormal-normal) = {d:+.3f}")
 
     # whole-body aggregation: mean F over pairs (a whole-body coupling pattern
     # scores high everywhere) and its across-pair spread.
@@ -516,7 +440,7 @@ def raw_kinematics(results, models, primary, pose, vids, labels, geom, cfg):
 # ---------------------------------------------------------------------------
 # FidgetyFind (Morais et al., 2023): the literature's fidgety-movement detector
 # ---------------------------------------------------------------------------
-def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
+def fidgetyfind(results, pose, vids, labels, geom, cfg, outdir):
     """Score the cohort with the published detector and contrast the groups.
 
     This is the external yardstick: a construct from the literature, computed
@@ -525,159 +449,96 @@ def fidgetyfind(results, pose, observed, vids, labels, geom, cfg, outdir):
     movement present, the normal pole -- so the abnormal group is expected
     *below* the normal one and the AUC below 0.5.
 
+    Three endpoints, each one scalar per recording and each the same three-level
+    reduction over a different set of chains: ``FF`` over all six, ``FF_hip``
+    over the two hip chains, ``FF_dist`` over the four limb chains. A recording
+    the reduction declined to score is held as ``NaN`` and drops out of its
+    contrast rather than being forced to a value.
+
     Populates ``results['fidgetyfind']`` and writes
     ``<outdir>/fidgetyfind_per_subject.csv``.
     """
     section("FidgetyFind: fidgety-movement detection (Morais et al., 2023)")
-    p = FF.FFParams(fps=geom.fps, start_frame=cfg["ff_start_frame"],
-                    window=cfg["ff_window"], stride=cfg["ff_stride"],
-                    bins=cfg["ff_bins"], minr=cfg["ff_minr"],
-                    maxr=cfg["ff_maxr"], large_motion=cfg["ff_large_motion"],
-                    theta=cfg["ff_theta"], smooth=cfg["ff_smooth"],
-                    lowconf_rate=cfg["ff_lowconf_rate"],
-                    lowconf_rate_distal=max(cfg["ff_lowconf_rate"], 0.2))
-    obs = [observed.get(v) for v in vids] if observed else [None] * len(vids)
-    if observed and len(observed) < len(vids):
-        print(f"  WARNING: 'observed' flags present for {len(observed)} of "
-              f"{len(vids)} recordings; the rest are treated as fully observed")
     poses = [pose[v] for v in vids]
-    calibrated = bool(cfg.get("ff_calibrate"))
-    if calibrated:
-        p = FF.calibrate_band(poses, obs, p, centre_pct=cfg["ff_centre_pct"])
-        print(f"  band calibrated to this cohort: [{p.minr:.2f}, {p.maxr:.2f}]% "
-              f"of the parent limb per frame, window {p.window}, in-range rate "
-              f"{p.in_range_rate:.2f} (centre percentile "
-              f"{cfg['ff_centre_pct']:g}; --ff-no-calibrate for the published "
-              f"band).")
-    ds = FF.fidgetyfind_dataset(poses, obs, p)
     y = np.asarray(labels).astype(int)
     pos = y == 1
 
-    print(f"  window {p.window} frames ({p.window / geom.fps:.2f} s), stride "
-          f"{p.stride}, first frame {p.start_frame}, {p.bins} direction bins; "
-          f"small-movement band [{p.minr}, {p.maxr}]% of the parent limb per "
-          f"frame at {p.standard_fps:.0f} fps (rescaled by "
-          f"{p.rate_scale:.3f} for {p.fps:.0f} fps)")
-    smoothing = (f"confidence-weighted Gaussian, {p.smooth_window} frames, "
-                 f"sigma {p.smooth_sigma:.1f}" if p.smooth else "off")
-    conf_src = ("the 'observed' flag" if observed else
-                "unavailable — every frame is treated as detected, so the "
-                "confidence gates never fire")
-    print(f"  keypoint smoothing: {smoothing};  detection confidence from "
-          f"{conf_src}")
+    # Calibration: the published amplitude ladder is slid onto this cohort's own
+    # scale by one factor, and the window length is set from the in-band counts
+    # that scale produces. Both are part of the specified construct here.
+    cal = FF.calibrate(poses, FF.PUBLISHED)
+    p = cal["params"]
+    print(f"  calibration: pooled per-frame amplitude Q{cfg['ff_pct']:g} = "
+          f"{cal['q75']:.3f}% of the parent limb, so varsigma = "
+          f"{cal['scale']:.3f}")
+    print(f"     band [{p.r_min:.2f}, {p.r_max:.2f}]% of the parent limb per "
+          f"frame; tau_hip {p.tau_hip:.2f}%, tau_hand {p.tau_hand:.2f}%, "
+          f"tau_foot {p.tau_foot:.2f}% (the last two of the trunk)")
+    grid = ", ".join(f"L={L}: {v:.1f}" for L, v in cal["median_in_band"].items())
+    print(f"     median in-band frames per window -- {grid}  "
+          f"(target {cal['min_samples']})"
+          + ("" if cal["window_reached"] else
+             "; none reached it, so the longest window was taken"))
+    print(f"     window L = {p.window} frames ({p.window / geom.fps:.2f} s), "
+          f"stride {p.stride}, nu = {p.nu:.3f}, {p.bins} direction bins over "
+          f"(-pi, pi]")
+
+    ds = FF.fidgetyfind_dataset(poses, p)
     print(f"  windows per recording: {int(ds['n_windows'].min())}..."
           f"{int(ds['n_windows'].max())}")
-
-    # Before any group contrast: did the detector fire at all? A band that does
-    # not fit this cohort drives every window to the legitimate score 0.0, and
-    # the contrast below then reports AUC 0.5 / p = 1 -- which reads like "no
-    # group difference" but means "no measurement". See FF.diagnose.
-    diag = FF.diagnose(ds, p)
-    print(FF.format_diagnosis(diag))
-    print("  per-chain median window entropy (0 = one direction, 1 = uniform), "
-          "median over recordings:")
+    print("  per-chain assessable windows (the amplitude gate), median over "
+          "recordings:")
     for ci, nm in enumerate(ds["chains"]):
-        med = ds["median_entropy"][:, ci]
-        print(f"     {nm:7s} ({ds['chain_class'][ci]:>8s}): normal "
-              f"{np.nanmedian(med[~pos]):.3f}  abnormal "
-              f"{np.nanmedian(med[pos]):.3f}   assessable windows "
+        print(f"     {nm:7s} ({ds['chain_class'][ci]:>4s}): "
               f"{np.nanmedian(ds['coverage'][:, ci]):.0%}")
 
-    test = ST.maxstat_label_test(ds["median_entropy"], y, n_perm=cfg["n_ff"],
-                                 seed=0, names=ds["chains"])
-    M = np.asarray(ds["median_entropy"], float)
-    chain_tests = [ST.mannwhitney(M[pos, ci], M[~pos, ci],
-                                  boot=cfg["n_boot_auc"])
-                   for ci in range(M.shape[1])]
-    print("  group contrast on each chain's median entropy (one scalar per "
-          "recording), exact\n  Mann-Whitney; all six reported whatever any "
-          "one shows:")
-    for ci, nm in enumerate(ds["chains"]):
-        r = chain_tests[ci]
-        print(f"     {nm:7s}: AUC {r['auc']:.3f} [{r['auc_lo']:.3f}, "
-              f"{r['auc_hi']:.3f}]  p = {r['p']:.4g}   "
-              f"dH (abnormal-normal) = {test['observed'][ci]:+.3f}")
-    print(f"  a family-wise p over the six chains (Westfall-Young over "
-          f"{test['n_perm']:,} label permutations) is\n  reported alongside "
-          f"but is not the endpoint test:")
-    print("     " + "  ".join(f"{nm}={test['p_corrected'][ci]:.3f}"
-                              for ci, nm in enumerate(ds["chains"])))
-
     tests = {}
-    for nm, key in (("FidgetyFind score", "score"),
-                    ("hips only", "score_proximal"),
-                    ("fidgety-window rate", "positive_rate_mean")):
-        v = np.asarray(ds[key], float)
-        tests[key] = ST.mannwhitney(v[pos], v[~pos], boot=cfg["n_boot_auc"])
-        r = tests[key]
-        print(f"  {nm:20s}: abnormal median {np.nanmedian(v[pos]):.3f} vs "
-              f"normal {np.nanmedian(v[~pos]):.3f}; AUC {r['auc']:.3f} "
+    for g, lab in (("FF", "FF (all six chains)"),
+                   ("FF_hip", "FF_hip (hip chains)"),
+                   ("FF_dist", "FF_dist (limb chains)")):
+        v = np.asarray(ds[g], float)
+        n_scored = int(np.isfinite(v).sum())
+        tests[g] = ST.mannwhitney(v[pos], v[~pos], boot=cfg["n_boot_auc"])
+        r = tests[g]
+        print(f"  {lab:22s}: scored {n_scored}/{len(v)} recordings "
+              f"({int(np.isfinite(v[pos]).sum())} abnormal, "
+              f"{int(np.isfinite(v[~pos]).sum())} normal)")
+        print(f"     abnormal median {np.nanmedian(v[pos]):.3f} vs normal "
+              f"{np.nanmedian(v[~pos]):.3f}; AUC {r['auc']:.3f} "
               f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}], p = {r['p']:.4g}")
     print("     AUC below 0.5 is the expected direction: absent fidgety "
           "movement means less direction variety.")
-    if diag["degenerate"]:
-        print("  NOTE: the contrasts above are computed on a degenerate score "
-              "(see the measurement\n  check). They do not support any "
-              "statement about fidgety movement in this cohort,\n  in either "
-              "direction, and must not be reported as a negative result for "
-              "FidgetyFind.")
-
-    # Is the literature construct measuring what ours measures? Descriptive.
-    logL = np.log(np.asarray([pose[v].shape[0] for v in vids], float))
-    redundancy = {"score_vs_logL": ST.duration_control(ds["score"], logL),
-                  "coverage_vs_logL": ST.duration_control(ds["coverage_mean"],
-                                                          logL)}
-    primary = results["primary"]
-    agreement = {}
-    if primary in results:
-        agreement["phi"] = ST.duration_control(
-            ds["score"], results[primary]["phi"]["excess"])
-        agreement["kemeny"] = ST.duration_control(
-            ds["score"], results[primary]["kemeny_per_subject"])
-    wc = results.get("wclrpp")
-    if wc and "mean_F" in wc:
-        agreement["wclrpp_mean_F"] = ST.duration_control(
-            ds["score"], np.asarray(wc["mean_F"], float))
-    print("  agreement with the other constructs (Spearman; these are "
-          "different measurements of the same recordings, not a validation):")
-    for nm, r in agreement.items():
-        print(f"     FidgetyFind vs {nm:13s}: rho = {r['rho']:+.3f} "
-              f"(p {r['p']:.3f}, n {r['n']})")
-    print(f"  duration: rho(score, logL) = "
-          f"{redundancy['score_vs_logL']['rho']:+.3f} "
-          f"(p {redundancy['score_vs_logL']['p']:.3f})")
 
     results["fidgetyfind"] = {
         "chains": ds["chains"], "chain_class": ds["chain_class"],
-        "median_entropy": ds["median_entropy"],
-        "positive_rate": ds["positive_rate"], "coverage": ds["coverage"],
-        "n_windows": ds["n_windows"], "score": ds["score"],
-        "score_proximal": ds["score_proximal"],
-        "score_distal": ds["score_distal"],
-        "positive_rate_mean": ds["positive_rate_mean"],
-        "coverage_mean": ds["coverage_mean"],
-        "params": ds["params"], "chain_test": test, "diagnosis": diag,
-        "calibrated": calibrated,
-        "band_label": (f"re-calibrated band [{p.minr:.2f}, {p.maxr:.2f}]"
-                       if calibrated else
-                       f"published band [{p.minr:.1f}, {p.maxr:.1f}]"),
-        "chain_tests": chain_tests, "tests": tests,
-        "redundancy": redundancy, "agreement": agreement,
+        "groups": ds["groups"], "coverage": ds["coverage"],
+        "n_windows": ds["n_windows"], "params": ds["params"],
+        "calibration": {"scale": cal["scale"], "q75": cal["q75"],
+                        "percentile": cfg["ff_pct"],
+                        "window": cal["window"],
+                        "median_in_band": cal["median_in_band"],
+                        "min_samples": cal["min_samples"],
+                        "window_reached": cal["window_reached"]},
+        "band_label": f"calibrated band [{p.r_min:.2f}, {p.r_max:.2f}]",
+        "tests": tests,
         "window_entropy": [np.asarray(e, float) for e in ds["E"]],
         "window_starts": [np.asarray(s0, int) for s0 in ds["starts"]]}
+    for g in ds["groups"]:
+        for suffix in ("", "_S_L", "_S_R", "_scorable_L", "_scorable_R",
+                       "_scored"):
+            results["fidgetyfind"][f"{g}{suffix}"] = ds[f"{g}{suffix}"]
 
     import pandas as pd
     rows = {"subject": np.arange(1, len(vids) + 1), "video": vids, "label": y,
-            "fidgetyfind_score": ds["score"],
-            "fidgetyfind_score_hips": ds["score_proximal"],
-            "fidgetyfind_score_distal": ds["score_distal"],
-            "fidgety_window_rate": ds["positive_rate_mean"],
-            "assessable_fraction": ds["coverage_mean"],
             "n_windows": ds["n_windows"]}
+    for g in ds["groups"]:
+        rows[g] = ds[g]
+        rows[f"{g}_S_L"] = ds[f"{g}_S_L"]
+        rows[f"{g}_S_R"] = ds[f"{g}_S_R"]
+        rows[f"{g}_scorable_L"] = ds[f"{g}_scorable_L"]
+        rows[f"{g}_scorable_R"] = ds[f"{g}_scorable_R"]
     for ci, nm in enumerate(ds["chains"]):
-        key = nm.replace(" ", "_")
-        rows[f"median_entropy_{key}"] = ds["median_entropy"][:, ci]
-        rows[f"coverage_{key}"] = ds["coverage"][:, ci]
+        rows[f"assessable_{nm.replace(' ', '_')}"] = ds["coverage"][:, ci]
     path = os.path.join(outdir, "fidgetyfind_per_subject.csv")
     pd.DataFrame(rows).to_csv(path, index=False)
     print(f"  wrote {os.path.basename(path)}")
@@ -710,8 +571,11 @@ def correlation_analysis(results, primary, cfg):
     if wc and "mean_F" in wc:
         endpoints["synchrony (mean F)"] = np.asarray(wc["mean_F"], float)
     ff = results.get("fidgetyfind")
-    if ff and "score" in ff:
-        endpoints["FidgetyFind score"] = np.asarray(ff["score"], float)
+    if ff:
+        for g, nm in (("FF", "FidgetyFind FF"), ("FF_hip", "FidgetyFind hips"),
+                      ("FF_dist", "FidgetyFind limbs")):
+            if g in ff:
+                endpoints[nm] = np.asarray(ff[g], float)
 
     covariates = {
         "occupancy entropy": np.asarray(cl["occupancy_entropy"], float),
@@ -744,7 +608,7 @@ def correlation_analysis(results, primary, cfg):
 RESERVED_KEYS = {
     "config", "geometry", "data_report", "labels", "video_names", "frames",
     "primary", "models_loaded", "stream", "checks", "clinical", "wclrpp",
-    "fidgetyfind", "replication", "correlations", "_halves"}
+    "fidgetyfind", "replication", "correlations"}
 
 LEGACY_DEFAULTS = (("AR-HMM", "arhmm_rvi38_stream_delta.pkl"),
                    ("Gaussian HMM", "hmm_rvi38_stream_delta.pkl"))
@@ -902,54 +766,6 @@ def main(argv=None):
                          "fidgety-movement detector, Morais et al. 2023). It "
                          "reads the keypoints only and is fast; skipping it "
                          "loses the external comparison construct.")
-    ap.add_argument("--ff-window", type=int, default=50,
-                    help="FidgetyFind window length in frames (default 50, the "
-                         "published value).")
-    ap.add_argument("--ff-stride", type=int, default=20,
-                    help="FidgetyFind window stride in frames (default 20).")
-    ap.add_argument("--ff-start-frame", type=int, default=100,
-                    help="first frame FidgetyFind scores (default 100), "
-                         "skipping the camera-adjustment head of a recording.")
-    ap.add_argument("--ff-bins", type=int, default=8,
-                    help="direction-histogram bins over [-pi, pi] (default 8, "
-                         "the published proximal value).")
-    ap.add_argument("--ff-minr", type=float, default=4.5,
-                    help="lower edge of the small-movement band, in percent of "
-                         "the parent limb per frame at 30 fps (default 4.5).")
-    ap.add_argument("--ff-maxr", type=float, default=8.0,
-                    help="upper edge of the small-movement band (default 8.0).")
-    ap.add_argument("--ff-large-motion", type=float, default=10.0,
-                    help="a frame whose displacement exceeds this (percent of "
-                         "the parent limb per frame at 30 fps, default 10.0) "
-                         "is not a fidget; a window with too many of them is "
-                         "voided rather than scored.")
-    ap.add_argument("--ff-theta", type=float, default=0.5,
-                    help="normalised entropy above which a window counts as "
-                         "fidgety-positive in the per-recording reduction "
-                         "(default 0.5, fixed a priori).")
-    ap.add_argument("--ff-no-smooth", action="store_true",
-                    help="disable the confidence-weighted 5-frame Gaussian "
-                         "keypoint smoothing FidgetyFind specifies. Keypoint "
-                         "jitter lives at the same amplitude as a fidget and "
-                         "is directionally uniform, so this inflates the "
-                         "entropy; a sensitivity check, not a better setting.")
-    ap.add_argument("--ff-no-calibrate", dest="ff_calibrate",
-                    action="store_false",
-                    help="use the published amplitude band [minr, maxr] as-is "
-                         "instead of calibrating it to this cohort's scale. The "
-                         "published band does not fit this data (it is an order "
-                         "of magnitude above the per-frame amplitudes here), so "
-                         "this yields an all-zero, unusable result; kept for "
-                         "comparison only.")
-    ap.set_defaults(ff_calibrate=True)
-    ap.add_argument("--ff-centre-pct", type=float, default=75.0,
-                    help="the amplitude percentile the calibrated band's centre "
-                         "is placed on (default 75).")
-    ap.add_argument("--ff-lowconf-rate", type=float, default=0.5,
-                    help="fraction of a window's frames allowed to be "
-                         "unobserved before it is voided (default 0.5). The "
-                         "binary 'observed' flag makes the published 0.1 rate "
-                         "over-aggressive on this cohort.")
     ap.add_argument("--ff-panels", action="store_true",
                     help="also write one FidgetyFind timeline panel per "
                          "recording under figures/fidgetyfind/.")
@@ -969,30 +785,19 @@ def main(argv=None):
 
     f = args.fast
     cfg = {
-        "n_phi": 200 if f else 2000,          # §12.3 occupancy-matched null
-        "n_corr": 100 if f else 400,
-        "n_dwell": 50 if f else 200,
-        "n_mantel": 2_000 if f else 20_000,   # §12.3 Mantel
-        "n_block": 100 if f else 400,         # §12.3 block bootstrap
-        "n_bca": 2_000 if f else 10_000,
-        "n_boot_auc": 2_000 if f else 10_000,  # stratified AUC bootstrap, B
-        "block": 50, "truncate": 387, "m_max": 6,
+        "n_phi": 200 if f else 2000,          # occupancy-matched null behind Phi
+        "n_dwell": 50 if f else 200,          # dwell-stratified decomposition
+        # B of the stratified percentile bootstrap on the AUC, the only
+        # interval reported (METHODS §Inference). The exact permutation null
+        # needs no resampling count: it enumerates every label assignment.
+        "n_boot_auc": 2_000 if f else 10_000,
         "controls": args.controls, "state_names": args.state_names,
-        "n_wclr": 2_000 if f else 20_000,    # WCLR-PP label permutations
         "wclr_w": args.wclr_w, "wclr_tau_max": args.wclr_tau_max,
         "wclr_c": args.wclr_c, "wclr_ell_min": args.wclr_ell_min,
         "wclr_dtau": args.wclr_dtau,
         "wclr_limb_signal": args.wclr_limb_signal,
         "top_frac": 0.10,                    # high-velocity frame fraction
-        "n_ff": 2_000 if f else 20_000,      # FidgetyFind label permutations
-        "ff_window": args.ff_window, "ff_stride": args.ff_stride,
-        "ff_start_frame": args.ff_start_frame, "ff_bins": args.ff_bins,
-        "ff_minr": args.ff_minr, "ff_maxr": args.ff_maxr,
-        "ff_large_motion": args.ff_large_motion,
-        "ff_theta": args.ff_theta, "ff_smooth": not args.ff_no_smooth,
-        "ff_calibrate": args.ff_calibrate,
-        "ff_centre_pct": args.ff_centre_pct,
-        "ff_lowconf_rate": args.ff_lowconf_rate,
+        "ff_pct": 75.0,      # amplitude percentile the FidgetyFind band centres on
         "skip_fidgetyfind": args.skip_fidgetyfind,
         "fluency_similarity": args.fluency_similarity,
         "fluency_omega": args.fluency_omega,
@@ -1008,7 +813,7 @@ def main(argv=None):
     print(f"  geometry: T={geom.clip} W={geom.n_win} l={geom.l} "
           f"stride={geom.stride} lo={geom.lo} f0={geom.f0} "
           f"f_win={geom.f_win:.2f} Hz")
-    vids, pose, obs, rep = build_pose.build(
+    vids, pose, _observed, rep = build_pose.build(
         args.csv, out=os.path.join(args.outdir, "pose.npz"))
     labels, lab_src = build_pose.load_labels(args.labels, len(vids))
     print(f"  labels from {lab_src}: {int(labels.sum())} positive, "
@@ -1115,7 +920,6 @@ def main(argv=None):
         res, labels, m["lengths"] if "lengths" in m
         else np.bincount(m["vidid"]), cfg, geom, m["states"], m["vidid"],
         res["S"], m["n_subjects"])
-    results["_halves"] = results["clinical"].pop("phi_halves", None)
 
     # Replication: every other loaded model against the primary. Two fits of
     # the same kind (two AR-HMMs at different K or seeds) and two fits of
@@ -1158,53 +962,52 @@ def main(argv=None):
         print("  the literature comparison construct is omitted; every other "
               "result above is unaffected.")
     else:
-        fidgetyfind(results, pose, obs, vids, labels, geom, cfg, args.outdir)
+        fidgetyfind(results, pose, vids, labels, geom, cfg, args.outdir)
 
     # ---- correlation analysis: the nuisances, reported not adjusted for ----
     correlation_analysis(results, primary, cfg)
 
     # ---- plain-language summary of every test that was run ----
+    # Every row below is the same procedure: one scalar per recording, the exact
+    # Mann-Whitney permutation null over all C(38,6) label assignments, the AUC
+    # as the effect size, and the stratified percentile bootstrap as the
+    # interval. There is nothing else in the inferential layer.
     section("Statistical tests performed")
     cl = results["clinical"]
-    r_res = results[primary]
-    w = r_res["phi_wilcoxon"]
-    sh = cl["phi_split_half"]
     rows = [
-        ("Is fluency above zero within each infant?",
-         "Wilcoxon signed-rank on Phi, one-sided", w["p"],
-         f"{w['n_positive']}/{w['n']} infants positive"),
-        ("Does fluency reproduce across the recording?",
-         "Spearman on contiguous halves, Spearman-Brown corrected",
-         sh.get("p_half"), f"r_SB = {sh['r_sb']:.3f}"),
-        ("Do abnormal infants differ in fluency?",
-         "Mann-Whitney, exact enumeration of all label assignments",
-         cl["phi_test"]["p"], f"AUC = {cl['phi_test']['auc']:.3f}"),
-        ("Do abnormal infants differ in mixing time?",
-         "Mann-Whitney, exact enumeration of all label assignments",
-         cl["kemeny_test"]["p"], f"AUC = {cl['kemeny_test']['auc']:.3f}"),
+        ("Do abnormal infants differ in fluency?", "Phi", cl["phi_test"]),
+        ("Do abnormal infants differ in mixing time?", "Kemeny (jumps)",
+         cl["kemeny_test"]),
     ]
-    if "wclrpp" in results and "mean_F_test" in results["wclrpp"]:
-        wt = results["wclrpp"]["mean_F_test"]
+    for nm, key in (("magnitude channel", "magnitude"),
+                    ("shape channel", "shape")):
+        r = cl.get("channel_split", {}).get(key)
+        if r:
+            rows.append((f"Does the fluency difference sit in the {nm}?",
+                         f"Phi under S_{key}", r))
+    wc = results.get("wclrpp")
+    if wc and "mean_F_test" in wc:
         rows.append(("Do abnormal infants couple their limbs more?",
-                     "Mann-Whitney on whole-body WCLR-PP coupling (mean F)",
-                     wt["p"], f"AUC = {wt['auc']:.3f}"))
-    if "fidgetyfind" in results:
-        ft = results["fidgetyfind"]["tests"]["score"]
-        fc = results["fidgetyfind"]["chain_test"]
-        rows.append(("Do abnormal infants show less fidgety movement, "
-                     "by the published detector?",
-                     "Mann-Whitney on the FidgetyFind score (AUC < 0.5 is the "
-                     "expected direction)",
-                     ft["p"], f"AUC = {ft['auc']:.3f}"))
-        best = int(np.nanargmin(fc["p_corrected"]))
-        rows.append(("Which body part carries the FidgetyFind difference?",
-                     "label permutation per chain, max-statistic corrected "
-                     "over the six",
-                     float(fc["p_corrected"][best]),
-                     f"strongest: {fc['names'][best]}"))
-    for q, meth, pv, extra in rows:
-        pstr = "n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}"
-        print(f"  {q}\n      {meth}\n      p = {pstr}   ({extra})")
+                     "whole-body WCLR-PP coupling (mean F)", wc["mean_F_test"]))
+        for i, nm in enumerate(wc.get("pairs", [])):
+            rows.append((f"... on the {nm} pair specifically?", f"F, {nm}",
+                         wc["pair_tests"][i]))
+    ff = results.get("fidgetyfind")
+    if ff:
+        for g, q in (("FF", "Do abnormal infants show less fidgety movement, "
+                            "by the published detector?"),
+                     ("FF_hip", "... on the hip chains alone?"),
+                     ("FF_dist", "... on the four limb chains alone?")):
+            if g in ff.get("tests", {}):
+                rows.append((q, g, ff["tests"][g]))
+    for q, meth, r in rows:
+        pv = r.get("p")
+        pstr = ("n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}")
+        print(f"  {q}\n      exact Mann-Whitney on {meth}, one scalar per "
+              f"recording\n      p = {pstr}   (AUC = {r['auc']:.3f} "
+              f"[{r.get('auc_lo', float('nan')):.3f}, "
+              f"{r.get('auc_hi', float('nan')):.3f}], n = {r.get('n1', 0)} vs "
+              f"{r.get('n2', 0)})")
     ref = cl["phi_test"]
     print(f"\n  Every endpoint is one scalar per recording, contrasted between "
           f"the {ref.get('n1', 0)} abnormal and {ref.get('n2', 0)} normal "
@@ -1215,13 +1018,10 @@ def main(argv=None):
           f"one, taken over\n  {ref.get('method', 'the permutation null')}. "
           f"The interval is the\n  {ref.get('ci_method', 'bootstrap')}, "
           f"resampling each group separately at its own size.")
-    print("  Nothing here is corrected for multiplicity and no nuisance is "
-          "partialled out of a\n  contrast; the nuisances are reported as "
+    print("  Nothing here is corrected for multiplicity, no nuisance is "
+          "partialled out of a\n  contrast, and no endpoint has to clear an "
+          "admission gate to be reported; the\n  nuisances are reported as "
           "correlations, where the label enters no fit.")
-    for nm, key in (("Fluency", "phi_test"), ("Kemeny", "kemeny_test")):
-        r = cl[key]
-        print(f"     {nm:8s} AUC {r['auc']:.3f}  "
-              f"[{r['auc_lo']:.3f}, {r['auc_hi']:.3f}]   p = {r['p']:.4g}")
 
     # ---- outputs ----
     section("Outputs")
@@ -1234,7 +1034,6 @@ def main(argv=None):
         "n_visits": res["phi"]["n_visits"],
         "phi_excess": res["phi"]["excess"], "phi_observed": res["phi"]["observed"],
         "kemeny_jumps": res["kemeny_per_subject"],
-        "kemeny_lo": res["kemeny_lo"], "kemeny_hi": res["kemeny_hi"],
         "occupancy_entropy": cl["occupancy_entropy"],
         "mean_dwell_windows": cl["mean_dwell"]})
     per.to_csv(os.path.join(args.outdir, "per_subject.csv"), index=False)

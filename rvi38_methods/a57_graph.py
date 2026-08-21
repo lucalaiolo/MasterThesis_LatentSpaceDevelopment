@@ -203,39 +203,3 @@ def subject_kemeny(window_path: np.ndarray, K: int, Abar_jump: np.ndarray,
         return kemeny(P)
     except np.linalg.LinAlgError:
         return np.nan
-
-
-def block_bootstrap_kemeny(window_path, K, Abar_jump, alpha, block: int = 50,
-                           n_boot: int = 400, seed: int = 0,
-                           use_jump: bool = True) -> np.ndarray:
-    """Percentile-interval draws for one subject's Kemeny constant (§9.3).
-
-    Blocks of 50 windows (8 s at 6.25 Hz) preserve the autocorrelation of the
-    state path; an i.i.d. bootstrap would be invalid because consecutive windows
-    are strongly dependent.
-    """
-    rng = np.random.default_rng(seed)
-    out = np.empty(n_boot)
-    for b in range(n_boot):
-        s = moving_block_bootstrap(window_path, block, rng)
-        out[b] = subject_kemeny(s, K, Abar_jump, alpha, use_jump)
-    return out
-
-
-def estimability_gate(values, lo, hi) -> dict:
-    """§9.3 / §11: median interval width against the between-subject range.
-
-    A ratio above one half means per-subject values are not resolvable and only
-    group-level results should be reported.
-    """
-    v = np.asarray(values, float)
-    w = np.asarray(hi, float) - np.asarray(lo, float)
-    ok = np.isfinite(v) & np.isfinite(w)
-    if ok.sum() < 3:
-        return {"ratio": np.nan, "passed": False, "n": int(ok.sum())}
-    med_w = float(np.median(w[ok]))
-    rng_v = float(np.nanmax(v[ok]) - np.nanmin(v[ok]))
-    ratio = med_w / rng_v if rng_v > 0 else np.inf
-    return {"median_width": med_w, "between_subject_range": rng_v,
-            "ratio": float(ratio), "passed": bool(ratio < 0.5),
-            "n": int(ok.sum())}

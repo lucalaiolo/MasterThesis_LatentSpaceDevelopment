@@ -712,22 +712,16 @@ across strips, so consistency and magnitude appear in one display.
 
 ### 9bis.6 Inference
 
-Group contrasts are made by **permuting the 38 diagnostic labels, never the
-epochs** — epochs within a recording are not exchangeable, and the exchangeable
-unit is the recording. The statistic for pair `p` is the per-recording median
-`\widetilde D^{(i)}_p = \operatorname{med}_e D^{(i,e)}_p`, contrasted between
-groups. The six pairs are tested **together under a maximum-statistic
-(Westfall–Young) correction**: the null distribution is that of `\max_p |T_p|`
-over label permutations, and each pair's corrected p-value is the tail of *that*
-distribution at its observed statistic (so the corrected p is always ≥ the
-uncorrected one). **The result is reported for all six pairs whatever any one
-shows.** Because all six statistics live on the same `[-1,1]` scale, the maximum
-is taken without standardisation. Each pair is *also* an endpoint in the sense
-of §9quater — one scalar per recording — and is reported with the same exact
-Mann–Whitney AUC, interval and p as every other endpoint; the maximum-statistic
-p is printed beside those, not in place of them. Validated on synthetic data: a planted
-synchrony effect is recovered (`p_corr = 0.0025`) while a label-shuffled control is
-not (`p_corr = 0.84`).
+The exchangeable unit is the **recording**, never the epoch — epochs within a
+recording are not exchangeable. Each pair's per-recording coupled-time fraction
+`F_p` is therefore an endpoint in the sense of §9quater, one scalar per
+recording, and is contrasted by exactly the procedure of that section: the exact
+Mann–Whitney `U` over every label assignment, the AUC as the effect size, and the
+stratified percentile bootstrap as the interval. **All six pairs are reported
+whatever any one shows**, and there is no family-wise correction over them — no
+endpoint in this analysis is corrected for multiplicity (§9quater.4). Validated
+on synthetic data: a planted synchrony effect is recovered while a label-shuffled
+control is not.
 
 ---
 
@@ -753,33 +747,70 @@ thesis must say which is closer to the clinical judgement.
 ### 9ter.2 What it measures
 
 Fidgety movements are *small* and *directionally variable* — the limb wanders,
-it does not stroke. FidgetyFind operationalises exactly those two words. For a
-moving joint `c` with parent `b`, each frame contributes
+it does not stroke. FidgetyFind operationalises exactly those two words: it asks
+one question of each limb, *are its small movements varied in direction, or do
+they all point the same way?* Varied direction is fidgety movement; a single
+direction is its absence.
 
-- an amplitude `r_t = 100·‖x_c(t+1) − x_c(t)‖ / ‖x_c(t) − x_b(t)‖ · (f/30)`, a
-  percentage of the parent limb per frame, rescaled to the 30 fps the published
-  thresholds are calibrated at — dimensionless, so camera distance and body
-  size divide out;
-- a direction `a_t = ∠(x_c(t+1) − x_b(t+1), x_c(t+1) − x_c(t)) ∈ [−π, π]`, the
-  displacement measured **against the limb's own axis**, so the measure is
-  invariant to how the infant is lying under the camera.
+For a moving joint `c` with parent `b`, each pair of frames contributes the
+displacement `v_c(t) = x_c(t+1) − x_c(t)`, and from it
 
-Inside a 50-frame window, the displacements whose amplitude falls in the small-
-movement band `[4.5, 8.0]` are kept and their directions histogrammed into 8
-bins; the window's score is the Shannon entropy of that histogram divided by
-`log 8`, hence in `[0, 1]`. Near 1 the limb moved in every direction — fidgety
-movement present, the normal pole. Near 0 it moved along one line, or there
-were too few small movements to judge at all — **absent** fidgety movement,
-which is what the label marks. A recording's score is the mean over six chains
-(knees against thighs, wrists against forearms, ankles against shanks) of the
-median entropy over its scoreable windows.
+- an amplitude `r(t) = 100‖v_c(t)‖ / ℓ` with `ℓ = ‖x_c − x_b‖` the parent limb's
+  length, held constant by the rigid skeleton — a percentage of the limb, so
+  camera distance and body size divide out;
+- a direction `α(t) = ∠(u(t), v_c(t)) ∈ (−π, π]` against the limb's own axis
+  `u(t) = x_c(t+1) − x_b(t+1)`, so the measure is invariant to how the infant is
+  lying under the camera;
+- and, for the parent joint, `q_b(t) = 100‖x_b(t+1) − x_b(t)‖ / ‖x_Neck − x_MidHip‖`,
+  its own displacement as a fraction of the trunk, which separates a limb being
+  *transported* by its parent from a limb fidgeting on a still one.
 
-Two gates decide what is even assessable, and both are reported rather than
-hidden: a window with too many uninterpolated keypoints, or too many frames
-whose displacement is far above the band (the limb is being *transported*, not
-fidgeting), is returned as unscoreable. A window that passes the gates but
-holds too little in-band movement scores **0.0, not NaN** — the recording was
+Inside a window of `L` frames — which carries `L − 1` displacements, the
+denominator of every rate below — the displacements whose amplitude falls in the
+small-movement band `[r_min, r_max]` are kept and their directions histogrammed
+into 8 equal bins of `(−π, π]`; the window's score is the Shannon entropy of that
+histogram divided by `log 8`, hence in `[0, 1]`. Near 1 the limb moved in every
+direction — fidgety movement present, the normal pole. Near 0 it moved along one
+line — **absent** fidgety movement, which is what the label marks.
+
+One gate decides what is even assessable, and it is reported rather than hidden:
+a chain whose window holds too few *small-amplitude* frames is returned as
+unscoreable (`NaN`), fidgety movement being small in scale. The gate reads `r`
+on the hip chains and the parent's `q_b` on the hand and foot chains, with the
+published thresholds and per-class rates. A window that passes the gate but holds
+too little in-band movement scores **0.0, not NaN** — the recording was
 assessable and nothing was found, which is a finding.
+
+**From windows to one number.** The reduction follows the published aggregation,
+and it mirrors how a rater judges a recording: fidgety movement counts if any
+joint on a side shows it, if it recurs through the recording rather than
+appearing only briefly, and if it is present on both sides. Grouping the six
+chains by body side, `C_R = {R hip, R hand, R foot}` and `C_L` likewise:
+
+    s_σ(i) = max{ E_c(i) : c ∈ C_σ assessable }     window scorable iff one is
+    S_σ    = Q₉₀({ s_σ(i) })                        the clinical benchmark of
+                                                    ~15 s of fidgety movement
+                                                    in a 3-minute recording
+    FF     = min(S_L, S_R)
+
+A recording is scored only when at least a quarter of its windows on each side
+are scorable; below that FidgetyFind **declines to score it** and the recording
+is held as unscored rather than forced to a value — it drops out of its contrast
+instead of entering it with an invented number. Restricting the same three levels
+to the two hip chains gives `FF_hip`, and to the four limb chains `FF_dist`.
+Those three numbers are the endpoints; nothing else in the block is tested.
+
+**Calibration.** The published band `[4.5, 8.0]` percent of the parent limb per
+frame is tuned to raw OpenPose output. Our keypoints are smoothed and rigidified,
+so per-frame amplitudes are smaller: the published floor 4.5 sits near this
+cohort's 85th percentile, and almost nothing lands in the band. Every threshold
+is rescaled by one factor `ς = Q₇₅(r) / √(r_min r_max)`, with `Q₇₅` pooled over
+all recordings and chains; on this cohort `ς = 0.45`, giving the band
+`[2.04, 3.63]`. Smaller amplitudes then need a longer window to collect the same
+count, so `L` is the shortest of `{50, 70, 100, 150}` whose median window reaches
+ten in-band frames — here `L = 100`, `ν = 10/L = 0.1` — and the stride is 40
+frames, the published overlap ratio. **This is a re-calibration and is labelled
+as one wherever a number from it is quoted.**
 
 **Direction of effect.** Higher is normal. The abnormal group is expected
 *below* the normal one, so the reported AUC is expected **below 0.5** — the
@@ -790,55 +821,68 @@ cramped-synchronised pole is high.
 
 > The element-by-element audit against the authors' released code — what is
 > identical, what was forced by the absence of video, what we chose differently
-> and why, and what is ours outright — is
+> and why, and what comes from the specification rather than the code — is
 > [`FIDGETYFIND_FIDELITY.md`](FIDGETYFIND_FIDELITY.md). It also gives the
 > wording to use, and to avoid, when attributing a number to the method.
 
 The published method scores hands and feet from dense optical flow over
-segmented hand and foot pixels, because OpenPose detects neither. This cohort
-is a keypoint table with no video, so those two chains are scored by the same
-skeleton-only estimator one joint proximally — the wrist against the forearm,
-the ankle against the shank — which is the very axis and reference length the
-flow path normalises by, and is exactly the estimator the published *proximal*
-path applies at the knee. Consequences to state plainly:
+segmented hand and foot pixels, because OpenPose detects neither. This cohort is
+a keypoint table with no video, so those two chains are scored by the same
+keypoint-only estimator one joint proximally — the wrist against the forearm, the
+ankle against the shank — which is the very axis and reference length the flow
+path normalises by, and is exactly the estimator the published *proximal* path
+applies at the knee. Consequences to state plainly:
 
-1. the hips are the **unadapted** path and are reported separately, so the
-   claim that survives adaptation can be told apart from the claim that does
-   not;
+1. the hips are the **unadapted** path and are reported separately as `FF_hip`,
+   so the claim that survives adaptation can be told apart from the claim that
+   does not;
 2. the reference's 16 distal histogram bins count thousands of flow vectors per
    frame; one displacement per frame cannot support them, so all six chains use
    the published proximal setting of 8;
 3. the camera-motion gate needs the video and is omitted — these are
    fixed-camera cot recordings, but the gate's absence is a difference, not a
    non-issue;
-4. detection confidence is the `observed` flag of the pose table rather than
-   OpenPose's score;
-5. the reduction of per-window entropies to one number per recording is **ours**
-   — the released code stops at the windows. It is the plainest one available
-   (median per chain, mean over chains, plus the fraction of windows above a
-   threshold fixed a priori at 0.5), and it is declared as ours in the code, in
-   the module docstring and here.
+4. the published distal gate is defined on the distal joint's own displacement
+   over the trunk; here it is the **parent** joint's, so `τ_hand` and `τ_foot`
+   are the published values applied to a different quantity;
+5. two readings of the paper are corrected: the published thresholds are read as
+   **percentages**, and the published arccosine (range `[0, π]`) is replaced by
+   the **signed** angle, which is what eight bins over `(−π, π]` are consistent
+   with. The paper also prints the distal inequality in the opposite direction to
+   the proximal one, which would keep only windows dominated by *large*
+   movements; that is treated as a misprint.
 
-The keypoint smoothing the method specifies (a 5-frame Gaussian weighted by
-detection confidence) is not cosmetic and is kept: the band starts at a few
-percent of a limb length per frame, which is the scale of keypoint jitter, and
-jitter is directionally uniform — unsmoothed, it would read as fidgety movement
-in every infant. Measured on the synthetic cohort, smoothing costs roughly half
-the per-frame amplitude, which is why a planted signal has to be coherent over
-a few frames and slightly above the band to survive it.
+Three things the released code does that this implementation deliberately does
+not, because the specification does not call for them: it does **not** smooth the
+keypoints (they arrive already smoothed and rigidified from the upstream
+pipeline, and a second pass is not a reproduction of the first), it applies **no
+frame-rate rescaling** (the specified `r(t)` is a plain ratio of two lengths, and
+the amplitude ladder is calibrated to this cohort's own distribution anyway), and
+it has **no detection-confidence gate** (the three branches of the window score
+are the whole gate list).
+
+**The deepest limitation is the input, not the code.** Every bone length in this
+cohort is constant to float32 precision, so the table is a rigid-skeleton
+reconstruction on a canonical body. That makes the limb normalisation inert, and
+it removes the *radial* component of a joint's motion relative to its parent —
+the component real detector output fills with keypoint noise along the bone and
+with out-of-plane movement seen in 2D projection. On the hip chains, where the
+parent is nearly pinned, the direction histogram's dynamic range is roughly
+halved before any biology enters. Fidgety movements are small and
+three-dimensional, so this bears directly on the construct.
+`FIDGETYFIND_FIDELITY.md` §6 quantifies it chain by chain.
 
 ### 9ter.4 Inference and reporting
 
-The per-recording score is an endpoint like any other and is contrasted by the
-exact Mann–Whitney procedure of §9quater; so is each of the six chains
-separately, with **every chain reported whatever any one shows**, and a
-maximum-statistic p over the six printed beside them as in §9bis.6. Nothing is
-corrected across constructs: FidgetyFind is a comparison construct, read
-alongside the Spearman correlations between it, `Φ`, the Kemeny constant and
-whole-body coupling, and those correlations are the point of running it.
-Validated on synthetic data: a planted fidgety signal is recovered with the
-right sign on every recording, and the chain-level test finds it
-(`p_corr = 0.035` at the hips on a 12-recording check).
+`FF`, `FF_hip` and `FF_dist` are endpoints like any other and are contrasted by
+the exact Mann–Whitney procedure of §9quater — that, and nothing else. There is
+no per-chain endpoint, no family-wise correction, and no admission gate; the
+per-chain assessable fractions are reported as descriptives, because they are the
+honest limit on the construct and what the quarter-of-windows rule reads, but
+nothing is tested on them. Each of the three also appears in the correlation
+table of §9quater against occupancy entropy, mean dwell and log recording length.
+Validated on synthetic data: a planted fidgety signal is recovered with the right
+sign on every recording, and the contrast points below 0.5 as predicted.
 
 ---
 
@@ -846,9 +890,10 @@ right sign on every recording, and the chain-level test finds it
 
 ### 9quater.1 One scalar per recording, one test
 
-Every clinical endpoint — fluency `Φ`, the Kemeny constant `𝒦`, whole-body
-synchrony `mean F` (and each of its six pairs), the FidgetyFind score (and each
-of its six chains) — is a **single scalar per recording**, contrasted between
+Every clinical endpoint — fluency `Φ` (and its two similarity channels), the
+Kemeny constant `𝒦`, whole-body synchrony `mean F` (and each of its six pairs),
+and the three FidgetyFind numbers `FF`, `FF_hip`, `FF_dist` — is a **single
+scalar per recording**, contrasted between
 the `n1 = 6` abnormal and `n0 = 32` normal recordings with the Mann–Whitney `U`
 test. The null is equality of the two distributions,
 
@@ -909,13 +954,17 @@ approximation is not reported.
 
 ### 9quater.4 What is deliberately absent
 
-**No multiplicity correction across endpoints.** No confirmatory family is
-declared and no maxT or Holm adjustment is applied to the endpoint contrasts;
-each is reported as it stands, with its interval, and the reader is told how
-many were computed. (Within the two six-member families — the WCLR-PP pairs and
-the FidgetyFind chains — a Westfall–Young maximum-statistic p is printed
-*beside* the per-pair and per-chain contrasts, as §9bis.6 specifies for the
-co-movement construct.)
+**No multiplicity correction anywhere.** No confirmatory family is declared and
+no adjustment — Holm, maxT, Westfall–Young maximum-statistic or otherwise — is
+applied to any contrast, including within the six WCLR-PP pairs. Each endpoint is
+reported as it stands, with its interval, and the reader is told how many were
+computed.
+
+**No admission gates.** No endpoint has to clear a reliability, estimability,
+redundancy or duration criterion before it is reported. There is no pre-specified
+gate table, no split-half/Spearman–Brown reliability coefficient, no per-subject
+estimability ratio, no BCa interval on a group median and no leave-one-out
+sweep. What an endpoint is, and what its contrast came to, is the whole report.
 
 **No nuisance adjustment.** No endpoint is residualised against recording
 length or against any state statistic before the contrast: the label enters no
@@ -965,9 +1014,9 @@ these are reported quantities, not adjustments.
 ## 11. Honesty ledger (state these limitations in the thesis)
 
 - **Small clinical cohort.** `n=38` with **6 positives**: every clinical result is
-  exploratory, with wide CIs and reported LOO fragility. Window/clip counts are
-  estimation resources, not sample size. The exact test's own floor at this
-  design is `p ≈ 7.2 × 10⁻⁷` (§9quater.2).
+  exploratory and every interval is wide. Window/clip counts are estimation
+  resources, not sample size. The exact test's own floor at this design is
+  `p ≈ 7.2 × 10⁻⁷` (§9quater.2).
 - **Endpoints are reported uncorrected.** Several endpoints are computed on one
   dataset and none is adjusted for the others (§9quater.4). The reader is given
   the count and the intervals; a small p on one endpoint among several is a
@@ -979,12 +1028,19 @@ these are reported quantities, not adjustments.
   `A_{kk}>0.95` sit where the implied dwell is very sensitive to the fit (§6.4).
 - **Two constant joints** (MidHip, Neck) by normalisation — read the motion
   statistics and Jacobian rows with that in mind.
-- **FidgetyFind is run in adapted form.** Its hands and feet path needs the
-  video (dense optical flow over segmented hand/foot pixels) and this cohort is
-  a keypoint table, so those chains use a skeleton-only stand-in and the
-  camera-motion gate is dropped (§9ter.3). The hips are the unadapted published
-  path and are reported separately for exactly that reason; the reduction of
-  per-window entropies to a single score is ours, not the paper's.
+- **FidgetyFind is run in adapted form, and its thresholds are re-calibrated.**
+  Its hands and feet path needs the video (dense optical flow over segmented
+  hand/foot pixels) and this cohort is a keypoint table, so those chains use a
+  keypoint-only stand-in and the camera-motion gate is dropped (§9ter.3).
+  `FF_hip` is the unadapted published path and is reported separately for exactly
+  that reason. The published amplitude band does not fire on these smoothed,
+  rigidified keypoints — its floor sits near the cohort's 85th percentile — so
+  all five thresholds are rescaled by a single factor fixed from the cohort's own
+  amplitude distribution, before the labels are seen. **No number from this block
+  may be quoted as the published measurement.** The rigid-skeleton input also
+  removes the radial component of joint motion, which roughly halves the
+  direction histogram's dynamic range on the hip chains
+  (`FIDGETYFIND_FIDELITY.md` §6).
 - **Unverified references:** the PRISM latent-motion work and the RVI-38
   introducing paper are cited at preparation-time confidence — verify before the
   bibliography. Verify also the page ranges of the older speech-recognition

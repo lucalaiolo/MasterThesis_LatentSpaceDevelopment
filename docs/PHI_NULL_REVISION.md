@@ -88,21 +88,36 @@ label, so one may need adding.
 
 ## 3. Optional sentence on how the null is drawn
 
-Only if a methods reviewer would ask. Both exact routes are closed at this
-scale: rejection from $\mathfrak{S}_{n_i}$ accepts with probability of order
-$e^{-n_i \sum_k o_k^2}$, about $10^{-8}$ at $n_i = 200$ over eleven states, and
-sequential sampling needs the number of valid completions of a partial
-ordering, an $O(K n_i^3)$ exact evaluation in exact integer arithmetic per
-draw.
+Only if a methods reviewer would ask. Rejection sampling from
+$\mathfrak{S}_{n_i}$ is not an option: its acceptance rate is
+$\lvert\mathfrak{A}(q^{(i)})\rvert$ over the number of distinct permutations of
+the visits, which is $0.13$ at thirty visits over eleven states, $3\times
+10^{-5}$ at a hundred and twenty, and $10^{-10}$ at two hundred and fifty.
 
-> Draws are taken by a Metropolis chain on $\mathfrak{A}(q^{(i)})$, started at
-> $q^{(i)}$ and proposing a transposition of two positions or a cyclic rotation
-> by one place, each accepted whenever the result still lies in
-> $\mathfrak{A}(q^{(i)})$. Both proposals are symmetric, so the chain is uniform
-> on $\mathfrak{A}(q^{(i)})$ in stationarity. Uniformity was verified against
-> exhaustive enumeration on multisets small enough to enumerate, and the null
-> estimate is unchanged, to within Monte Carlo error, when the chain is started
-> from an ordering unrelated to the observation.
+> Draws are taken by sequential importance sampling. Each ordering is built
+> left to right, the next state drawn --- from those that remain, differ from
+> the one just placed, and would not strand the remainder --- with probability
+> proportional to how many copies are left, and carries the weight $1/q(w)$ for
+> the proposal probability $q(w)$ of the ordering it produced. The draws are
+> independent, and a weighted mean under those weights is consistent for the
+> expectation under $\mathcal{U}(\mathfrak{A}(q^{(i)}))$. Because the mean of the
+> unnormalised weights estimates $\lvert\mathfrak{A}(q^{(i)})\rvert$, which is
+> separately computable in closed form by block inclusion--exclusion, the
+> sampler is checked against an exactly known quantity rather than assumed
+> correct. Draws are added until the effective sample size
+> $(\sum_b w_b)^2 / \sum_b w_b^2$ reaches $2000$, and the smallest effective
+> size attained across recordings is reported.
+
+The estimator falls back to a Metropolis chain on $\mathfrak{A}(q^{(i)})$, whose
+draws are unweighted and so cannot degenerate, if the importance weights
+concentrate. That happens only for long visit sequences whose occupancy
+concentrates on a few states --- the effective fraction falls to $0.15$ at two
+hundred and fifty visits and $0.001$ at two thousand --- and none of this
+cohort's recordings is expected to need it. Report whether any did.
+
+The chain is retained in the code as an independent cross-check on the
+importance sampler rather than as a second estimator: the two share no
+machinery and agree on the null to within $0.006$ across all recordings.
 
 ## 4. What to report in Results
 
@@ -111,7 +126,9 @@ just its median. The run prints, and `summary.md` carries, the median offset
 between the two nulls, its range across recordings, and the median rate of
 adjacent-equal pairs in the unconstrained null. `per_subject.csv` carries
 `phi_excess` and `phi_null` (reported) alongside `phi_excess_uniform` and
-`phi_null_uniform` (the unconstrained versions) for every recording.
+`phi_null_uniform` (the unconstrained versions) for every recording, plus
+`phi_null_ess` and `phi_null_method`, which say how many draws effectively
+counted and whether the chain fallback was needed.
 
 Two numbers worth stating in Results, since they are what justify the change
 having been made at all:

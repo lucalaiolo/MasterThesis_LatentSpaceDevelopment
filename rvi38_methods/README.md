@@ -38,7 +38,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 230 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 212 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 | `colab_abnormality_index.py` | one Colab cell: caches a finished run's 38×4 endpoint matrix and rescores the index from it, without rerunning anything |
 
@@ -459,17 +459,6 @@ IX.index_frame(fm, ix)                  # the per-recording table
 
 Paste `colab_abnormality_index.py` as a single Colab cell to do exactly that
 against a finished `OUT_DIR`, table and figure included.
-
-**On the choice of reduction.** `PC1` maximises variance, which on this cohort
-is not the direction the label separates along: `Φ` and `𝒦` are two readings of
-one Viterbi path and correlate at `+0.77`, so `PC1` counts that shared
-information twice and discounts the constructs built independently of the model.
-[`docs/ABNORMALITY_INDEX_REDUCTION.md`](../docs/ABNORMALITY_INDEX_REDUCTION.md)
-sets out the alternative — the whitened a-priori direction
-`s = dᵀ Σ₀⁻¹ (x − μ₀)`, the Gaussian likelihood ratio for a shift along the
-stated pathological poles — why the omnidirectional Mahalanobis `D²` is *worse*
-than `PC1` here, and what changing the reduction does and does not buy. Read it
-before quoting a sensitivity from this block.
 
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and

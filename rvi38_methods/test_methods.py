@@ -34,15 +34,6 @@ def check(name, ok, detail=""):
     print(f"  {'ok  ' if ok else 'FAIL'}  {name}{'  ' + detail if detail else ''}")
 
 
-def _raises(fn, exc=ValueError):
-    """Did the call refuse, rather than return something quietly wrong?"""
-    try:
-        fn()
-    except exc:
-        return True
-    return False
-
-
 def random_chain(K, rng, sticky=0.9):
     A_ = rng.random((K, K)) + 1e-3
     A_ = A_ / A_.sum(1, keepdims=True)
@@ -1535,109 +1526,6 @@ def test_abnormality_index():
     check("a constant endpoint is refused rather than standardised by zero", ok)
 
 
-def test_index_reductions():
-    """The three reductions, and what each one leans on."""
-    print("\nAbnormality index: reductions")
-    X, y, d = _index_cohort()
-    Z = (X - X.mean(0)) / X.std(0)
-    Zc = Z - Z.mean(0)
-    S0 = np.cov(Zc[y == 0].T, ddof=1)
-
-    pc1 = IX.abnormality_index(X, y, directions=d, reduction="pc1", boot=0)
-    wh = IX.abnormality_index(X, y, directions=d, reduction="whitened", boot=0)
-    un = IX.abnormality_index(X, y, directions=d, reduction="unit", boot=0)
-
-    # the whitened weights solve Sigma_0 w = d, up to the unit-norm rescaling
-    w = wh["loadings"]
-    check("the whitened weights solve Sigma_0 w propto d",
-          abs(abs(np.corrcoef(S0 @ w, d)[0, 1]) - 1.0) < 1e-10
-          and abs(np.linalg.norm(w) - 1.0) < 1e-12)
-    check("the unit reduction is the poles themselves",
-          np.allclose(un["loadings"], d / np.linalg.norm(d)))
-    check("every reduction returns unit-norm weights",
-          all(abs(np.linalg.norm(r["loadings"]) - 1) < 1e-12
-              for r in (pc1, wh, un)))
-
-    # PC1 carries the most variance by construction; the aimed ones cannot.
-    check("PC1 carries the largest variance share of the three",
-          pc1["pc1_explained"] >= wh["pc1_explained"] - 1e-12
-          and pc1["pc1_explained"] >= un["pc1_explained"] - 1e-12,
-          f"pc1 {pc1['pc1_explained']:.3f}, whitened {wh['pc1_explained']:.3f}, "
-          f"unit {un['pc1_explained']:.3f}")
-    check("PC1's share is the leading explained-variance ratio",
-          abs(pc1["pc1_explained"] - pc1["pca_leading_ratio"]) < 1e-12)
-
-    # shrinkage interpolates whitened -> unit
-    full = IX.abnormality_index(X, y, directions=d, reduction="whitened",
-                                shrinkage=1.0, boot=0)
-    D = np.diag(np.diag(S0))
-    check("shrinkage 1 whitens by the diagonal alone",
-          np.allclose(full["loadings"],
-                      (np.linalg.solve(D, d) / np.linalg.norm(
-                          np.linalg.solve(D, d)))))
-    check("shrinkage is clamped to [0, 1]",
-          _raises(lambda: IX.abnormality_index(X, y, directions=d,
-                                               reduction="whitened",
-                                               shrinkage=1.5, boot=0)))
-
-    # a directional reduction cannot run on poles that all abstain
-    check("a directional reduction refuses an all-zero direction",
-          _raises(lambda: IX.abnormality_index(X, y, np.zeros(4),
-                                               reduction="whitened", boot=0)))
-    check("PC1 still runs when every pole abstains (it only needs a sign)",
-          np.isfinite(IX.abnormality_index(X, y, np.zeros(4),
-                                           reduction="pc1",
-                                           boot=0)["pc1"]).all())
-
-    # the directional reductions ARE the direction: flipping it flips the score
-    flip = IX.abnormality_index(X, y, directions=-d, reduction="whitened",
-                                boot=0)
-    check("reversing the poles negates the whitened score",
-          np.allclose(flip["pc1"], -wh["pc1"]))
-    check("... and the two-sided flag is still invariant",
-          np.array_equal(flip["flag"], wh["flag"]))
-
-    # an unknown reduction is refused rather than silently defaulted
-    check("an unknown reduction is refused",
-          _raises(lambda: IX.abnormality_index(X, y, directions=d,
-                                               reduction="tsne", boot=0)))
-
-
-def test_index_poles():
-    """The two pole sets, and that the choice is recorded."""
-    print("\nAbnormality index: pole sets")
-    check("the stated poles let Phi and Kemeny abstain",
-          IX.POLES_STATED["phi"] == 0 and IX.POLES_STATED["kemeny"] == 0
-          and IX.POLES_STATED["mean_F"] == +1 and IX.POLES_STATED["FF"] == -1)
-    check("the construct poles argue a direction for all four",
-          all(IX.POLES_CONSTRUCT[k] != 0 for k in IX.POLES_CONSTRUCT))
-    check("both sets agree wherever METHODS states a direction",
-          all(IX.POLES_CONSTRUCT[k] == v
-              for k, v in IX.POLES_STATED.items() if v != 0))
-
-    X, y, _ = _index_cohort()
-    vids = [f"vid{i:02d}" for i in range(len(y))]
-    results = {"primary": "M", "labels": y.tolist(), "video_names": vids,
-               "M": {"phi": {"excess": X[:, 0].tolist()},
-                     "kemeny_per_subject": X[:, 1].tolist()},
-               "wclrpp": {"mean_F": X[:, 2].tolist()},
-               "fidgetyfind": {"FF": X[:, 3].tolist()}}
-    a = IX.feature_matrix(results, poles="stated")
-    b = IX.feature_matrix(results, poles="construct")
-    check("the pole set reaches the matrix and is recorded",
-          list(a["directions"]) == [0., 0., 1., -1.]
-          and list(b["directions"]) == [1., 1., 1., -1.]
-          and (a["poles"], b["poles"]) == ("stated", "construct"))
-    check("an unknown pole set is refused",
-          _raises(lambda: IX.feature_matrix(results, poles="whatever")))
-
-    sub = IX.feature_matrix(results, keep=("phi", "kemeny", "FF"))
-    check("a feature subset keeps the declared order and drops the rest",
-          sub["keys"] == ["phi", "kemeny", "FF"]
-          and sub["X"].shape == (len(y), 3)
-          and np.allclose(sub["X"], X[:, [0, 1, 3]]))
-
-
 def test_feature_matrix():
     """The N x 4 matrix pulled out of a results object, and its cache."""
     print("\nAbnormality index: the endpoint matrix")
@@ -1720,8 +1608,6 @@ def main():
     test_fidgetyfind_calibration()
     test_fidgetyfind_planted_cohort()
     test_abnormality_index()
-    test_index_reductions()
-    test_index_poles()
     test_feature_matrix()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

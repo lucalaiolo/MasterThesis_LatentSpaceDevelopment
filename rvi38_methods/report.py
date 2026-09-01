@@ -266,9 +266,6 @@ def summarise(results: dict, outdir: str) -> dict:
             "loadings": dict(zip(ai.get("feature_names", []),
                                  [_f(v) for v in ai.get("loadings", [])])),
             "orientation": (ai.get("orientation") or {}).get("method", ""),
-            "reduction": ai.get("reduction", "pc1"),
-            "shrinkage": _f(ai.get("shrinkage"), 0.0),
-            "poles": ai.get("poles", "stated"),
             "band": {"mu0": _f(b.get("mu0")), "sd0": _f(b.get("sd0")),
                      "n_sd": _f(b.get("n_sd")), "lo": _f(b.get("lo")),
                      "hi": _f(b.get("hi")), "side": b.get("side", ""),
@@ -471,19 +468,15 @@ def summary_markdown(s: dict) -> str:
         b, r = ai["band"], ai["readout"]
         g = ai.get("group", {})
         ci = g.get("auc_ci", [np.nan, np.nan])
-        L += [f"- reduction `{ai.get('reduction', 'pc1')}` on "
-              f"{len(ai['features'])} standardised endpoints "
+        L += [f"- `PC1` of {len(ai['features'])} standardised endpoints "
               f"({', '.join(ai['features'])}), keeping "
               f"{_fmt(ai['pc1_explained'] * 100, 1)}% of their variance"
               + (f"; not available, so not in the index: "
                  f"{', '.join(ai['features_missing'])}"
                  if ai.get("features_missing") else ""),
-              "- weights: " + ", ".join(f"{k} {_fmt(v, 2)}"
-                                        for k, v in ai["loadings"].items())
-              + f" ({ai['orientation']}; higher = more abnormal)"
-              + ("" if ai.get("reduction", "pc1") == "pc1" else
-                 f", poles `{ai.get('poles', 'stated')}` — under a directional "
-                 f"reduction the poles carry the readout, not merely its sign"),
+              "- loadings: " + ", ".join(f"{k} {_fmt(v, 2)}"
+                                         for k, v in ai["loadings"].items())
+              + f" (sign fixed by {ai['orientation']}; higher = more abnormal)",
               f"- normative band from the {b['n_normal']} normal recordings: "
               f"{_fmt(b['mu0'])} +- {_fmt(b['n_sd'], 0)} x {_fmt(b['sd0'])} = "
               f"[{_fmt(b['lo'])}, {_fmt(b['hi'])}], {b['side']}-sided",

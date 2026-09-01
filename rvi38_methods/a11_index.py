@@ -97,31 +97,11 @@ FEATURES: tuple[Feature, ...] = (
     Feature("FF", "FidgetyFind FF", -1, "fidgetyfind", ("FF",)),
 )
 
-#: The **stated** pathological pole of each endpoint -- the default, and the
-#: only one METHODS supports. ``mean F``: high inter-limb coupling is the
-#: cramped-synchronised pole. ``FF``: higher is normal, so the abnormal group is
-#: expected below. ``Phi`` and ``Kemeny`` have no stated pole and abstain.
-POLES_STATED: dict[str, int] = {f.key: f.direction for f in FEATURES}
-DIRECTIONS = POLES_STATED                       # backwards-compatible alias
-
-#: An **argued** pole for every endpoint, which METHODS does not state and which
-#: the caller must opt into (``--index-poles construct``). The argument is from
-#: each construct's definition, not from this cohort:
-#:
-#: * ``Phi`` ``+1`` -- fidgety movement is directionally variable, so its absence
-#:   should make consecutive movements *more* alike, raising the excess
-#:   similarity;
-#: * ``Kemeny`` ``+1`` -- a restricted repertoire should take longer to reach a
-#:   randomly drawn state, raising the mixing time.
-#:
-#: Both are plausible and both happen to agree with the direction of effect
-#: observed on RVI-38, which is exactly why adopting them after seeing that
-#: cannot be called a priori. Whichever set is used must be fixed before the
-#: readout is computed and named in the write-up; the run logs which it used.
-#: See ``docs/ABNORMALITY_INDEX_REDUCTION.md`` §4a.
-POLES_CONSTRUCT: dict[str, int] = {"phi": +1, "kemeny": +1, "mean_F": +1,
-                                   "FF": -1}
-POLE_SETS = {"stated": POLES_STATED, "construct": POLES_CONSTRUCT}
+#: The stated pathological pole of each endpoint, as used to orient PC1.
+#: ``mean F``: high inter-limb coupling is the cramped-synchronised pole.
+#: ``FF``: higher is normal, so the abnormal group is expected below.
+#: ``Phi`` and ``Kemeny`` have no stated pole and abstain.
+DIRECTIONS: dict[str, int] = {f.key: f.direction for f in FEATURES}
 
 
 # ---------------------------------------------------------------------------
@@ -160,9 +140,7 @@ def load_results(source):
         return json.load(fh)
 
 
-def feature_matrix(source, features: tuple[Feature, ...] = FEATURES,
-                   keep: tuple[str, ...] | None = None,
-                   poles: str = "stated") -> dict:
+def feature_matrix(source, features: tuple[Feature, ...] = FEATURES) -> dict:
     """The ``N x p`` endpoint matrix out of a run, ready for :func:`abnormality_index`.
 
     ``source`` is a results dict, the path of a ``results.json``, or the output
@@ -181,13 +159,6 @@ def feature_matrix(source, features: tuple[Feature, ...] = FEATURES,
     videos = list(results.get("video_names", []))
     n = len(labels) or len(videos)
 
-    if poles not in POLE_SETS:
-        raise ValueError(f"poles must be one of {sorted(POLE_SETS)}, got "
-                         f"{poles!r}")
-    pole = POLE_SETS[poles]
-    if keep is not None:
-        features = tuple(f for f in features if f.key in set(keep))
-
     cols, kept, missing = [], [], []
     for f in features:
         block = results.get(primary, {}) if f.block == "" else \
@@ -202,8 +173,7 @@ def feature_matrix(source, features: tuple[Feature, ...] = FEATURES,
     return {"X": X, "labels": labels, "videos": videos,
             "features": tuple(kept), "names": [f.label for f in kept],
             "keys": [f.key for f in kept],
-            "directions": np.array([pole.get(f.key, 0) for f in kept], float),
-            "poles": poles,
+            "directions": np.array([f.direction for f in kept], float),
             "missing": missing, "primary": primary, "n": n}
 
 
@@ -280,62 +250,6 @@ def _orient(w, directions):
     return (1.0 if w[j] >= 0 else -1.0), vote, "largest loading made positive"
 
 
-#: How the endpoint matrix is collapsed to one score.
-REDUCTIONS = ("pc1", "whitened", "unit")
-
-
-def _reduce(Zc, scored, healthy, directions, how="pc1", shrinkage=0.0):
-    """Collapse the standardised endpoints to one score, and say how.
-
-    ``pc1`` -- the leading principal component, oriented by the poles. It
-    maximises *variance*, which is the direction two redundant endpoints share,
-    not the direction the label separates along. Kept as the default because it
-    is what was first reported.
-
-    ``whitened`` -- ``s = d' inv(Sigma_0) (x - mu_0)``, the Gaussian
-    log-likelihood ratio between the normal recordings and the same
-    distribution shifted along the a-priori direction ``d``. ``Sigma_0`` is the
-    *normal* recordings' covariance, so the whitening discounts an endpoint to
-    the extent the others already predict it -- the opposite of what PC1 does
-    with a redundant pair. Directional by construction: it needs a non-zero
-    ``d``, and every pole in it is a claim that must be fixed beforehand.
-
-    ``unit`` -- the poles themselves, ``s = d'x / ||d||``. The no-covariance
-    baseline, and the ``shrinkage = 1`` limit of ``whitened`` up to scale.
-
-    ``shrinkage`` pulls ``Sigma_0`` toward its own diagonal,
-    ``(1-lam) Sigma_0 + lam diag(Sigma_0)``. At ``n0 = 32`` there are only a few
-    observations per covariance parameter and ``inv(Sigma_0)`` amplifies
-    whatever error is in them, so ``lam`` buys stability. It must be fixed a
-    priori, never tuned against the contrast.
-    """
-    d = np.asarray(directions, float)
-    _, S, Vt = np.linalg.svd(Zc[scored], full_matrices=False)
-    ratio = S ** 2 / float((S ** 2).sum())
-    if how == "pc1":
-        w = Vt[0]
-        sign, vote, method = _orient(w, d)
-        return w * sign, ratio, {"sign": float(sign), "vote": vote,
-                                 "method": method}
-    if not np.any(d):
-        raise ValueError(f"the '{how}' reduction is directional and every pole "
-                         f"is zero; pass poles='construct' or supply "
-                         f"directions explicitly")
-    if how == "unit":
-        w = d / np.linalg.norm(d)
-    else:
-        S0 = np.cov(Zc[healthy].T, ddof=1)
-        S0 = np.atleast_2d(S0)
-        if shrinkage:
-            S0 = (1 - shrinkage) * S0 + shrinkage * np.diag(np.diag(S0))
-        w = np.linalg.solve(S0, d)
-        w = w / np.linalg.norm(w)
-    return w, ratio, {
-        "sign": 1.0, "vote": float("nan"),
-        "method": f"a-priori poles ({how}"
-                  + (f", shrinkage {shrinkage:g}" if shrinkage else "") + ")"}
-
-
 def _confusion(flag, labels):
     y = np.asarray(labels, int)
     f = np.asarray(flag, int)
@@ -362,32 +276,17 @@ def _confusion(flag, labels):
 
 def abnormality_index(X, labels, directions=None, names=None, n_sd: float = 2.0,
                       side: str = "two", missing: str = "impute",
-                      reduction: str = "pc1", shrinkage: float = 0.0,
                       boot: int = 10_000) -> dict:
-    """One index from the standardised endpoints, cut at ``n_sd`` SD of the healthy.
+    """PC1 of the standardised endpoints, cut at ``n_sd`` SD of the healthy cohort.
 
     ``X`` is ``N x p`` (rows = recordings, columns = endpoints), ``labels`` is
     ``1`` for abnormal and ``0`` for normal. ``directions`` gives each column's
-    pathological pole (``+1`` / ``-1`` / ``0`` to abstain); the label enters
-    none of it.
+    stated pathological pole (``+1`` / ``-1`` / ``0`` to abstain) and is used
+    only to orient PC1, never the label.
 
-    ``reduction`` is ``"pc1"`` (default, the leading principal component),
-    ``"whitened"`` (``d' inv(Sigma_0) (x - mu_0)``, the Gaussian likelihood
-    ratio for a shift along ``d``) or ``"unit"``; ``shrinkage`` pulls
-    ``Sigma_0`` toward its diagonal. See :func:`_reduce`, and
-    ``docs/ABNORMALITY_INDEX_REDUCTION.md`` for which to prefer and why.
-
-    How much each reduction leans on ``directions`` differs, and it matters.
-    ``pc1`` uses them only for a sign, so an abstaining endpoint costs nothing
-    and the two-sided readout ignores them entirely. ``whitened`` and ``unit``
-    *are* the direction, so every pole is a claim carrying the readout, and an
-    endpoint that abstains contributes only through the covariance. Fix the
-    pole set before computing the readout and name it in the write-up.
-
-    ``side`` is ``"two"`` (outside the band in either direction; the only
-    choice independent of ``pc1``'s arbitrary sign), ``"upper"`` or
-    ``"lower"``. ``missing`` is ``"impute"`` or ``"drop"``; see
-    :func:`_standardise`.
+    ``side`` is ``"two"`` (the reported readout: outside the band in either
+    direction), ``"upper"`` or ``"lower"``. ``missing`` is ``"impute"`` or
+    ``"drop"``; see :func:`_standardise`.
 
     Returns the index, the band, the flag and the readout. The AUC of the
     continuous index is the same exact Mann-Whitney contrast every other
@@ -404,32 +303,25 @@ def abnormality_index(X, labels, directions=None, names=None, n_sd: float = 2.0,
         raise ValueError(f"side must be 'two', 'upper' or 'lower', got {side!r}")
     if missing not in ("impute", "drop"):
         raise ValueError(f"missing must be 'impute' or 'drop', got {missing!r}")
-    if reduction not in REDUCTIONS:
-        raise ValueError(f"reduction must be one of {list(REDUCTIONS)}, got "
-                         f"{reduction!r}")
-    if not 0.0 <= shrinkage <= 1.0:
-        raise ValueError(f"shrinkage must lie in [0, 1], got {shrinkage}")
     if directions is None:
         directions = np.zeros(p)
     names = list(names) if names is not None else [f"x{j}" for j in range(p)]
 
     Z, mean, sd, scored, imputed = _standardise(X, missing)
     Zc = Z - Z[scored].mean(0)
-    healthy0 = (y == 0) & scored
-    w, ratio, orient = _reduce(Zc, scored, healthy0, directions, reduction,
-                               shrinkage)
+    _, S, Vt = np.linalg.svd(Zc[scored], full_matrices=False)
+    ev = S ** 2 / max(len(np.flatnonzero(scored)) - 1, 1)
+    tot = float((S ** 2).sum())
+    ratio = S ** 2 / tot if tot > 0 else np.full(len(S), np.nan)
+
+    w = Vt[0]
+    sign, vote, how = _orient(w, directions)
+    w = w * sign
     pc1 = np.where(scored, Zc @ w, np.nan)
-    # What share of the standardised variance this score carries. For 'pc1'
-    # this is exactly the leading explained-variance ratio; for a directional
-    # reduction it is the honest analogue, and it is *not* maximal by design --
-    # the score is aimed at the pathological direction, not the widest one.
-    tot = float(np.var(Zc[scored], axis=0, ddof=1).sum())
-    share = float(np.var(pc1[scored], ddof=1) / tot) if tot > 0 else float("nan")
-    ev = ratio * tot
 
     # normative band: the healthy cohort alone, which is the whole of what the
     # label is used for here.
-    healthy = healthy0
+    healthy = (y == 0) & scored
     n0 = int(healthy.sum())
     if n0 < 2:
         raise ValueError(f"the normative band needs at least two normal "
@@ -481,17 +373,15 @@ def abnormality_index(X, labels, directions=None, names=None, n_sd: float = 2.0,
         "n_imputed": int(imputed.sum()), "n_scored": int(scored.sum()),
         "n": n, "names": names, "keys": list(names),
         "loadings": w, "explained_variance": ev,
-        "explained_ratio": ratio, "pc1_explained": share,
-        "pca_leading_ratio": float(ratio[0]),
-        "reduction": reduction, "shrinkage": float(shrinkage),
-        "orientation": dict(orient, directions=np.asarray(directions,
-                                                          float).tolist()),
+        "explained_ratio": ratio, "pc1_explained": float(ratio[0]),
+        "orientation": {"sign": float(sign), "vote": vote, "method": how,
+                        "directions": np.asarray(directions, float).tolist()},
         "band": {"mu0": mu0, "sd0": sd0, "n_sd": float(n_sd), "lo": lo,
                  "hi": hi, "side": side, "n_normal": n0},
         "readout": readout, "loo": loo, "group": group,
         "missing_policy": missing,
-        "note": (f"{reduction} reduction of the standardised endpoints, cut "
-                 f"at {n_sd:g} SD of the normal cohort's own distribution; "
+        "note": ("PC1 of the standardised endpoints, cut at "
+                 f"{n_sd:g} SD of the normal cohort's own distribution; "
                  "no parameter is fitted against the label"),
     }
 
@@ -529,26 +419,15 @@ def describe(fm: dict, ix: dict) -> str:
                  if ix["missing_policy"] == "impute" else
                  f"     {ix['n'] - ix['n_scored']} recording(s) dropped for a "
                  f"missing endpoint")
-    red = ix.get("reduction", "pc1")
-    lam = ix.get("shrinkage", 0.0)
-    L.append(f"  reduction '{red}'"
-             + (f", covariance shrunk {lam:g} toward its diagonal"
-                if red == "whitened" and lam else "")
-             + f"; the score carries {ix['pc1_explained']:.1%} of the "
-               f"standardised variance"
-             + (f" (the widest direction available is "
-                f"{ix['pca_leading_ratio']:.1%})" if red != "pc1" else ""))
-    L.append("     weights: " + ",  ".join(
+    L.append(f"  PC1 keeps {ix['pc1_explained']:.1%} of the standardised "
+             f"variance"
+             + (f" (PC2 {ix['explained_ratio'][1]:.1%})"
+                if len(ix["explained_ratio"]) > 1 else ""))
+    L.append("     loadings: " + ",  ".join(
         f"{nm} {wj:+.3f}" for nm, wj in zip(fm["names"], ix["loadings"])))
-    if red == "pc1":
-        L.append(f"     sign fixed by {ix['orientation']['method']} "
-                 f"(higher index = more abnormal); the two-sided readout does "
-                 f"not depend on it")
-    else:
-        poles = ", ".join(f"{nm} {int(d):+d}" for nm, d in
-                          zip(fm["names"], ix["orientation"]["directions"]))
-        L.append(f"     direction is the a-priori poles ({poles}), which carry "
-                 f"the readout here rather than only its sign")
+    L.append(f"     sign fixed by {ix['orientation']['method']} "
+             f"(higher index = more abnormal); the two-sided readout does not "
+             f"depend on it")
     L.append(f"  normative band from the {b['n_normal']} normal recordings: "
              f"mean {b['mu0']:+.3f}, SD {b['sd0']:.3f}, so "
              f"{b['n_sd']:g} SD gives [{b['lo']:+.3f}, {b['hi']:+.3f}] "

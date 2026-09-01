@@ -38,7 +38,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 212 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 230 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
 | `colab_abnormality_index.py` | one Colab cell: caches a finished run's 38×4 endpoint matrix and rescores the index from it, without rerunning anything |
 

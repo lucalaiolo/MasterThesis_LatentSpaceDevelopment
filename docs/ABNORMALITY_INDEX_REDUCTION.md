@@ -118,6 +118,54 @@ which is the same information the band already uses.
 
 ---
 
+## 4a. The direction is a claim, and it carries the whole result
+
+`PC1` uses `d` for one bit: which way round to point a component it found on
+its own. The two-sided band then ignores even that. **The whitened score is
+different in kind — it *is* `d`**, filtered through `Σ₀⁻¹`. Every pole in it is
+a claim doing real work, and the result is only as good as those claims.
+
+METHODS states a pathological pole for two of the four endpoints: high WCLR-PP
+coupling is the cramped-synchronised pole, and high FidgetyFind is normal. It
+states nothing for `Φ` or `𝒦`. Running the whitened score on the stated poles
+alone — `d = (0, 0, −1)` on `Φ, 𝒦, FF` — gives
+
+| poles | `d` on `Φ, 𝒦, FF` | AUC | p | sens | spec |
+|---|---|---:|---:|---:|---:|
+| **stated only** | `(0, 0, −1)` | **0.661** | 0.23 | 1/6 | 31/32 |
+| plus argued poles | `(+1, +1, −1)` | **0.786** | 0.026 | 3/6 | 31/32 |
+
+The entire advantage of the whitened reduction over `PC1` — 0.661 against
+0.786, one flagged abnormal recording against three — comes from asserting that
+**high `Φ` and high `𝒦` are the abnormal poles**. With only what METHODS
+states, the whitened score is the *worst* option on the table, well behind
+`PC1`'s 0.776.
+
+The argument for those two poles is real and comes from the constructs, not the
+data: fidgety movement is directionally variable, so its absence should make
+consecutive movements more alike and raise `Φ`; and a restricted repertoire
+should take longer to reach a randomly drawn state, raising `𝒦`. But both
+predictions agree with the direction of effect observed on this cohort, and
+they were written down after that direction was visible. That is the exact
+shape of a post-hoc rationalisation, whether or not it is one here.
+
+So the choice is a genuine fork, and it has to be made in the open:
+
+* **`--index-poles stated`** (the default) is defensible without further
+  argument, and under a directional reduction it is weak, because it reduces to
+  FidgetyFind plus whatever the covariance borrows from the other two.
+* **`--index-poles construct`** is the stronger readout and requires the thesis
+  to state the `Φ` and `𝒦` predictions **as predictions**, argued from the
+  constructs, and to acknowledge that they were not registered before the
+  cohort was seen.
+
+The run logs which set was used and prints this warning whenever a directional
+reduction is combined with the argued poles. Under `pc1` the question is nearly
+moot — the poles only fix a sign the two-sided band discards — which is one
+real advantage `PC1` has here.
+
+---
+
 ## 5. What the whitening actually does here
 
 Dropping `mean F` (see §7) and standardising, the healthy covariance is
@@ -154,8 +202,15 @@ whole argument, and it is visible in three numbers.
 
 ## 6. What it buys, and what it does not
 
-Every row below is leave-one-out for the 32 normal recordings; the abnormal
-never enter a band, so they are already out-of-sample. Band at `±2 SD`.
+Every row below is leave-one-out for the 32 normal recordings' **band**; the
+abnormal never enter a band, so they are already out-of-sample. Band at
+`±2 SD`.
+
+> **These rows hold the direction fixed.** `PC1`'s loadings and the whitened
+> weights are themselves estimated from all 38 recordings, and §6a shows that
+> once the direction is refit without the recording being scored, the ordering
+> below changes and the whitened score loses its advantage. Read §6a before
+> quoting anything from this table.
 
 | reduction | endpoints | AUC | p | sens | spec |
 |---|---|---:|---:|---:|---:|
@@ -163,14 +218,76 @@ never enter a band, so they are already out-of-sample. Band at `±2 SD`.
 | Mahalanobis `D²` | all four | 0.552 | 0.71 | 3/6 | 30/32 |
 | `PC1` | `Φ, 𝒦, FF` | 0.776 | 0.033 | 3/6 | 30/32 |
 | unit weights | `Φ, 𝒦, FF` | 0.771 | 0.037 | 3/6 | 29/32 |
-| **whitened a-priori direction** | `Φ, 𝒦, FF` | **0.786** | **0.026** | **3/6** | **31/32** |
+| whitened, **stated poles only** | `Φ, 𝒦, FF` | 0.661 | 0.23 | 1/6 | 31/32 |
+| **whitened, argued poles** (§4a) | `Φ, 𝒦, FF` | **0.786** | **0.026** | **3/6** | **31/32** |
+| whitened, argued poles, `λ = 0.5` | `Φ, 𝒦, FF` | 0.776 | 0.033 | 3/6 | 31/32 |
 | *Fisher LDA (uses the label)* | `Φ, 𝒦, FF` | *0.781* | *0.030* | *3/6* | *30/32* |
 
-The whitened score is the best of the label-free reductions, and it reaches the
-label-fitted upper bound. But be clear about the size of the win: against `PC1`
-on the same three endpoints it is **one false positive**, and the AUCs differ by
-0.010 at `n = 38`. The argument for it is that it is the right estimator given
-`Φ`–`𝒦` at `+0.77`, not that it rescues the result.
+Held at a fixed direction, the whitened score with the argued poles is the best
+of the label-free reductions and reaches the label-fitted bound — but see §6a,
+which withdraws that conclusion once the direction is held out too. But be clear about the size of
+the win: against `PC1` on the same three endpoints it is **one false
+positive**, and the AUCs differ by 0.010 at `n = 38`. It also depends entirely
+on §4a — with the stated poles alone it drops to 0.661 and 1/6. The honest
+summary is that `PC1` and the whitened score are within noise of each other on
+this cohort, and the case for the whitened one is that it is the better
+*estimator* given `Φ`–`𝒦` at `+0.77`, not that it rescues the result.
+
+---
+
+## 6a. Refitting the direction too, and what survives
+
+The covariance can be inverted here — six parameters from 32 recordings at
+`p = 3`, condition number 7.5; ten and 9.0 at `p = 4` — but *invertible* is not
+*estimated well enough to pay for itself*. A stratified bootstrap (2000 draws)
+moves the fitted direction by:
+
+| direction | median | 90th pct | max |
+|---|---:|---:|---:|
+| `PC1`, all four | 15.8° | **64.9°** | 89.8° |
+| whitened, all four | 19.2° | 39.8° | 77.7° |
+| whitened `λ = 0.5`, all four | 14.6° | 26.6° | 54.2° |
+| `PC1`, `Φ, 𝒦, FF` | **9.5°** | 23.5° | 89.1° |
+| whitened, `Φ, 𝒦, FF` | 22.9° | **55.1°** | 89.6° |
+| whitened `λ = 0.5`, `Φ, 𝒦, FF` | 15.8° | 29.0° | 53.8° |
+
+Neither direction is well determined, and `PC1` is not the safe alternative: it
+is an eigenvector of the same covariance, so its stability is governed by the
+eigengap, and on all four endpoints the top two eigenvalues are `2.02` and
+`1.42` — a ratio of 1.42, which is barely identified. It sometimes flips
+outright.
+
+Refitting **everything** — the standardisation, the direction and the band —
+without the recording being scored gives the honest readout:
+
+| reduction | endpoints | LOO AUC | sens | spec |
+|---|---|---:|---:|---:|
+| **unit weights** | **all four** | **0.781** | 3/6 | 30/32 |
+| `PC1` | `Φ, 𝒦, FF` | 0.786 | 3/6 | 30/32 |
+| whitened `λ = 0.5` | `Φ, 𝒦, FF` | 0.776 | 3/6 | 29/32 |
+| unit weights | `Φ, 𝒦, FF` | 0.771 | 3/6 | 29/32 |
+| whitened `λ = 0` | `Φ, 𝒦, FF` | 0.766 | 2/6 | 30/32 |
+| whitened `λ = 0.5` | all four | 0.766 | 2/6 | 30/32 |
+| `PC1` | all four | 0.760 | 2/6 | 30/32 |
+| whitened `λ = 0` | all four | 0.693 | 1/6 | 31/32 |
+
+**The whitened score's 0.786 in §6 was in-sample for the direction.** Held out
+properly it is 0.766, below `PC1` on the same endpoints. At `n₀ = 32` the
+whitening does not pay for the covariance it has to estimate, and §5's argument
+— that it is the better *estimator* given `Φ`–`𝒦` at `+0.77` — is correct in
+principle and does not survive the sample size.
+
+What wins is **unit weights**: the a-priori poles alone, no covariance, no
+eigenvector, nothing estimated. Best out-of-sample readout of the eight, most
+stable by construction, and it keeps `mean F`, so the feature-selection problem
+of §7 does not arise either.
+
+§4a survives all of this untouched. Unit weights on all four with the **stated**
+poles alone give AUC 0.688 and 1/6. The poles carry the result under every
+directional reduction — whitened, unit or otherwise — and remain the
+load-bearing assumption.
+
+---
 
 **The ceiling is set by the constructs, not by the reduction.** On the whitened
 score the six abnormal recordings sit at
@@ -240,7 +357,23 @@ Two mitigations, in order of preference:
 
 ---
 
-## 9. What to state in the thesis
+## 9. Running it
+
+```
+--index-reduction {pc1,whitened,unit}   default pc1
+--index-poles     {stated,construct}    default stated
+--index-shrinkage LAMBDA                default 0.0, in [0, 1]
+--index-features  phi,kemeny,FF         default: all four
+```
+
+The readout reported above is
+`--index-reduction whitened --index-poles construct --index-features phi,kemeny,FF`.
+`report.run_report` takes the same as keywords, and `results.json` records all
+four so a number can always be traced to the reduction that produced it.
+
+---
+
+## 10. What to state in the thesis
 
 * The reduction is a **Gaussian likelihood ratio for a shift along a
   pre-specified direction**, not a fitted classifier. `d` comes from each
@@ -252,10 +385,11 @@ Two mitigations, in order of preference:
   the band.
 * The standardisation and `Σ₀` see all `N` rows, which is **transductive but
   label-free**.
-* Unlike the two-sided `PC1` band, this score is **directional**, so its readout
-  depends on the orientation of `d`. That is deliberate — it is what recovers
-  the information `D²` throws away — but it means `d` must be fixed before the
-  readout is computed, and the one-sided flag stated as such.
+* Unlike the two-sided `PC1` band, this score **is** `d`, not merely oriented by
+  it. That is what recovers the information `D²` throws away, and it is also
+  what makes §4a load-bearing: state which pole set was used, and if it is
+  `construct`, present the `Φ` and `𝒦` poles as predictions argued from the
+  constructs while acknowledging they were not registered in advance.
 * **Three of the six abnormal recordings are not separable from the normal
   cohort by these constructs at any threshold.** Report that as a property of
   the constructs.

@@ -586,8 +586,11 @@ def abnormality_index(results, cfg, outdir):
     Populates ``results['abnormality_index']`` and writes
     ``<outdir>/abnormality_index.csv`` and ``<outdir>/feature_matrix.npz``.
     """
-    section("Abnormality index: PC1 of the endpoints, against a normative band")
-    fm = IX.feature_matrix(results)
+    section(f"Abnormality index: the endpoints reduced by "
+            f"'{cfg['index_reduction']}', against a normative band")
+    keep = (tuple(k.strip() for k in cfg["index_features"].split(","))
+            if cfg["index_features"] else None)
+    fm = IX.feature_matrix(results, keep=keep, poles=cfg["index_poles"])
     if fm["X"].shape[1] < 2:
         print(f"  only {fm['X'].shape[1]} endpoint(s) available "
               f"({', '.join(fm['missing']) or 'none missing'}); the composite "
@@ -596,12 +599,25 @@ def abnormality_index(results, cfg, outdir):
     ix = IX.abnormality_index(
         fm["X"], fm["labels"], directions=fm["directions"], names=fm["names"],
         n_sd=cfg["index_sd"], side=cfg["index_side"],
-        missing=cfg["index_missing"], boot=cfg["n_boot_auc"])
+        missing=cfg["index_missing"], reduction=cfg["index_reduction"],
+        shrinkage=cfg["index_shrinkage"], boot=cfg["n_boot_auc"])
     print(IX.describe(fm, ix))
     print("  the band is built from the normal recordings and then applied to "
           "them, so the\n  specificity above is in-sample; the sensitivity is "
           "not, since no abnormal\n  recording enters the band. Nothing here "
           "is corrected for multiplicity.")
+    if cfg["index_reduction"] != "pc1" and cfg["index_poles"] != "stated":
+        print(f"  NOTE: reduction '{cfg['index_reduction']}' is directional and "
+              f"the poles are '{cfg['index_poles']}', which argues a direction "
+              f"for\n  Phi and Kemeny that METHODS does not state. Under a "
+              f"directional reduction those\n  poles carry the readout rather "
+              f"than only its sign, so say in the write-up that they\n  were "
+              f"fixed in advance -- they agree with this cohort's observed "
+              f"direction of effect.")
+    if cfg["index_features"]:
+        print(f"  NOTE: the index was built from {cfg['index_features']} only. "
+              f"Justify any dropped\n  endpoint by its own reported contrast, "
+              f"never by this composite improving.")
 
     IX.index_frame(fm, ix).to_csv(
         os.path.join(outdir, "abnormality_index.csv"), index=False)
@@ -612,7 +628,7 @@ def abnormality_index(results, cfg, outdir):
 
     results["abnormality_index"] = dict(
         ix, features=list(fm["keys"]), feature_names=list(fm["names"]),
-        features_missing=list(fm["missing"]), X=fm["X"])
+        features_missing=list(fm["missing"]), poles=fm["poles"], X=fm["X"])
     return results["abnormality_index"]
 
 
@@ -864,6 +880,41 @@ def build_parser() -> argparse.ArgumentParser:
                          "readout -- outside the healthy range in either "
                          "direction, and the only choice that does not depend "
                          "on PC1's sign), 'upper' or 'lower'.")
+    ap.add_argument("--index-reduction", choices=IX.REDUCTIONS, default="pc1",
+                    help="how the endpoint matrix is collapsed to one score. "
+                         "'pc1' (default) is the leading principal component, "
+                         "which maximises variance -- the direction two "
+                         "redundant endpoints share, not the one the label "
+                         "separates along. 'whitened' is "
+                         "d' inv(Sigma_0) (x - mu_0), the Gaussian likelihood "
+                         "ratio for a shift along the a-priori poles, which "
+                         "discounts a redundant endpoint instead of rewarding "
+                         "it. 'unit' is the poles alone. See "
+                         "docs/ABNORMALITY_INDEX_REDUCTION.md.")
+    ap.add_argument("--index-shrinkage", type=float, default=0.0,
+                    help="pull Sigma_0 toward its own diagonal by this much, "
+                         "in [0, 1], for the 'whitened' reduction (default 0). "
+                         "At n0 = 32 there are few observations per covariance "
+                         "parameter; fix this a priori, never against the "
+                         "contrast.")
+    ap.add_argument("--index-poles", choices=sorted(IX.POLE_SETS),
+                    default="stated",
+                    help="which pathological poles orient the index. 'stated' "
+                         "(default) uses only the directions METHODS states "
+                         "-- high WCLR-PP coupling, low FidgetyFind -- and "
+                         "lets Phi and Kemeny abstain. 'construct' also argues "
+                         "a +1 pole for Phi and Kemeny from their definitions; "
+                         "it is not in METHODS, it agrees with the direction "
+                         "of effect observed on this cohort, and under the "
+                         "directional reductions it carries the whole readout. "
+                         "Fix it before computing the readout and say which "
+                         "was used.")
+    ap.add_argument("--index-features", default=None, metavar="KEYS",
+                    help="comma-separated endpoint keys to build the index "
+                         "from (default: all of "
+                         + ",".join(f.key for f in IX.FEATURES) + "). Dropping "
+                         "one must be justified by that endpoint's own "
+                         "reported contrast, never by the composite improving.")
     ap.add_argument("--index-missing", choices=("impute", "drop"),
                     default="impute",
                     help="what to do with a recording an endpoint declined to "
@@ -916,6 +967,10 @@ def main(argv=None):
         "skip_abnormality_index": args.skip_abnormality_index,
         "index_sd": args.index_sd, "index_side": args.index_side,
         "index_missing": args.index_missing,
+        "index_reduction": args.index_reduction,
+        "index_shrinkage": args.index_shrinkage,
+        "index_poles": args.index_poles,
+        "index_features": args.index_features,
     }
     if not 0.0 <= cfg["fluency_omega"] <= 1.0:
         raise SystemExit(f"--fluency-omega must lie in [0, 1], got "

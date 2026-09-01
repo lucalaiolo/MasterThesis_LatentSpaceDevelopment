@@ -460,6 +460,17 @@ IX.index_frame(fm, ix)                  # the per-recording table
 Paste `colab_abnormality_index.py` as a single Colab cell to do exactly that
 against a finished `OUT_DIR`, table and figure included.
 
+**On the choice of reduction.** `PC1` maximises variance, which on this cohort
+is not the direction the label separates along: `Φ` and `𝒦` are two readings of
+one Viterbi path and correlate at `+0.77`, so `PC1` counts that shared
+information twice and discounts the constructs built independently of the model.
+[`docs/ABNORMALITY_INDEX_REDUCTION.md`](../docs/ABNORMALITY_INDEX_REDUCTION.md)
+sets out the alternative — the whitened a-priori direction
+`s = dᵀ Σ₀⁻¹ (x − μ₀)`, the Gaussian likelihood ratio for a shift along the
+stated pathological poles — why the omnidirectional Mahalanobis `D²` is *worse*
+than `PC1` here, and what changing the reduction does and does not buy. Read it
+before quoting a sensitivity from this block.
+
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and
 `similarity_matrix_shape.csv` for its two channels, `state_amplitude_profile.csv`,

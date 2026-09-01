@@ -1081,12 +1081,48 @@ def test_fidgetyfind_windows():
     q = FF.FFParams(window=L, stride=span, nu=0.2)
     feat = {"r": np.zeros((span, C)), "alpha": np.zeros((span, C)),
             "q": np.zeros((span, C)), "chains": FF.CHAIN_ORDER}
-    # hip chain gates on r <= tau_hip; make only 10% of the frames small
+    # The hip chain gates on r <= tau_hip. tau_m is the published ceiling on
+    # the *large*-movement rate, so the chain is assessable only when at least
+    # 1 - tau_m of the window's frames are small. Ten percent small voids it,
+    # under either reading of the constant.
     feat["r"][:, 0] = 100.0                          # far above tau_hip
-    feat["r"][:5, 0] = 0.0                           # 5/48 = 10% < 20%
+    feat["r"][:5, 0] = 0.0                           # 5/48 = 10% small
     E = FF.window_entropies(feat, q)["E"]
-    check("branch 1: below tau_m of small frames voids the chain",
+    check("branch 1: too few small frames voids the chain",
           np.isnan(E[0, 0]))
+    # Half small voids it too, and this is the polarity itself: the large-
+    # movement rate is 50%, over the published ceiling of 20%. A gate written
+    # as "small >= tau_m" scores this window instead of voiding it, which is
+    # the reference's condition with the event complemented but not the
+    # constant (proximal.py 106-109, commit 84e796f).
+    feat["r"][:span // 2, 0] = 0.0                   # 24/48 = 50% small
+    E = FF.window_entropies(feat, q)["E"]
+    check("branch 1: tau_m is a ceiling on the large-movement rate, not a "
+          "floor on the small one", np.isnan(E[0, 0]),
+          f"hip: 1 - tau_m = {1 - FF.TAU_M['hip']:.1f} of the frames must be "
+          f"small, not {FF.TAU_M['hip']:.1f}")
+    # At 1 - tau_m small it is assessable again: it scores 0.0 (nothing in the
+    # band), which is a measurement, not a void.
+    feat["r"][:, 0] = 100.0
+    feat["r"][:40, 0] = 0.0                          # 40/48 = 83% >= 80%
+    E = FF.window_entropies(feat, q)["E"]
+    check("branch 1: at least 1 - tau_m small frames is assessable",
+          E[0, 0] == 0.0)
+    # The same polarity on a distal chain, which gates on the parent's q with
+    # tau_m = 0.3, so it needs 70% of its frames small.
+    hand = FF.CHAIN_ORDER.index("R hand")
+    feat["r"][:, hand] = 0.0
+    feat["q"][:, hand] = 100.0                       # far above tau_hand
+    feat["q"][:span // 2, hand] = 0.0                # 50% small, under 70%
+    E = FF.window_entropies(feat, q)["E"]
+    check("branch 1: the distal chains carry the same polarity on q",
+          np.isnan(E[0, hand]),
+          f"hand: 1 - tau_m = {1 - FF.TAU_M['hand']:.1f}")
+    feat["q"][:40, hand] = 0.0                       # 83% small, over 70%
+    E = FF.window_entropies(feat, q)["E"]
+    check("branch 1: a distal chain over 1 - tau_m is assessable",
+          E[0, hand] == 0.0)
+    feat["q"][:, hand] = 0.0                         # leave the table clean
     feat["r"][:, 0] = 0.0                            # all small, none in band
     E = FF.window_entropies(feat, q)["E"]
     check("branch 2: assessable but under nu in the band scores exactly 0",

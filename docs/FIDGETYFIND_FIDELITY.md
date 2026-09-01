@@ -103,29 +103,44 @@ the denominator of every rate — the in-band frames are
 `B_i = {t : r_min ≤ r(t) ≤ r_max}`, and
 
 ```
-E_c(i) = NaN                    if |{t : g_c(t) ≤ τ_m1}| / (L−1) < τ_m
+E_c(i) = NaN                    if |{t : g_c(t) > τ_m1}| / (L−1) > τ_m
 E_c(i) = 0                      if |B_i| / (L−1) < ν
 E_c(i) = Σ(−p_m log p_m)/log B  otherwise
 ```
 
 over `B = 8` equal bins of `(−π, π]`, with the amplitude gate
 
-| chain class | `g_c` | `τ_m1` | `τ_m` |
-|---|---|---|---|
-| hip (knee against hip) | `r` | `τ_hip` | 0.2 |
-| hand (wrist against elbow) | `q_b` | `τ_hand` | 0.3 |
-| foot (ankle against knee) | `q_b` | `τ_foot` | 0.1 |
+| chain class | `g_c` | `τ_m1` | `τ_m`, the ceiling on the large-movement rate | equivalently, small-movement floor `1 − τ_m` |
+|---|---|---|---|---|
+| hip (knee against hip) | `r` | `τ_hip` | 0.2 | 0.8 |
+| hand (wrist against elbow) | `q_b` | `τ_hand` | 0.3 | 0.7 |
+| foot (ankle against knee) | `q_b` | `τ_foot` | 0.1 | 0.9 |
 
-The first branch marks the chain **unassessable** when too few frames are small
-in amplitude, fidgety movement being small in scale. The second branch scores
-**zero** when too few frames fall in the band — that zero is a *measurement*, not
-a failure, and the distinction from `NaN` is load-bearing. Otherwise `E_c(i)` is
-the normalised entropy of the in-band directions: near one when they pointed
-everywhere, near zero when they pointed one way.
+The first branch marks the chain **unassessable** when too many frames are
+*large* in amplitude, fidgety movement being small in scale. `τ_m` is a ceiling
+on the large-movement rate — the released code's own `large_motion_rate_threshold`
+and `large_parent_motion_rate_threshold` — so the equivalent floor on the
+small-movement rate is `1 − τ_m`. The implementation tests that small-movement
+form, because a non-finite `g_c` must count as *not small* and so push toward
+voiding; testing the large-movement form would count it as *not large* and push
+toward keeping. Complementing the event without also complementing the constant
+puts the small-movement floor at `τ_m = 0.2` where the reference's is
+`1 − τ_m = 0.8` — roughly four times more permissive on the hips, and it scores
+windows the reference voids. `test_fidgetyfind_windows` pins the direction.
+
+The second branch scores **zero** when too few frames fall in the band — that
+zero is a *measurement*, not a failure, and the distinction from `NaN` is
+load-bearing. Otherwise `E_c(i)` is the normalised entropy of the in-band
+directions: near one when they pointed everywhere, near zero when they pointed
+one way.
 
 The paper prints the distal inequality in the opposite direction to the proximal
 one, which would keep only windows dominated by *large* movements. That is
-treated as a misprint and the proximal direction is applied to every chain.
+treated as a misprint and the proximal direction is applied to every chain. The
+**released code gates both paths in the same direction** — void the window when
+the large-movement rate exceeds `τ_m` (`proximal.py` 106–109,
+`distal.py` 105–107, commit `84e796f`, verified against the clone) — so the
+correction is to the paper's printed inequality alone, not to the code's.
 
 ### 2.3 Per recording
 
@@ -535,7 +550,8 @@ python test_methods.py          # 136 checks; the FidgetyFind ones are below
 | entropy is 0 / `log2/log8` / 1 for one / two / uniform directions | `test_fidgetyfind_entropy` |
 | the bins are half-open on the left: `−π` and `+π` share one bin; out-of-range angles fold in | `test_fidgetyfind_entropy` |
 | rotation, scale and translation invariance ([§2.1](#21-per-frame)) | `test_fidgetyfind_invariance` |
-| branch 1 (too few small frames → `NaN`), branch 2 (under `ν` → exactly `0.0`), branch 3 (spread over eight bins → 1) | `test_fidgetyfind_windows` |
+| branch 1 (large-movement rate over `τ_m` → `NaN`, including the polarity: half a window small still voids it) | `test_fidgetyfind_windows` |
+| branch 2 (under `ν` → exactly `0.0`), branch 3 (spread over eight bins → 1) | `test_fidgetyfind_windows` |
 | the rates divide by `L − 1` | `test_fidgetyfind_windows` |
 | `s_σ` is the per-side max; `S_σ` is `Q₉₀`; `FF` is the smaller side | `test_fidgetyfind_reduction` |
 | the quarter-of-windows rule declines a recording, and `≥` is the comparison | `test_fidgetyfind_reduction` |

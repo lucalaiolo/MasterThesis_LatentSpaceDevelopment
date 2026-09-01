@@ -276,16 +276,20 @@ angle, which is what eight bins over `(−π, π]` are consistent with.
 rate), with `B_i = {t : r_min ≤ r(t) ≤ r_max}`:
 
 ```
-E_c(i) = NaN   if  |{t : g_c(t) ≤ τ_m1}| / (L−1) < τ_m     unassessable
+E_c(i) = NaN   if  |{t : g_c(t) > τ_m1}| / (L−1) > τ_m     unassessable
 E_c(i) = 0     if  |B_i| / (L−1) < ν                       assessable, nothing found
 E_c(i) = Σ(−p log p) / log B   otherwise, over the directions {α(t) : t ∈ B_i}
 ```
 
 with `(g_c, τ_m1, τ_m) = (r, τ_hip, 0.2)` on the hip chains, `(q_b, τ_hand, 0.3)`
 on the hands and `(q_b, τ_foot, 0.1)` on the feet, and `B = 8` equal bins of
-`(−π, π]`. The paper prints the distal inequality the other way round, which
-would keep only windows dominated by large movements; that is treated as a
-misprint and the proximal direction is applied to every chain.
+`(−π, π]`. `τ_m` is a **ceiling on the large-movement rate**, so the chain is
+assessable when at least `1 − τ_m` of a window's frames are small: 80 % on the
+hips, 70 % on the hands, 90 % on the feet. The paper prints the distal
+inequality the other way round, which would keep only windows dominated by large
+movements; that is treated as a misprint, and the released code gates both paths
+in the proximal direction (`proximal.py` 106–109, `distal.py` 105–107), which is
+what is implemented.
 
 **Per recording**, three levels, mirroring how a rater judges a recording —
 fidgety movement counts if any joint on a side shows it, if it recurs through

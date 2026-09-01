@@ -47,7 +47,10 @@ so ``tau_hand`` and ``tau_foot`` are the published values applied to a
 different quantity. The paper prints the distal gate inequality in the opposite
 direction to the proximal one, which would keep only windows dominated by large
 movements; that is treated as a misprint and the proximal direction is applied
-to every chain.
+to every chain. The released code gates both paths the same way -- void the
+window when the *large*-movement rate exceeds ``tau_m`` (``proximal.py`` lines
+106-109 and ``distal.py`` lines 105-107 at commit ``84e796f``) -- and that is
+the direction implemented here.
 
 The window score
 ----------------
@@ -59,8 +62,8 @@ those carrying a small movement::
 
 and the score of chain ``c`` in window ``i`` is
 
-* ``NaN`` when ``|{t : g_c(t) <= tau_m1}| / (L-1) < tau_m`` -- too few frames
-  were small in amplitude for the window to be assessable at all, fidgety
+* ``NaN`` when ``|{t : g_c(t) > tau_m1}| / (L-1) > tau_m`` -- too many frames
+  were large in amplitude for the window to be assessable at all, fidgety
   movement being small in scale;
 * ``0`` when ``|B_i| / (L-1) < nu`` -- the window was assessable and too few of
   its frames fell in the band. This is a *score*, not a failure;
@@ -70,7 +73,12 @@ and the score of chain ``c`` in window ``i`` is
 
 The amplitude gate ``(g_c, tau_m1, tau_m)`` is ``(r, tau_hip, 0.2)`` on the hip
 chains, ``(q_b, tau_hand, 0.3)`` on the hand chains and ``(q_b, tau_foot, 0.1)``
-on the foot chains.
+on the foot chains. ``tau_m`` is a *ceiling on the large-movement rate*, which
+is the published quantity; the equivalent floor on the small-movement rate is
+``1 - tau_m``, so a hip chain needs 80 percent of a window's frames small, a
+hand 70 percent and a foot 90 percent. The implementation tests that
+small-movement form because a non-finite ``g_c`` must count as *not small* and
+so push toward voiding, which testing the large-movement form would reverse.
 
 The reduction to one number per recording
 -----------------------------------------
@@ -154,9 +162,12 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "FF_dist": ("R hand", "L hand", "R foot", "L foot"),
 }
 
-# tau_m^c: the share of a window's frames that must be small in amplitude for
-# the chain to be assessable there. Fixed by the published method per chain
-# class, so it is not a tunable of FFParams.
+# tau_m^c: the published *ceiling on the large-movement rate* -- the share of a
+# window's frames that may exceed tau_m1 before the chain stops being assessable
+# there. These are the released code's own rate thresholds, all three of them
+# ceilings on the rate of large movements, so a window is assessable when at
+# least 1 - tau_m of its frames are small, not when tau_m of them are. Fixed by
+# the published method per chain class, so it is not a tunable of FFParams.
 TAU_M: dict[str, float] = {"hip": 0.2, "hand": 0.3, "foot": 0.1}
 
 # The reduction's two fixed constants: the percentile that summarises a side,
@@ -199,6 +210,10 @@ class FFParams:
         displacement over the parent limb -- and ``"q"`` on the hand and foot
         chains, the *parent* joint's displacement over the trunk: a wrist
         carried by a swinging elbow is transport, not fidget.
+
+        ``tau_m`` is the ceiling on the *large*-movement rate, so the chain is
+        assessable in a window when at least ``1 - tau_m`` of its frames are
+        small. See :data:`TAU_M`.
         """
         cls = CHAIN_CLASS[chain]
         tau_m1 = {"hip": self.tau_hip, "hand": self.tau_hand,
@@ -324,8 +339,13 @@ def window_entropies(feat: dict, params: FFParams = PUBLISHED) -> dict:
                 rr, aa = r[sl, ci], alpha[sl, ci]
                 signal, tau_m1, tau_m = params.gate(name)
                 g = rr if signal == "r" else q[sl, ci]
+                # tau_m is a ceiling on the *large*-movement rate, so the chain
+                # is assessable only when at least 1 - tau_m of the window's
+                # frames are small. Counting the small ones rather than the
+                # large ones keeps a non-finite g on the voiding side, which is
+                # where motion_features says it belongs.
                 small = np.count_nonzero(np.isfinite(g) & (g <= tau_m1)) / span
-                if small < tau_m:
+                if small < 1.0 - tau_m:
                     continue                        # unassessable: stays NaN
                 in_band = (np.isfinite(rr) & (rr >= params.r_min)
                            & (rr <= params.r_max))

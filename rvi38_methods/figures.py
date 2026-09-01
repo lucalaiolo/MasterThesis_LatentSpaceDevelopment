@@ -704,6 +704,66 @@ def fidgetyfind_panels(results, outdir):
     return made
 
 
+# ---------------------------------------------------------------------------
+# the composite readout
+# ---------------------------------------------------------------------------
+def fig_abnormality_index(res, results, outdir):
+    """The abnormality index per recording, against the normal cohort's band.
+
+    Left: every recording's ``PC1`` of the four standardised endpoints, sorted,
+    with the normative band shaded -- outside it is the flag. Right: the
+    loadings, which say what the index is made of and in which direction each
+    endpoint pushes it.
+    """
+    ai = results.get("abnormality_index")
+    if not ai:
+        return None
+    pc1 = np.asarray(ai["pc1"], float)
+    y = np.asarray(results["labels"], int)
+    b, r = ai["band"], ai["readout"]
+    names = list(ai.get("feature_names", ai.get("names", [])))
+    w = np.asarray(ai["loadings"], float)
+
+    fig, (ax, ax2) = plt.subplots(
+        1, 2, figsize=(8.6, 3.6), gridspec_kw={"width_ratios": [2.5, 1.0]})
+    o = np.argsort(np.where(np.isfinite(pc1), pc1, -np.inf))
+    x = np.arange(len(pc1))
+    ax.axhspan(b["lo"], b["hi"], color=GREY, alpha=.16, lw=0,
+               label=f"normal cohort $\\pm${b['n_sd']:g} SD")
+    ax.axhline(b["mu0"], color=GREY, lw=.9, ls="--")
+    for side in ("lo", "hi"):
+        ax.axhline(b[side], color="k", lw=.8)
+    ax.scatter(x, pc1[o], s=26, zorder=3,
+               c=[POS if y[i] else NEG for i in o],
+               edgecolors="k", linewidths=.4)
+    ax.set_xlabel("recording (sorted by index)")
+    ax.set_ylabel("abnormality index (PC1)")
+    ax.plot([], [], "o", color=POS, label=f"abnormal (n={int(y.sum())})")
+    ax.plot([], [], "o", color=NEG, label=f"normal (n={int((1 - y).sum())})")
+    # the points are sorted, so the upper left is free of markers; the box
+    # is opaque so the band edges do not read through the legend text.
+    ax.legend(fontsize=7, loc="upper left", frameon=True, framealpha=.95,
+              edgecolor="none")
+    ax.set_title(f"Abnormality index against the normative band\n"
+                 f"sensitivity {r['sensitivity']:.2f} "
+                 f"({r['tp']}/{r['tp'] + r['fn']}), specificity "
+                 f"{r['specificity']:.2f} ({r['tn']}/{r['tn'] + r['fp']}), "
+                 f"Fisher $p$ = {r['fisher_p']:.3g}", loc="left", fontsize=9.5)
+
+    # one colour: red/blue already mean abnormal/normal in the left panel,
+    # and a loading's direction is carried by which side of zero it sits on.
+    ax2.barh(range(len(w)), w, color=BLUE, height=.62)
+    ax2.axvline(0, color="k", lw=.7)
+    ax2.set_yticks(range(len(w)))
+    ax2.set_yticklabels(names, fontsize=7.5)
+    ax2.invert_yaxis()
+    ax2.set_xlabel("PC1 loading")
+    ax2.set_title(f"{ai['pc1_explained']:.0%} of the standardised\nvariance; "
+                  f"higher = more abnormal", loc="left", fontsize=9)
+    fig.tight_layout()
+    return _save(fig, outdir, "abnormality_index")
+
+
 def _safe_name(name):
     keep = "-_.() "
     return "".join(c if (c.isalnum() or c in keep) else "_"
@@ -714,7 +774,7 @@ ALL = [fig_state_signature, fig_similarity, fig_similarity_channels,
        fig_fluency_per_subject,
        fig_fluency_by_dwell, fig_degenerate, fig_mfpt,
        fig_companions, fig_kemeny_per_subject, fig_shrinkage,
-       fig_auc, fig_correlations,
+       fig_auc, fig_abnormality_index, fig_correlations,
        fig_wclrpp_pairs, fig_wclrpp_summary,
        fig_fidgetyfind_subject, fig_fidgetyfind_chains,
        fig_fidgetyfind_windows,

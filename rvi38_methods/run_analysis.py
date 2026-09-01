@@ -32,6 +32,7 @@ import a57_graph as G        # noqa: E402
 import a8_movement as MV     # noqa: E402
 import a9_wclrpp as WP       # noqa: E402
 import a10_fidgetyfind as FF  # noqa: E402
+import a11_index as IX       # noqa: E402
 import build_pose            # noqa: E402
 import load_models as L      # noqa: E402
 
@@ -564,6 +565,58 @@ def fidgetyfind(results, pose, vids, labels, geom, cfg, outdir):
 
 
 # ---------------------------------------------------------------------------
+# the composite readout: PC1 of the endpoints against a normative band
+# ---------------------------------------------------------------------------
+def abnormality_index(results, cfg, outdir):
+    """The four endpoints reduced to one index, cut at the healthy cohort's SD.
+
+    This is the screening readout, and the only place in the run where the four
+    constructs are combined rather than reported side by side. The four
+    per-recording scalars are standardised, PCA gives ``PC1`` as a continuous
+    *abnormality index*, and a recording is flagged when that index falls
+    outside ``mu0 +- 2 sd0`` of the **normal** recordings' own distribution.
+
+    Nothing is fitted against the label: the standardisation and the component
+    never see it, PC1's sign is fixed from the endpoints' stated pathological
+    poles, and the label enters only in choosing which recordings define the
+    normative band. With six positives that is the whole point -- a classifier
+    with free parameters has more freedom than six events can constrain, and
+    its in-sample accuracy would say nothing.
+
+    Populates ``results['abnormality_index']`` and writes
+    ``<outdir>/abnormality_index.csv`` and ``<outdir>/feature_matrix.npz``.
+    """
+    section("Abnormality index: PC1 of the endpoints, against a normative band")
+    fm = IX.feature_matrix(results)
+    if fm["X"].shape[1] < 2:
+        print(f"  only {fm['X'].shape[1]} endpoint(s) available "
+              f"({', '.join(fm['missing']) or 'none missing'}); the composite "
+              f"index needs at least two, so it is not computed.")
+        return None
+    ix = IX.abnormality_index(
+        fm["X"], fm["labels"], directions=fm["directions"], names=fm["names"],
+        n_sd=cfg["index_sd"], side=cfg["index_side"],
+        missing=cfg["index_missing"], boot=cfg["n_boot_auc"])
+    print(IX.describe(fm, ix))
+    print("  the band is built from the normal recordings and then applied to "
+          "them, so the\n  specificity above is in-sample; the sensitivity is "
+          "not, since no abnormal\n  recording enters the band. Nothing here "
+          "is corrected for multiplicity.")
+
+    IX.index_frame(fm, ix).to_csv(
+        os.path.join(outdir, "abnormality_index.csv"), index=False)
+    IX.save_feature_matrix(fm, os.path.join(outdir, "feature_matrix.npz"))
+    print(f"  wrote abnormality_index.csv and feature_matrix.npz "
+          f"(the {ix['n']}x{len(fm['keys'])} matrix, so the index can be "
+          f"recomputed without rerunning the pipeline)")
+
+    results["abnormality_index"] = dict(
+        ix, features=list(fm["keys"]), feature_names=list(fm["names"]),
+        features_missing=list(fm["missing"]), X=fm["X"])
+    return results["abnormality_index"]
+
+
+# ---------------------------------------------------------------------------
 # correlation analysis: every endpoint against the three nuisances
 # ---------------------------------------------------------------------------
 def correlation_analysis(results, primary, cfg):
@@ -594,6 +647,9 @@ def correlation_analysis(results, primary, cfg):
                       ("FF_dist", "FidgetyFind limbs")):
             if g in ff:
                 endpoints[nm] = np.asarray(ff[g], float)
+    ai = results.get("abnormality_index")
+    if ai:
+        endpoints["abnormality index"] = np.asarray(ai["pc1"], float)
 
     covariates = {
         "occupancy entropy": np.asarray(cl["occupancy_entropy"], float),
@@ -626,7 +682,8 @@ def correlation_analysis(results, primary, cfg):
 RESERVED_KEYS = {
     "config", "geometry", "data_report", "labels", "video_names", "frames",
     "primary", "models_loaded", "stream", "checks", "clinical", "wclrpp",
-    "fidgetyfind", "replication", "correlations"}
+    "fidgetyfind", "replication", "correlations",
+    "abnormality_index"}
 
 LEGACY_DEFAULTS = (("AR-HMM", "arhmm_rvi38_stream_delta.pkl"),
                    ("Gaussian HMM", "hmm_rvi38_stream_delta.pkl"))
@@ -792,6 +849,28 @@ def build_parser() -> argparse.ArgumentParser:
                          "fidgety-movement detector, Morais et al. 2023). It "
                          "reads the keypoints only and is fast; skipping it "
                          "loses the external comparison construct.")
+    ap.add_argument("--skip-abnormality-index", action="store_true",
+                    help="skip the composite readout: PC1 of the four "
+                         "standardised endpoints, flagged against the normal "
+                         "cohort's own +/-2 SD band. It needs at least two of "
+                         "the four endpoints, so it is also skipped when both "
+                         "--skip-raw-kinematics and --skip-fidgetyfind are on.")
+    ap.add_argument("--index-sd", type=float, default=2.0,
+                    help="half-width of the normative band, in SDs of the "
+                         "normal recordings' index (default 2.0).")
+    ap.add_argument("--index-side", choices=("two", "upper", "lower"),
+                    default="two",
+                    help="which tail counts as abnormal: 'two' (the reported "
+                         "readout -- outside the healthy range in either "
+                         "direction, and the only choice that does not depend "
+                         "on PC1's sign), 'upper' or 'lower'.")
+    ap.add_argument("--index-missing", choices=("impute", "drop"),
+                    default="impute",
+                    help="what to do with a recording an endpoint declined to "
+                         "score: 'impute' keeps it and sets that entry to its "
+                         "column mean (z = 0, no information and no leverage); "
+                         "'drop' removes the recording from the index "
+                         "entirely, leaving it unscored.")
     ap.add_argument("--ff-panels", action="store_true",
                     help="also write one FidgetyFind timeline panel per "
                          "recording under figures/fidgetyfind/.")
@@ -834,6 +913,9 @@ def main(argv=None):
         "fluency_omega": args.fluency_omega,
         "fluency_shape_state_term": not args.fluency_drop_state_term,
         "skip_raw_kinematics": args.skip_raw_kinematics,
+        "skip_abnormality_index": args.skip_abnormality_index,
+        "index_sd": args.index_sd, "index_side": args.index_side,
+        "index_missing": args.index_missing,
     }
     if not 0.0 <= cfg["fluency_omega"] <= 1.0:
         raise SystemExit(f"--fluency-omega must lie in [0, 1], got "
@@ -995,6 +1077,17 @@ def main(argv=None):
     else:
         fidgetyfind(results, pose, vids, labels, geom, cfg, args.outdir)
 
+    # ---- the composite readout: the four endpoints reduced to one index and
+    # cut at the normal cohort's own +/-2 SD band. The screening statement the
+    # run ends on; the per-endpoint contrasts above are unaffected by it. It
+    # runs before the correlation analysis so the nuisance table covers it too.
+    if cfg["skip_abnormality_index"]:
+        section("Abnormality index: skipped (--skip-abnormality-index)")
+        print("  the composite screening readout is omitted; every "
+              "per-endpoint contrast above is unaffected.")
+    else:
+        abnormality_index(results, cfg, args.outdir)
+
     # ---- correlation analysis: the nuisances, reported not adjusted for ----
     correlation_analysis(results, primary, cfg)
 
@@ -1031,6 +1124,11 @@ def main(argv=None):
                      ("FF_dist", "... on the four limb chains alone?")):
             if g in ff.get("tests", {}):
                 rows.append((q, g, ff["tests"][g]))
+    ai = results.get("abnormality_index")
+    if ai:
+        rows.append(("Does the composite abnormality index separate the "
+                     "groups?", "PC1 of the four standardised endpoints",
+                     ai["group"]))
     for q, meth, r in rows:
         pv = r.get("p")
         pstr = ("n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}")
@@ -1053,6 +1151,21 @@ def main(argv=None):
           "partialled out of a\n  contrast, and no endpoint has to clear an "
           "admission gate to be reported; the\n  nuisances are reported as "
           "correlations, where the label enters no fit.")
+    if ai:
+        rd, bd = ai["readout"], ai["band"]
+        print(f"\n  Screening readout (the binary one): a recording is "
+              f"flagged when the composite\n  index falls outside the normal "
+              f"cohort's {bd['n_sd']:g} SD band. That gives sensitivity "
+              f"{rd['sensitivity']:.3f}\n  ({rd['tp']}/{rd['tp'] + rd['fn']}) "
+              f"and specificity {rd['specificity']:.3f} "
+              f"({rd['tn']}/{rd['tn'] + rd['fp']}), Fisher exact p = "
+              f"{rd['fisher_p']:.4g}.\n  The band is built from the normal "
+              f"recordings, so that specificity is in-sample"
+              + (f" ({ai['loo']['specificity']:.3f} leave-one-out)"
+                 if ai.get("loo") else "")
+              + ";\n  the sensitivity is not, since no abnormal recording "
+              "enters the band. No parameter\n  anywhere in the index is "
+              "fitted against the label.")
 
     # ---- outputs ----
     section("Outputs")

@@ -9,6 +9,12 @@ detector of the fidgety movements the GMA label is about: a construct nobody
 here designed, computed from the keypoints alone, against which the
 model-based ones can be read on the identical cohort.
 
+The run ends on the **abnormality index** (`a11_index.py`), the one place the
+four endpoints are combined rather than reported side by side: `PC1` of the
+standardised `38 × 4` matrix, cut at two standard deviations of the *normal*
+recordings' own distribution. That is the screening readout — a binary flag per
+video — and no parameter in it is fitted against the label.
+
 The metastable decomposition (PCCA+, implied timescales, the kinematic
 dendrogram and their agreement statistics) has been removed. The earlier
 cosine-Gram co-movement construct has been superseded by WCLR-PP
@@ -28,11 +34,13 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `a8_movement.py` | raw kinematics: per-state velocity profiles |
 | `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, circular-shift surrogate null |
 | `a10_fidgetyfind.py` | FidgetyFind (Morais et al., 2023, as adapted in METHODS §FidgetyFind): small-amplitude displacement direction entropy per window on six limb chains, reduced to `FF`, `FF_hip`, `FF_dist` |
+| `a11_index.py` | the composite readout: the four endpoints standardised, reduced to `PC1` as a continuous abnormality index, and cut at the normal cohort's own ±2 SD band |
 | `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
-| `test_methods.py` | 136 checks with a definite right answer (§12.4 style) |
+| `test_methods.py` | 212 checks with a definite right answer (§12.4 style) |
 | `make_synthetic.py` | synthetic cohort with planted structure, for smoke tests |
+| `colab_abnormality_index.py` | one Colab cell: caches a finished run's 38×4 endpoint matrix and rescores the index from it, without rerunning anything |
 
 ## Run
 
@@ -68,6 +76,7 @@ at all the two legacy default filenames are tried.
 
 `run_report` runs the five constructs the results chapter reports — fluency,
 the fluency curve, the Kemeny mixing time, WCLR-PP synchrony and FidgetyFind —
+plus the abnormality index that combines them,
 with the settings that produce the complete picture (the fluency curve and the
 per-recording FidgetyFind panels are on), and returns the results, a headline
 summary and every figure path:
@@ -361,11 +370,102 @@ timeline panel per recording under `figures/fidgetyfind/`. Outputs:
 scorable fractions, and each chain's assessable fraction) and the three cohort
 figures `fidgetyfind_subject`, `fidgetyfind_chains` and `fidgetyfind_windows`.
 
+### The abnormality index: the composite screening readout (`a11_index.py`)
+
+Every construct above ends in one scalar per recording, and each is contrasted
+with the group on its own. The abnormality index is the **composite readout**:
+the four endpoints — fluency `Φ`, the Kemeny constant `𝒦`, whole-body
+synchrony `mean F` and FidgetyFind `FF` — put in one `38 × 4` matrix,
+standardised, reduced by PCA to `PC1` as a continuous *abnormality index*, and
+turned into a binary flag by a **normative reference range** rather than by a
+fitted classifier.
+
+Why a reference range and not a classifier. With `n1 = 6` positives, a model
+with free parameters fitted against the label — logistic regression, a tree, an
+SVM, a tuned cut-off — has more freedom than the positives can constrain, and
+its in-sample accuracy says almost nothing. The normative approach fits nothing
+to the outcome: the healthy cohort defines a range and a recording is flagged
+when it falls outside it. That is a screening instrument — "this infant is
+unlike healthy development" — not a prediction of the label.
+
+The procedure, in the order it runs:
+
+1. **Matrix.** `X` is `N × p`, one row per recording, one column per endpoint.
+   An endpoint whose block was skipped is named as missing and left out rather
+   than filled in; the index needs at least two.
+2. **Standardise.** `Z = (X − mean)/sd` column-wise over the whole cohort, the
+   label not consulted. The four endpoints live on incomparable scales, so PCA
+   on the raw matrix would be PCA on whichever column happens to have the
+   largest variance.
+3. **PCA.** The SVD of the centred `Z`; `PC1 = Z w₁` with `w₁` the leading
+   right singular vector. Its explained-variance ratio says how much of the
+   four-endpoint structure one number keeps.
+4. **Orient.** A principal component's sign is arbitrary. It is fixed from the
+   *stated* pathological poles of the endpoints — `sign(w₁ · d)` — so a larger
+   index means more abnormal. Only the two endpoints whose pole METHODS states
+   get a vote (high WCLR-PP coupling is the cramped-synchronised pole; high
+   FidgetyFind is normal); `Φ` and `𝒦`, which have no stated direction,
+   abstain. **No label enters this**, and the reported readout below does not
+   depend on it at all.
+5. **Normative band.** `μ₀` and `σ₀` are the mean and sample SD of the index
+   over the `label == 0` recordings alone — the whole of what the label is used
+   for. The band is `μ₀ ± 2σ₀`.
+6. **Flag.** `1` when the index falls strictly outside the band, `0` inside.
+   Two-sided by default — "unlike the healthy distribution", in either
+   direction — which is also what makes the readout invariant to step 4.
+
+**Read the specificity as in-sample.** The band is built from the normal
+recordings and then applied to them, so the specificity describes the fit
+rather than estimating out-of-sample specificity; the run therefore also
+reports a **leave-one-out specificity**, each normal recording scored against a
+band built from the other 31. The **sensitivity needs no such correction**: no
+abnormal recording enters the band, so it is already out-of-sample. The
+standardisation and the PCA do see all `N` rows, which is transductive but
+label-free.
+
+The index is also reported as one more continuous endpoint, through the same
+exact Mann-Whitney contrast as the four it is built from, and its `2 × 2` table
+carries Fisher's exact p. Nothing is corrected for multiplicity, as everywhere
+else here.
+
+A recording an endpoint declined to score (a `NaN` from FidgetyFind) is kept
+with that entry set to its column mean, `z = 0` — the value that adds no
+information and no leverage — and the count is printed; `--index-missing drop`
+removes the recording from the index instead, leaving it unscored.
+`--index-sd` sets the band width (default `2.0`), `--index-side
+{two,upper,lower}` which tail counts (default `two`), and
+`--skip-abnormality-index` omits the block.
+
+Outputs: `abnormality_index.csv` (per recording: the four raw endpoints, their
+z-scores, `PC1`, the index in SDs of the normal cohort, and the flag),
+`feature_matrix.npz` (the cached `38 × 4` matrix) and the `abnormality_index`
+figure.
+
+**Rescoring without rerunning.** `feature_matrix.npz` is the point of the
+cache: the pipeline takes half an hour, the index takes a second, so the band
+width and the missing-value policy can be varied as often as you like.
+
+```python
+import a11_index as IX
+
+fm = IX.feature_matrix("rvi38_out")     # or the results dict, or results.json
+IX.save_feature_matrix(fm, "rvi38_out/feature_matrix.npz")
+
+ix = IX.abnormality_index(fm["X"], fm["labels"], directions=fm["directions"],
+                          names=fm["names"], n_sd=2.0)
+print(IX.describe(fm, ix))
+IX.index_frame(fm, ix)                  # the per-recording table
+```
+
+Paste `colab_abnormality_index.py` as a single Colab cell to do exactly that
+against a finished `OUT_DIR`, table and figure included.
+
 Outputs: `results.json`, `per_subject.csv`, `similarity_matrix.csv` (the
 combined `S`) with `similarity_matrix_magnitude.csv` and
 `similarity_matrix_shape.csv` for its two channels, `state_amplitude_profile.csv`,
 `state_shape_profile.csv` (per state and free joint: anisotropy `ρ`, principal
-axis `θ`, and the `(u₁,u₂)` coordinate), `run.log`, and one figure pair
+axis `θ`, and the `(u₁,u₂)` coordinate), `abnormality_index.csv`,
+`feature_matrix.npz`, `run.log`, and one figure pair
 (PNG + PDF) per panel, including `wclrpp_pairs` (the six per-limb-pair panels)
 and `wclrpp_summary` (the per-infant aggregation).
 

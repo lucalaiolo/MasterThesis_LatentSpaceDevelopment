@@ -20,6 +20,10 @@ Five constructs, in the order they are reported:
 5. **FidgetyFind** -- the published detector (Morais et al., 2023) of the
    fidgety movements the GMA label is about, computed from the keypoints alone.
    It is the external yardstick the four constructs above are read against.
+6. **The abnormality index** -- the four endpoints standardised, reduced to
+   ``PC1``, and cut at two SDs of the *normal* recordings' own distribution.
+   The composite screening readout, and the only place the constructs are
+   combined rather than reported side by side.
 
 Everything is computed by :mod:`run_analysis`; this module chooses the settings
 that produce the full picture (the fluency curve and the per-recording
@@ -61,6 +65,7 @@ FIGURE_GROUPS: dict[str, tuple[str, ...]] = {
     "synchrony": ("wclrpp_pairs", "wclrpp_summary"),
     "fidgetyfind": ("fidgetyfind_subject", "fidgetyfind_chains",
                     "fidgetyfind_windows", "fidgetyfind/"),
+    "abnormality_index": ("abnormality_index",),
     "clinical": ("auc_effect_sizes", "correlations",
                  "state_velocity_regions", "state_velocity_lateral"),
 }
@@ -250,6 +255,38 @@ def summarise(results: dict, outdir: str) -> dict:
     else:
         out["fidgetyfind"] = {"skipped": True}
 
+    # 6. the composite readout ----------------------------------------------
+    ai = results.get("abnormality_index")
+    if ai:
+        r, b = ai.get("readout", {}), ai.get("band", {})
+        out["abnormality_index"] = {
+            "features": list(ai.get("feature_names", [])),
+            "features_missing": list(ai.get("features_missing", [])),
+            "pc1_explained": _f(ai.get("pc1_explained")),
+            "loadings": dict(zip(ai.get("feature_names", []),
+                                 [_f(v) for v in ai.get("loadings", [])])),
+            "orientation": (ai.get("orientation") or {}).get("method", ""),
+            "band": {"mu0": _f(b.get("mu0")), "sd0": _f(b.get("sd0")),
+                     "n_sd": _f(b.get("n_sd")), "lo": _f(b.get("lo")),
+                     "hi": _f(b.get("hi")), "side": b.get("side", ""),
+                     "n_normal": int(b.get("n_normal", 0))},
+            "readout": {k: (_f(r.get(k)) if isinstance(r.get(k), float)
+                            else r.get(k))
+                        for k in ("tp", "fp", "fn", "tn", "sensitivity",
+                                  "specificity", "ppv", "npv", "accuracy",
+                                  "balanced_accuracy", "youden_j", "fisher_p",
+                                  "n_flagged", "n")},
+            "loo_specificity": _f((ai.get("loo") or {}).get("specificity")),
+            "n_scored": int(ai.get("n_scored", 0)),
+            "n_imputed": int(ai.get("n_imputed", 0)),
+            "missing_policy": ai.get("missing_policy", ""),
+            "group": _auc_row(ai.get("group")),
+            "note": ("no parameter is fitted against the label: the band is "
+                     "the normal cohort's own spread, so the specificity is "
+                     "in-sample and the sensitivity is not")}
+    else:
+        out["abnormality_index"] = {"skipped": True}
+
     out["correlations"] = results.get("correlations", {})
     out["checks"] = results.get("checks", {})
     return out
@@ -423,6 +460,41 @@ def summary_markdown(s: dict) -> str:
                   f"{_fmt(r['assessable'], 2)} |"]
         L += [""]
 
+    ai = s.get("abnormality_index") or {}
+    L += ["## 6. Abnormality index (composite screening readout)", ""]
+    if ai.get("skipped"):
+        L += ["- skipped", ""]
+    else:
+        b, r = ai["band"], ai["readout"]
+        g = ai.get("group", {})
+        ci = g.get("auc_ci", [np.nan, np.nan])
+        L += [f"- `PC1` of {len(ai['features'])} standardised endpoints "
+              f"({', '.join(ai['features'])}), keeping "
+              f"{_fmt(ai['pc1_explained'] * 100, 1)}% of their variance"
+              + (f"; not available, so not in the index: "
+                 f"{', '.join(ai['features_missing'])}"
+                 if ai.get("features_missing") else ""),
+              "- loadings: " + ", ".join(f"{k} {_fmt(v, 2)}"
+                                         for k, v in ai["loadings"].items())
+              + f" (sign fixed by {ai['orientation']}; higher = more abnormal)",
+              f"- normative band from the {b['n_normal']} normal recordings: "
+              f"{_fmt(b['mu0'])} +- {_fmt(b['n_sd'], 0)} x {_fmt(b['sd0'])} = "
+              f"[{_fmt(b['lo'])}, {_fmt(b['hi'])}], {b['side']}-sided",
+              f"- **flagged {r['n_flagged']}/{r['n']}: sensitivity "
+              f"{_fmt(r['sensitivity'])} ({r['tp']}/{r['tp'] + r['fn']}), "
+              f"specificity {_fmt(r['specificity'])} "
+              f"({r['tn']}/{r['tn'] + r['fp']})**; PPV {_fmt(r['ppv'])}, NPV "
+              f"{_fmt(r['npv'])}, balanced accuracy "
+              f"{_fmt(r['balanced_accuracy'])}, Fisher exact p = "
+              f"{_fmt_p(r['fisher_p'])}",
+              f"- leave-one-out specificity {_fmt(ai.get('loo_specificity'))}: "
+              f"the band is built from the normal cohort and then applied to "
+              f"it, so the specificity above is in-sample. The sensitivity is "
+              f"not -- no abnormal recording enters the band.",
+              f"- as a continuous endpoint: AUC {_fmt(g.get('auc'))} "
+              f"[{_fmt(ci[0])}, {_fmt(ci[1])}], p = {_fmt_p(g.get('p'))}",
+              f"- {ai['note']}", ""]
+
     co = s.get("correlations") or {}
     if co.get("table"):
         covs = co["covariates"]
@@ -560,6 +632,7 @@ def run_report(csv: str = "rvi38_analysis.csv",
                controls: str = "full",
                synchrony: bool = True,
                fidgetyfind: bool = True,
+               abnormality_index: bool = True,
                fluency_curve: bool = True,
                fidgetyfind_panels: bool = True,
                figures: bool = True,
@@ -591,7 +664,13 @@ def run_report(csv: str = "rvi38_analysis.csv",
     ``show`` displays the figures when called from a notebook: ``"main"`` for
     the cohort figures, ``"all"`` to include every per-recording panel, or a
     single group name (``"fluency"``, ``"fluency_curve"``, ``"kemeny"``,
-    ``"synchrony"``, ``"fidgetyfind"``, ``"clinical"``).
+    ``"synchrony"``, ``"fidgetyfind"``, ``"abnormality_index"``,
+    ``"clinical"``).
+
+    ``abnormality_index=False`` drops the composite screening readout; the band
+    width, its side and the missing-value policy are ``index_sd=2.0``,
+    ``index_side="two"`` and ``index_missing="impute"``, passed through like
+    any other override.
 
     Any further keyword goes straight through to the runner:
     ``fluency_omega=0.7`` becomes ``--fluency-omega 0.7`` and
@@ -613,6 +692,8 @@ def run_report(csv: str = "rvi38_analysis.csv",
         argv += ["--skip-raw-kinematics"]
     if not fidgetyfind:
         argv += ["--skip-fidgetyfind"]
+    if not abnormality_index:
+        argv += ["--skip-abnormality-index"]
     if fidgetyfind and fidgetyfind_panels:
         argv += ["--ff-panels"]
     if not figures:

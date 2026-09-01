@@ -23,6 +23,7 @@ import a1_stats as ST        # noqa: E402
 import a57_graph as G        # noqa: E402
 import a8_movement as MV     # noqa: E402
 import a10_fidgetyfind as FF  # noqa: E402
+import a11_index as IX   # noqa: E402
 import fluency_curve as FC   # noqa: E402
 
 PASS, FAIL = [], []
@@ -1387,6 +1388,194 @@ def test_correlation_analysis():
           abs(tab["kemeny"]["dwell"]["spearman_rho"] - 1.0) < 1e-12)
 
 
+# ---------------------------------------------------------------------------
+def _index_cohort(seed=7, n=38, n1=6, sep=2.2, nan_at=None):
+    """A planted cohort: four endpoints on one shared latent the label shifts."""
+    rng = np.random.default_rng(seed)
+    y = np.zeros(n, int)
+    y[:n1] = 1
+    lat = rng.normal(size=n) + sep * y
+    X = np.column_stack([
+        3.0 + 0.90 * lat + rng.normal(scale=.45, size=n),      # Phi
+        20.0 + 4.0 * lat + rng.normal(scale=3.0, size=n),      # Kemeny
+        0.30 + 0.06 * lat + rng.normal(scale=.03, size=n),     # mean F
+        0.70 - 0.05 * lat + rng.normal(scale=.03, size=n)])    # FF
+    if nan_at is not None:
+        X[nan_at] = np.nan
+    return X, y, np.array([0.0, 0.0, 1.0, -1.0])
+
+
+def test_abnormality_index():
+    """PC1 of the endpoints, and the normative band cut on it."""
+    print("\nAbnormality index (PC1 against the normal cohort's band)")
+    X, y, d = _index_cohort()
+    ix = IX.abnormality_index(X, y, directions=d, boot=0)
+
+    # --- the PCA, against an independent eigendecomposition -----------------
+    # Standardising with ddof=0 makes Z'Z/n the correlation matrix of X, so the
+    # explained-variance ratios are its eigenvalue fractions and PC1 is its
+    # leading eigenvector. Neither is computed that way in a11_index.
+    lam, V = np.linalg.eigh(np.corrcoef(X.T))
+    lam, V = lam[::-1], V[:, ::-1]
+    check("explained-variance ratios are the correlation matrix's eigenvalue "
+          "fractions",
+          np.allclose(ix["explained_ratio"], lam / lam.sum(), atol=1e-12),
+          f"got {np.round(ix['explained_ratio'], 6)}")
+    check("PC1 is the leading eigenvector, up to sign",
+          np.allclose(np.abs(ix["loadings"]), np.abs(V[:, 0]), atol=1e-10))
+    Z = (X - X.mean(0)) / X.std(0)
+    check("the scores are Z w1",
+          np.allclose(np.abs(ix["pc1"]), np.abs(Z @ V[:, 0]), atol=1e-10))
+    check("the standardised columns have mean 0 and SD 1",
+          np.allclose(ix["z"].mean(0), 0, atol=1e-12)
+          and np.allclose(ix["z"].std(0), 1, atol=1e-12))
+
+    # --- no label anywhere but the band -------------------------------------
+    rng = np.random.default_rng(3)
+    y2 = y[rng.permutation(len(y))]
+    ix2 = IX.abnormality_index(X, y2, directions=d, boot=0)
+    check("permuting the labels leaves the index untouched",
+          np.allclose(ix["pc1"], ix2["pc1"])
+          and np.allclose(ix["loadings"], ix2["loadings"]))
+    check("the band is the normal recordings' own mean and sample SD",
+          abs(ix["band"]["mu0"] - np.mean(ix["pc1"][y == 0])) < 1e-12
+          and abs(ix["band"]["sd0"]
+                  - np.std(ix["pc1"][y == 0], ddof=1)) < 1e-12)
+
+    # --- the sign of PC1 is arbitrary, and the reported readout knows it ----
+    flip = IX.abnormality_index(X, y, directions=-d, boot=0)
+    check("reversing the stated poles negates the index",
+          np.allclose(flip["pc1"], -ix["pc1"]))
+    check("the two-sided flag does not depend on PC1's sign",
+          np.array_equal(flip["flag"], ix["flag"]))
+    check("orientation points the index at the pathological pole",
+          float(np.dot(ix["loadings"], d)) > 0)
+
+    # --- the threshold arithmetic -------------------------------------------
+    b = ix["band"]
+    by_hand = (np.abs(ix["pc1"] - b["mu0"]) > 2.0 * b["sd0"]).astype(float)
+    check("flagged exactly the recordings more than 2 SD from the normal mean",
+          np.array_equal(ix["flag"], by_hand),
+          f"{int(by_hand.sum())} flagged")
+    up = IX.abnormality_index(X, y, directions=d, side="upper", boot=0)
+    check("the one-sided readout is a subset of the two-sided one",
+          np.all(up["flag"] <= ix["flag"]))
+    wide = IX.abnormality_index(X, y, directions=d, n_sd=3.0, boot=0)
+    check("a wider band flags no more recordings",
+          wide["readout"]["n_flagged"] <= ix["readout"]["n_flagged"])
+
+    # --- affine invariance: standardisation removes units -------------------
+    Xs = X * np.array([1.0, 100.0, 0.5, 3.0]) + np.array([0.0, -7.0, 2.0, 1.0])
+    inv = IX.abnormality_index(Xs, y, directions=d, boot=0)
+    check("rescaling and shifting the endpoints changes nothing",
+          np.allclose(inv["pc1"], ix["pc1"], atol=1e-9)
+          and np.array_equal(inv["flag"], ix["flag"]))
+
+    # --- the readout numbers ------------------------------------------------
+    r = ix["readout"]
+    f, yy = ix["flag"].astype(int), y
+    check("sensitivity and specificity count the right cells",
+          abs(r["sensitivity"] - np.mean(f[yy == 1])) < 1e-12
+          and abs(r["specificity"] - np.mean(1 - f[yy == 0])) < 1e-12)
+    check("Fisher's exact p matches scipy on the same 2x2 table",
+          abs(r["fisher_p"] - stats.fisher_exact(
+              [[r["tp"], r["fp"]], [r["fn"], r["tn"]]])[1]) < 1e-12)
+
+    # --- leave-one-out specificity ------------------------------------------
+    idx = np.flatnonzero(y == 0)
+    k = int(idx[0])
+    rest = ix["pc1"][idx[idx != k]]
+    m, sd = float(np.mean(rest)), float(np.std(rest, ddof=1))
+    hand = abs(ix["pc1"][k] - m) > 2.0 * sd
+    loo_all = []
+    for j in idx:
+        rj = ix["pc1"][idx[idx != j]]
+        loo_all.append(abs(ix["pc1"][j] - float(np.mean(rj)))
+                       > 2.0 * float(np.std(rj, ddof=1)))
+    check("leave-one-out specificity holds out the recording being scored",
+          abs(ix["loo"]["specificity"] - (1 - np.mean(loo_all))) < 1e-12
+          and ix["loo"]["n"] == len(idx),
+          f"first normal recording flagged={hand}")
+
+    # --- a recording an endpoint declined to score --------------------------
+    Xn, yn, dn = _index_cohort(nan_at=(9, 3))
+    imp = IX.abnormality_index(Xn, yn, directions=dn, boot=0)
+    check("an unscored endpoint is imputed at its column mean (z = 0)",
+          imp["n_scored"] == len(yn) and imp["n_imputed"] == 1
+          and abs(imp["z"][9, 3]) < 1e-12)
+    drop = IX.abnormality_index(Xn, yn, directions=dn, missing="drop", boot=0)
+    check("'drop' leaves that recording unscored rather than forcing a value",
+          drop["n_scored"] == len(yn) - 1
+          and not np.isfinite(drop["pc1"][9])
+          and not np.isfinite(drop["flag"][9])
+          and drop["readout"]["n"] == len(yn) - 1)
+
+    # --- planted separation comes out ---------------------------------------
+    check("a strongly separated planted cohort is flagged",
+          r["sensitivity"] >= 0.5 and r["specificity"] >= 0.75,
+          f"sens {r['sensitivity']:.2f}, spec {r['specificity']:.2f}")
+
+    # --- degenerate input is refused, not silently scored --------------------
+    bad = X.copy()
+    bad[:, 1] = 4.0
+    try:
+        IX.abnormality_index(bad, y, directions=d, boot=0)
+        ok = False
+    except ValueError:
+        ok = True
+    check("a constant endpoint is refused rather than standardised by zero", ok)
+
+
+def test_feature_matrix():
+    """The N x 4 matrix pulled out of a results object, and its cache."""
+    print("\nAbnormality index: the endpoint matrix")
+    X, y, _ = _index_cohort()
+    vids = [f"vid{i:02d}" for i in range(len(y))]
+    results = {"primary": "AR-HMM", "labels": y.tolist(), "video_names": vids,
+               "AR-HMM": {"phi": {"excess": X[:, 0].tolist()},
+                          "kemeny_per_subject": X[:, 1].tolist()},
+               "wclrpp": {"mean_F": X[:, 2].tolist()},
+               "fidgetyfind": {"FF": X[:, 3].tolist()}}
+    fm = IX.feature_matrix(results)
+    check("the four endpoints come out in the declared order",
+          fm["keys"] == ["phi", "kemeny", "mean_F", "FF"]
+          and np.allclose(fm["X"], X))
+    check("the orientation votes are the stated poles only",
+          list(fm["directions"]) == [0.0, 0.0, 1.0, -1.0])
+
+    # results.json writes every non-finite float as null; it must come back NaN
+    # rather than poisoning the column.
+    holed = {**results, "fidgetyfind": {"FF": [None] + X[1:, 3].tolist()}}
+    fm2 = IX.feature_matrix(holed)
+    check("a null in results.json is read back as NaN",
+          not np.isfinite(fm2["X"][0, 3])
+          and np.isfinite(fm2["X"][1:, 3]).all())
+
+    skipped = {k: v for k, v in results.items() if k != "wclrpp"}
+    fm3 = IX.feature_matrix(skipped)
+    check("a skipped block is named as missing, not filled in",
+          fm3["X"].shape == (len(y), 3)
+          and fm3["missing"] == ["synchrony (mean F)"])
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "feature_matrix.npz")
+        IX.save_feature_matrix(fm, path)
+        back = IX.load_feature_matrix(path)
+        check("the cached matrix reads back identically",
+              np.allclose(back["X"], fm["X"])
+              and back["keys"] == fm["keys"]
+              and list(back["labels"]) == list(fm["labels"])
+              and back["videos"] == vids)
+        a = IX.abnormality_index(fm["X"], fm["labels"],
+                                 directions=fm["directions"], boot=0)
+        b = IX.abnormality_index(back["X"], back["labels"],
+                                 directions=back["directions"], boot=0)
+        check("scoring the cache gives the same index as scoring the run",
+              np.allclose(a["pc1"], b["pc1"])
+              and np.array_equal(a["flag"], b["flag"]))
+
+
 def main():
     print("=" * 74)
     print("METHODS §12.4 style checks")
@@ -1418,6 +1607,8 @@ def main():
     test_fidgetyfind_reduction()
     test_fidgetyfind_calibration()
     test_fidgetyfind_planted_cohort()
+    test_abnormality_index()
+    test_feature_matrix()
     print("\n" + "=" * 74)
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

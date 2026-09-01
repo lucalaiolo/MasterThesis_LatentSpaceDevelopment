@@ -1,6 +1,6 @@
 # =====================================================================
-# RVI-38 — fluency, fluency curve, Kemeny mixing time, WCLR-PP synchrony
-# and FidgetyFind, in one cell
+# RVI-38 — fluency, fluency curve, Kemeny mixing time, WCLR-PP synchrony,
+# FidgetyFind and the abnormality index, in one cell
 # ---------------------------------------------------------------------
 # Edit the CONFIG block and run. It prints every headline number, writes
 # results.json / summary.md / the per-subject CSVs / every figure into
@@ -42,6 +42,9 @@ PRIMARY   = None      # e.g. "AR-HMM K=14" to make that one primary instead
 FAST      = False     # True = smoke run (coarse p-values, ~20x fewer draws)
 SYNCHRONY = True      # WCLR-PP inter-limb coordination; the slow block
 FIDGETY   = True      # FidgetyFind, the literature's detector
+INDEX     = True      # the abnormality index: PC1 of the four endpoints, cut
+                      # at the normal cohort's own +/-2 SD band (the screening
+                      # readout). Costs a second; needs >= 2 of the endpoints.
 SHOW      = "main"    # "main" | "all" (adds the per-recording panels) | False
 FPS       = 25.0
 STREAM    = "auto"    # "delta" | "pose" | "auto" (infer from stored lengths)
@@ -66,6 +69,7 @@ out = run_report(
     fast=FAST, fps=FPS, stream=STREAM,
     synchrony=SYNCHRONY,        # WCLR-PP
     fidgetyfind=FIDGETY,        # FidgetyFind
+    abnormality_index=INDEX,    # the composite readout
     fluency_curve=True,         # one panel per recording
     fidgetyfind_panels=True,    # one FidgetyFind timeline per recording
     show=SHOW,
@@ -75,7 +79,8 @@ out = run_report(
 #   out["results"]  full results object (also OUT_DIR/results.json)
 #   out["summary"]  headline numbers per construct (also OUT_DIR/summary.json)
 #   out["figures"]  {"fluency": [...], "fluency_curve": [...], "kemeny": [...],
-#                    "synchrony": [...], "fidgetyfind": [...], "clinical": [...]}
+#                    "synchrony": [...], "fidgetyfind": [...],
+#                    "abnormality_index": [...], "clinical": [...]}
 #   out["markdown"] the summary you just read (also OUT_DIR/summary.md)
 # Every endpoint: AUC with its stratified-bootstrap interval and the exact
 # two-sided p over all C(38,6) = 2,760,681 label assignments. Uncorrected.
@@ -94,6 +99,31 @@ if not s["fidgetyfind"].get("skipped"):
                     ("FF_dist", "  ... limbs")):
         line(nm, s["fidgetyfind"]["endpoints"][key])
     print("             (below 0.5 is the expected direction for FidgetyFind)")
+
+# The screening readout: PC1 of the four endpoints against the normal cohort's
+# own band. No parameter in it is fitted against the label; the band is built
+# from the normal recordings and then applied to them, so the specificity is
+# in-sample (a leave-one-out one is reported beside it) while the sensitivity
+# is not, since no abnormal recording enters the band.
+ai = s.get("abnormality_index", {})
+if not ai.get("skipped"):
+    r, b = ai["readout"], ai["band"]
+    print("\nabnormality index  PC1 of %d endpoints, %.0f%% of their variance"
+          % (len(ai["features"]), 100 * ai["pc1_explained"]))
+    print("             band [%.3f, %.3f] = %.3f +- %g x %.3f (n=%d normal)"
+          % (b["lo"], b["hi"], b["mu0"], b["n_sd"], b["sd0"], b["n_normal"]))
+    print("             flagged %d/%d: sensitivity %.3f (%d/%d), specificity "
+          "%.3f (%d/%d), Fisher p %.4g"
+          % (r["n_flagged"], r["n"], r["sensitivity"], r["tp"],
+             r["tp"] + r["fn"], r["specificity"], r["tn"], r["tn"] + r["fp"],
+             r["fisher_p"]))
+    print("             leave-one-out specificity %.3f"
+          % ai["loo_specificity"])
+    line("  ... as AUC", ai["group"])
+
+# To rescore the index at a different band width in a second, without rerunning
+# anything, paste `colab_abnormality_index.py` — it reads OUT_DIR/results.json,
+# caches the 38x4 endpoint matrix and scores it on its own.
 
 # To re-display one construct's figures later, without rerunning anything:
 #   from report import show_figures

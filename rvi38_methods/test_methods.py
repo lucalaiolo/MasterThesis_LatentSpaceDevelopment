@@ -1402,111 +1402,160 @@ def _index_cohort(seed=7, n=38, n1=6, sep=2.2, nan_at=None):
         0.70 - 0.05 * lat + rng.normal(scale=.03, size=n)])    # FF
     if nan_at is not None:
         X[nan_at] = np.nan
-    return X, y, np.array([0.0, 0.0, 1.0, -1.0])
+    return X, y, np.array([1.0, 1.0, 1.0, -1.0])
 
 
 def test_abnormality_index():
-    """PC1 of the endpoints, and the normative band cut on it."""
-    print("\nAbnormality index (PC1 against the normal cohort's band)")
+    """The largest signed deviation across the endpoints, and the cut on it."""
+    print("\nAbnormality index (the largest signed deviation, Bonferroni cut)")
     X, y, d = _index_cohort()
-    ix = IX.abnormality_index(X, y, directions=d, boot=0)
+    keys = ["phi", "kemeny", "mean_F", "FF"]
+    per = ["writhing", "writhing", "writhing", "fidgety"]
+    ix = IX.abnormality_index(X, y, directions=d, names=keys, keys=keys,
+                              periods=per, boot=0)
 
-    # --- the PCA, against an independent eigendecomposition -----------------
-    # Standardising with ddof=0 makes Z'Z/n the correlation matrix of X, so the
-    # explained-variance ratios are its eigenvalue fractions and PC1 is its
-    # leading eigenvector. Neither is computed that way in a11_index.
-    lam, V = np.linalg.eigh(np.corrcoef(X.T))
-    lam, V = lam[::-1], V[:, ::-1]
-    check("explained-variance ratios are the correlation matrix's eigenvalue "
-          "fractions",
-          np.allclose(ix["explained_ratio"], lam / lam.sum(), atol=1e-12),
-          f"got {np.round(ix['explained_ratio'], 6)}")
-    check("PC1 is the leading eigenvector, up to sign",
-          np.allclose(np.abs(ix["loadings"]), np.abs(V[:, 0]), atol=1e-10))
-    Z = (X - X.mean(0)) / X.std(0)
-    check("the scores are Z w1",
-          np.allclose(np.abs(ix["pc1"]), np.abs(Z @ V[:, 0]), atol=1e-10))
-    check("the standardised columns have mean 0 and SD 1",
-          np.allclose(ix["z"].mean(0), 0, atol=1e-12)
-          and np.allclose(ix["z"].std(0), 1, atol=1e-12))
+    # --- the statistic, against a by-hand computation ----------------------
+    mu, sd = X[y == 0].mean(0), X[y == 0].std(0, ddof=1)
+    Z = (X - mu) / sd
+    T = (Z * d).max(1)
+    check("the columns are standardised on the normal recordings alone",
+          np.allclose(ix["mean"], mu, atol=1e-12)
+          and np.allclose(ix["sd"], sd, atol=1e-12))
+    check("a normal recording's z-scores have mean 0 and sample SD 1",
+          np.allclose(ix["z"][y == 0].mean(0), 0, atol=1e-12)
+          and np.allclose(ix["z"][y == 0].std(0, ddof=1), 1, atol=1e-12))
+    check("the index is the largest signed deviation",
+          np.allclose(ix["index"], T, atol=1e-12))
+    check("the driver is the construct attaining that maximum",
+          np.array_equal(ix["driver"], (Z * d).argmax(1))
+          and ix["driver_key"] == [keys[j] for j in (Z * d).argmax(1)]
+          and ix["driver_period"] == [per[j] for j in (Z * d).argmax(1)])
 
-    # --- no label anywhere but the band -------------------------------------
-    rng = np.random.default_rng(3)
-    y2 = y[rng.permutation(len(y))]
-    ix2 = IX.abnormality_index(X, y2, directions=d, boot=0)
-    check("permuting the labels leaves the index untouched",
-          np.allclose(ix["pc1"], ix2["pc1"])
-          and np.allclose(ix["loadings"], ix2["loadings"]))
-    check("the band is the normal recordings' own mean and sample SD",
-          abs(ix["band"]["mu0"] - np.mean(ix["pc1"][y == 0])) < 1e-12
-          and abs(ix["band"]["sd0"]
-                  - np.std(ix["pc1"][y == 0], ddof=1)) < 1e-12)
+    # --- the threshold ------------------------------------------------------
+    th = ix["threshold"]
+    check("tau puts alpha/p in the upper tail of the standard normal",
+          abs(stats.norm.sf(th["tau"]) - 0.05 / 4) < 1e-12
+          and abs(th["tau"] - 2.2414027276) < 1e-9,
+          f"tau = {th['tau']:.6f}")
+    check("the flag is exactly the recordings whose index clears tau",
+          np.array_equal(ix["flag"], (T > th["tau"]).astype(float)))
+    # the correction the tau is FOR: p independent standard normals, the
+    # chance that the largest of them clears tau is alpha. Simulated here
+    # rather than derived, so it is an independent check of the reasoning.
+    rng = np.random.default_rng(11)
+    hit = (rng.normal(size=(200_000, 4)).max(1) > th["tau"]).mean()
+    check("the family-wise rate under the null is alpha, not 4 x alpha",
+          abs(hit - 0.05) < 0.004, f"simulated {hit:.4f} against 0.05")
+    tight = IX.abnormality_index(X, y, directions=d, alpha=0.01, boot=0)
+    check("a stricter alpha raises tau and flags no more recordings",
+          tight["threshold"]["tau"] > th["tau"]
+          and tight["readout"]["n_flagged"] <= ix["readout"]["n_flagged"])
+    fixed = IX.abnormality_index(X, y, directions=d, tau=1.5, boot=0)
+    check("an explicit tau overrides alpha",
+          abs(fixed["threshold"]["tau"] - 1.5) < 1e-12
+          and np.array_equal(fixed["flag"], (T > 1.5).astype(float)))
 
-    # --- the sign of PC1 is arbitrary, and the reported readout knows it ----
+    # --- the label enters only through which recordings are the reference ---
+    Xb = X.copy()
+    Xb[y == 1] *= 3.0                       # maul the abnormal rows
+    bumped = IX.abnormality_index(Xb, y, directions=d, boot=0)
+    check("no abnormal recording enters the reference, so mauling them leaves "
+          "every normal index untouched",
+          np.allclose(bumped["index"][y == 0], ix["index"][y == 0], atol=1e-12)
+          and np.allclose(bumped["mean"], ix["mean"], atol=1e-12))
+
+    # --- the poles are the constructs', and a maximum respects them ---------
     flip = IX.abnormality_index(X, y, directions=-d, boot=0)
-    check("reversing the stated poles negates the index",
-          np.allclose(flip["pc1"], -ix["pc1"]))
-    check("the two-sided flag does not depend on PC1's sign",
-          np.array_equal(flip["flag"], ix["flag"]))
-    check("orientation points the index at the pathological pole",
-          float(np.dot(ix["loadings"], d)) > 0)
-
-    # --- the threshold arithmetic -------------------------------------------
-    b = ix["band"]
-    by_hand = (np.abs(ix["pc1"] - b["mu0"]) > 2.0 * b["sd0"]).astype(float)
-    check("flagged exactly the recordings more than 2 SD from the normal mean",
-          np.array_equal(ix["flag"], by_hand),
-          f"{int(by_hand.sum())} flagged")
-    up = IX.abnormality_index(X, y, directions=d, side="upper", boot=0)
-    check("the one-sided readout is a subset of the two-sided one",
-          np.all(up["flag"] <= ix["flag"]))
-    wide = IX.abnormality_index(X, y, directions=d, n_sd=3.0, boot=0)
-    check("a wider band flags no more recordings",
-          wide["readout"]["n_flagged"] <= ix["readout"]["n_flagged"])
+    check("reversing every pole reads the other tail of each construct",
+          np.allclose(flip["index"], (Z * -d).max(1), atol=1e-12))
+    try:
+        IX.abnormality_index(X, y, directions=np.array([0.0, 0.0, 1.0, -1.0]),
+                             boot=0)
+        ok = False
+    except ValueError:
+        ok = True
+    check("a construct with no stated pole is refused, not folded in", ok)
+    try:
+        IX.abnormality_index(X, y, directions=None, boot=0)
+        ok = False
+    except ValueError:
+        ok = True
+    check("directions are required, with no silent default", ok)
 
     # --- affine invariance: standardisation removes units -------------------
     Xs = X * np.array([1.0, 100.0, 0.5, 3.0]) + np.array([0.0, -7.0, 2.0, 1.0])
     inv = IX.abnormality_index(Xs, y, directions=d, boot=0)
     check("rescaling and shifting the endpoints changes nothing",
-          np.allclose(inv["pc1"], ix["pc1"], atol=1e-9)
-          and np.array_equal(inv["flag"], ix["flag"]))
+          np.allclose(inv["index"], ix["index"], atol=1e-9)
+          and np.array_equal(inv["flag"], ix["flag"])
+          and np.array_equal(inv["driver"], ix["driver"]))
 
     # --- the readout numbers ------------------------------------------------
     r = ix["readout"]
-    f, yy = ix["flag"].astype(int), y
+    f = ix["flag"].astype(int)
     check("sensitivity and specificity count the right cells",
-          abs(r["sensitivity"] - np.mean(f[yy == 1])) < 1e-12
-          and abs(r["specificity"] - np.mean(1 - f[yy == 0])) < 1e-12)
+          abs(r["sensitivity"] - np.mean(f[y == 1])) < 1e-12
+          and abs(r["specificity"] - np.mean(1 - f[y == 0])) < 1e-12)
     check("Fisher's exact p matches scipy on the same 2x2 table",
           abs(r["fisher_p"] - stats.fisher_exact(
               [[r["tp"], r["fp"]], [r["fn"], r["tn"]]])[1]) < 1e-12)
+    drv = ix["drivers"]["flagged"]["by_construct"]
+    check("the driver counts partition the flagged recordings",
+          sum(v["n"] for v in drv.values()) == r["n_flagged"]
+          and all(v["n"] == int(np.sum((f == 1) & (ix["driver"] == j)))
+                  for j, v in enumerate(drv.values())))
+    check("the by-period counts are the by-construct ones grouped",
+          ix["drivers"]["flagged"]["by_period"].get("fidgety", 0)
+          == drv["FF"]["n"]
+          and ix["drivers"]["flagged"]["by_period"].get("writhing", 0)
+          == sum(drv[k]["n"] for k in ("phi", "kemeny", "mean_F")))
 
     # --- leave-one-out specificity ------------------------------------------
     idx = np.flatnonzero(y == 0)
-    k = int(idx[0])
-    rest = ix["pc1"][idx[idx != k]]
-    m, sd = float(np.mean(rest)), float(np.std(rest, ddof=1))
-    hand = abs(ix["pc1"][k] - m) > 2.0 * sd
     loo_all = []
     for j in idx:
-        rj = ix["pc1"][idx[idx != j]]
-        loo_all.append(abs(ix["pc1"][j] - float(np.mean(rj)))
-                       > 2.0 * float(np.std(rj, ddof=1)))
-    check("leave-one-out specificity holds out the recording being scored",
+        rest = X[idx[idx != j]]
+        Zj = (X[j] - rest.mean(0)) / rest.std(0, ddof=1)
+        loo_all.append(float((Zj * d).max()) > th["tau"])
+    check("leave-one-out holds the scored recording out of mu and s",
           abs(ix["loo"]["specificity"] - (1 - np.mean(loo_all))) < 1e-12
           and ix["loo"]["n"] == len(idx),
-          f"first normal recording flagged={hand}")
+          f"{int(np.sum(loo_all))}/{len(idx)} flagged out-of-sample")
+
+    # --- the price of the maximum, stated as a number -----------------------
+    pc = ix["plain_cut"]
+    check("the plain 2 SD cut flags a superset of the Bonferroni one",
+          pc["n_flagged"] >= r["n_flagged"]
+          and pc["n_normal_flagged"] == int(np.sum(ix["index"][y == 0] > 2.0))
+          and pc["n_abnormal_flagged"] == int(np.sum(ix["index"][y == 1] > 2.0)),
+          f"{pc['n_normal_flagged']} normals at 2 SD against {r['fp']} at tau")
+
+    # --- the ceiling ---------------------------------------------------------
+    c = ix["ceiling"]
+    top = float(np.max(ix["index"][y == 0]))
+    check("the ceiling counts the abnormal recordings no threshold can reach",
+          abs(c["max_normal_index"] - top) < 1e-12
+          and c["n_reachable"] == int(np.sum(ix["index"][y == 1] > top))
+          and c["n_reachable"] + c["n_inside_normal_range"] == c["n_abnormal"]
+          == int(y.sum()),
+          f"{c['n_reachable']}/{c['n_abnormal']} reachable at full specificity")
 
     # --- a recording an endpoint declined to score --------------------------
     Xn, yn, dn = _index_cohort(nan_at=(9, 3))
     imp = IX.abnormality_index(Xn, yn, directions=dn, boot=0)
-    check("an unscored endpoint is imputed at its column mean (z = 0)",
+    check("an unscored endpoint is imputed at the normal mean (z = 0)",
           imp["n_scored"] == len(yn) and imp["n_imputed"] == 1
-          and abs(imp["z"][9, 3]) < 1e-12)
+          and abs(imp["z"][9, 3]) < 1e-12
+          and abs(imp["signed"][9, 3]) < 1e-12)
+    check("an imputed entry never drives the maximum on its own",
+          imp["driver"][9] != 3 or imp["index"][9] <= 0.0)
+    check("the imputed row's reference is unchanged by the hole",
+          np.allclose(imp["mean"][3],
+                      np.nanmean(Xn[yn == 0][:, 3]), atol=1e-12))
     drop = IX.abnormality_index(Xn, yn, directions=dn, missing="drop", boot=0)
     check("'drop' leaves that recording unscored rather than forcing a value",
           drop["n_scored"] == len(yn) - 1
-          and not np.isfinite(drop["pc1"][9])
+          and not np.isfinite(drop["index"][9])
           and not np.isfinite(drop["flag"][9])
           and drop["readout"]["n"] == len(yn) - 1)
 
@@ -1515,15 +1564,34 @@ def test_abnormality_index():
           r["sensitivity"] >= 0.5 and r["specificity"] >= 0.75,
           f"sens {r['sensitivity']:.2f}, spec {r['specificity']:.2f}")
 
+    # --- a single-axis deviation, which is the reason for the maximum -------
+    # One construct three SDs out and the other three flat: a mean or a
+    # component would dilute it against the quiet ones, the maximum does not.
+    Xone = X.copy()
+    Xone[y == 1] = X[y == 0].mean(0)                    # abnormal rows flat...
+    Xone[y == 1, 2] = X[y == 0][:, 2].mean() + 3.0 * X[y == 0][:, 2].std(ddof=1)
+    one = IX.abnormality_index(Xone, y, directions=d, names=keys, keys=keys,
+                               periods=per, boot=0)
+    check("a deviation on one construct alone still clears the cut",
+          one["readout"]["sensitivity"] == 1.0
+          and all(k == "mean_F" for k, yy in zip(one["driver_key"], y) if yy),
+          f"sens {one['readout']['sensitivity']:.2f}")
+    mean_score = ((Xone - X[y == 0].mean(0)) / X[y == 0].std(0, ddof=1) * d
+                  ).mean(1)
+    check("the mean of the four would not have cleared it",
+          float(mean_score[y == 1][0]) < one["threshold"]["tau"],
+          f"mean score {float(mean_score[y == 1][0]):.2f} against tau "
+          f"{one['threshold']['tau']:.2f}")
+
     # --- degenerate input is refused, not silently scored --------------------
     bad = X.copy()
-    bad[:, 1] = 4.0
+    bad[y == 0, 1] = 4.0
     try:
         IX.abnormality_index(bad, y, directions=d, boot=0)
         ok = False
     except ValueError:
         ok = True
-    check("a constant endpoint is refused rather than standardised by zero", ok)
+    check("an endpoint constant across the normal cohort is refused", ok)
 
 
 def test_feature_matrix():
@@ -1540,8 +1608,9 @@ def test_feature_matrix():
     check("the four endpoints come out in the declared order",
           fm["keys"] == ["phi", "kemeny", "mean_F", "FF"]
           and np.allclose(fm["X"], X))
-    check("the orientation votes are the stated poles only",
-          list(fm["directions"]) == [0.0, 0.0, 1.0, -1.0])
+    check("every endpoint states its pathological pole",
+          list(fm["directions"]) == [1.0, 1.0, 1.0, -1.0]
+          and fm["periods"] == ["writhing", "writhing", "writhing", "fidgety"])
 
     # results.json writes every non-finite float as null; it must come back NaN
     # rather than poisoning the column.
@@ -1572,8 +1641,19 @@ def test_feature_matrix():
         b = IX.abnormality_index(back["X"], back["labels"],
                                  directions=back["directions"], boot=0)
         check("scoring the cache gives the same index as scoring the run",
-              np.allclose(a["pc1"], b["pc1"])
+              np.allclose(a["index"], b["index"])
               and np.array_equal(a["flag"], b["flag"]))
+
+        # a matrix cached before a pole was declared must score against the
+        # pole the module declares today, not against what the file holds.
+        np.savez(path, X=fm["X"], labels=fm["labels"],
+                 videos=np.asarray(vids, dtype=object),
+                 names=np.asarray(fm["names"], dtype=object),
+                 keys=np.asarray(fm["keys"], dtype=object),
+                 directions=np.zeros(len(fm["keys"])))
+        stale = IX.load_feature_matrix(path)
+        check("a stale cache's poles are refreshed from the current features",
+              list(stale["directions"]) == [1.0, 1.0, 1.0, -1.0])
 
 
 def main():

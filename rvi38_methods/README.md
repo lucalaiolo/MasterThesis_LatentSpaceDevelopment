@@ -10,10 +10,12 @@ here designed, computed from the keypoints alone, against which the
 model-based ones can be read on the identical cohort.
 
 The run ends on the **abnormality index** (`a11_index.py`), the one place the
-four endpoints are combined rather than reported side by side: `PC1` of the
-standardised `38 × 4` matrix, cut at two standard deviations of the *normal*
-recordings' own distribution. That is the screening readout — a binary flag per
-video — and no parameter in it is fitted against the label.
+four endpoints are combined rather than reported side by side: each endpoint
+standardised against the *normal* recordings, signed by its pathological pole,
+and reduced to the largest of them, `T(x) = maxⱼ dⱼ z(x)ⱼ`, flagged above the
+Bonferroni normal quantile `τ ≈ 2.24`. The maximum, because the assessment
+needs only one abnormal pattern. That is the screening readout — a binary flag
+per video — and no parameter in it is fitted against the label.
 
 The metastable decomposition (PCCA+, implied timescales, the kinematic
 dendrogram and their agreement statistics) has been removed. The earlier
@@ -34,7 +36,7 @@ coupling from shared limb autocorrelation and preserves lead-lag phase.
 | `a8_movement.py` | raw kinematics: per-state velocity profiles |
 | `a9_wclrpp.py` | WCLR-PP inter-limb coordination: vector-valued conditional limb regression, peak-picking, per-pair F/R2, circular-shift surrogate null |
 | `a10_fidgetyfind.py` | FidgetyFind (Morais et al., 2023, as adapted in METHODS §FidgetyFind): small-amplitude displacement direction entropy per window on six limb chains, reduced to `FF`, `FF_hip`, `FF_dist` |
-| `a11_index.py` | the composite readout: the four endpoints standardised, reduced to `PC1` as a continuous abnormality index, and cut at the normal cohort's own ±2 SD band |
+| `a11_index.py` | the composite readout: the four endpoints standardised on the normal cohort, signed by their pathological poles and reduced to the largest of them, `T(x) = maxⱼ dⱼ z(x)ⱼ`, flagged above the Bonferroni normal quantile |
 | `report.py` | one call that runs every construct, summarises it and collects the figures (`run_report`) |
 | `figures.py` | figure panels, every annotation computed from the run |
 | `run_analysis.py` | end-to-end runner |
@@ -235,7 +237,10 @@ The nuisances are reported as correlations instead: `correlation_analysis`
 gives every endpoint's **Pearson and Spearman** correlation with occupancy
 entropy `H = -Σ o_k log o_k`, mean dwell time, and log recording length,
 written to `results['correlations']` and drawn as `correlations.png`. The label
-enters no fit.
+enters no fit. The rows are the *constructs*, not the composite: the
+abnormality index is a function of the four endpoints and of nothing else, so a
+fifth row for it would restate theirs and read as though the composite had been
+checked independently of its parts.
 
 That is the entire inferential layer, and `a1_stats.py` now contains nothing
 else. There is no multiplicity correction (no Holm, no Westfall-Young
@@ -373,77 +378,103 @@ figures `fidgetyfind_subject`, `fidgetyfind_chains` and `fidgetyfind_windows`.
 ### The abnormality index: the composite screening readout (`a11_index.py`)
 
 Every construct above ends in one scalar per recording, and each is contrasted
-with the group on its own. The abnormality index is the **composite readout**:
-the four endpoints — fluency `Φ`, the Kemeny constant `𝒦`, whole-body
-synchrony `mean F` and FidgetyFind `FF` — put in one `38 × 4` matrix,
-standardised, reduced by PCA to `PC1` as a continuous *abnormality index*, and
-turned into a binary flag by a **normative reference range** rather than by a
-fitted classifier.
+with the group on its own — and read alone, each of the four is null. The
+abnormality index is the **composite readout**: the four endpoints — fluency
+`Φ`, the Kemeny constant `𝒦`, whole-body synchrony `mean F` and FidgetyFind
+`FF` — put in one `38 × 4` matrix, standardised against the *normal*
+recordings, signed by each construct's pathological pole, and reduced to the
+largest of them.
 
-Why a reference range and not a classifier. With `n1 = 6` positives, a model
-with free parameters fitted against the label — logistic regression, a tree, an
-SVM, a tuned cut-off — has more freedom than the positives can constrain, and
-its in-sample accuracy says almost nothing. The normative approach fits nothing
-to the outcome: the healthy cohort defines a range and a recording is flagged
-when it falls outside it. That is a screening instrument — "this infant is
-unlike healthy development" — not a prediction of the label.
+**Why the maximum.** The four constructs span both periods of the assessment.
+Fluency, mixing and synchrony read the writhing period, from term to about two
+months, whose abnormal forms are a poor repertoire and cramped-synchronised
+movement; FidgetyFind reads the fidgety period, from about two to five months.
+The pipeline is a general representation of infant motion, not a detector for
+one pattern — a poor repertoire early and absent fidgety movement later both
+reflect reduced movement variety, so an abnormal recording may deviate on any
+of the four constructs, not only the one its label names.
+
+The assessment itself needs only one abnormal pattern: a clinician calls a
+recording abnormal on a poor repertoire, *or* on cramped-synchronised movement,
+*or* on absent fidgety movement, and the other patterns need not appear. A
+score that follows the assessment must therefore fire when any single construct
+signals abnormality, not only when several agree. The maximum reads the one most
+abnormal construct and ignores the rest, which is what the assessment does; a
+mean or a principal component would instead ask the constructs to agree, and
+would dilute a single-axis deviation against three quiet ones.
+
+**Why a threshold and not a classifier.** With `n1 = 6` positives, a model with
+free parameters fitted against the label — logistic regression, a tree, an SVM,
+a tuned cut-off — has more freedom than the positives can constrain, and its
+in-sample accuracy says almost nothing. Nothing here is fitted to the outcome:
+the signs come from the constructs' definitions, the cut is a normal quantile,
+and the label enters only in choosing which recordings define `μ` and `s`. That
+is a screening instrument — "this infant is unlike healthy development" — not a
+prediction of the label.
 
 The procedure, in the order it runs:
 
 1. **Matrix.** `X` is `N × p`, one row per recording, one column per endpoint.
    An endpoint whose block was skipped is named as missing and left out rather
    than filled in; the index needs at least two.
-2. **Standardise.** `Z = (X − mean)/sd` column-wise over the whole cohort, the
-   label not consulted. The four endpoints live on incomparable scales, so PCA
-   on the raw matrix would be PCA on whichever column happens to have the
-   largest variance.
-3. **PCA.** The SVD of the centred `Z`; `PC1 = Z w₁` with `w₁` the leading
-   right singular vector. Its explained-variance ratio says how much of the
-   four-endpoint structure one number keeps.
-4. **Orient.** A principal component's sign is arbitrary. It is fixed from the
-   *stated* pathological poles of the endpoints — `sign(w₁ · d)` — so a larger
-   index means more abnormal. Only the two endpoints whose pole METHODS states
-   get a vote (high WCLR-PP coupling is the cramped-synchronised pole; high
-   FidgetyFind is normal); `Φ` and `𝒦`, which have no stated direction,
-   abstain. **No label enters this**, and the reported readout below does not
-   depend on it at all.
-5. **Normative band.** `μ₀` and `σ₀` are the mean and sample SD of the index
-   over the `label == 0` recordings alone — the whole of what the label is used
-   for. The band is `μ₀ ± 2σ₀`.
-6. **Flag.** `1` when the index falls strictly outside the band, `0` inside.
-   Two-sided by default — "unlike the healthy distribution", in either
-   direction — which is also what makes the readout invariant to step 4.
+2. **Standardise against the normal cohort.** Writing `𝒩` for the 32 normal
+   recordings, `z(x)ⱼ = (xⱼ − μⱼ)/sⱼ` with `μⱼ` and `sⱼ` the mean and sample SD
+   of endpoint `j` over `𝒩` alone. The four endpoints live on incomparable
+   scales, so the raw columns cannot be compared, let alone maximised over.
+3. **Sign by the pathological pole.** Each construct carries a pole fixed by its
+   definition. Ordering the endpoints `(Φ, 𝒦, F̄, FF)`, `d = (+1, +1, +1, −1)`:
+   higher `Φ` (more similar consecutive movements), higher `𝒦` (slower mixing)
+   and higher `F̄` (more inter-limb coupling) are abnormal, and lower `FF` (less
+   direction variety) is abnormal. The signed deviation `dⱼ z(x)ⱼ` is large when
+   construct `j` points toward its abnormal pole. **No label enters this.**
+4. **Index.** `T(x) = maxⱼ dⱼ z(x)ⱼ` — the number of standard deviations by
+   which the *most extreme* construct sits toward its abnormal pole. The
+   construct attaining the maximum is recorded as that recording's **driver**,
+   so the axis of deviation stays visible.
+5. **Flag.** `ŷ(x) = 1[T(x) > τ]` with `Pr(Z ≤ τ) = 1 − α/p`, `Z ~ 𝒩(0,1)`. The
+   `α/p` level is a **Bonferroni** correction for taking the maximum over `p`
+   constructs: each recording gets `p` chances to clear the cut. With `α = 0.05`
+   and `p = 4`, `τ ≈ 2.24`.
 
-**Read the specificity as in-sample.** The band is built from the normal
-recordings and then applied to them, so the specificity describes the fit
-rather than estimating out-of-sample specificity; the run therefore also
-reports a **leave-one-out specificity**, each normal recording scored against a
-band built from the other 31. The **sensitivity needs no such correction**: no
-abnormal recording enters the band, so it is already out-of-sample. The
-standardisation and the PCA do see all `N` rows, which is transductive but
-label-free.
+**Read the specificity as in-sample.** `μ` and `s` are estimated on the normal
+recordings and the index is then applied to them, so the specificity describes
+the fit rather than estimating out-of-sample specificity; the run therefore also
+reports a **leave-one-out specificity**, each normal recording standardised
+against the other 31. The **sensitivity needs no such correction**: no abnormal
+recording enters the reference, so it is already out-of-sample.
+
+**Two limits, both reported as numbers.** First, the maximum buys sensitivity
+to a single-axis deviation at the price of false positives — each recording has
+`p` chances to clear the cut, which the `α/p` level holds in check but does not
+remove. The size of that correction on this cohort is stated rather than
+asserted: `ix["plain_cut"]` scores the same index at a plain 2 SD and reports
+how many normal recordings *that* would flag. Second, an abnormal recording that
+lies inside the normal range on *every* construct cannot be reached by any
+threshold on this statistic; `ix["ceiling"]` counts those separately, so a
+missed recording is not read as an artefact of where `τ` was put.
 
 The index is also reported as one more continuous endpoint, through the same
 exact Mann-Whitney contrast as the four it is built from, and its `2 × 2` table
-carries Fisher's exact p. Nothing is corrected for multiplicity, as everywhere
-else here.
+carries Fisher's exact p. It is deliberately absent from the correlation table:
+being a function of those four endpoints and of nothing else, it has no nuisance
+dependence of its own.
 
 A recording an endpoint declined to score (a `NaN` from FidgetyFind) is kept
-with that entry set to its column mean, `z = 0` — the value that adds no
-information and no leverage — and the count is printed; `--index-missing drop`
-removes the recording from the index instead, leaving it unscored.
-`--index-sd` sets the band width (default `2.0`), `--index-side
-{two,upper,lower}` which tail counts (default `two`), and
+with that entry set to the normal mean, `z = 0` — the value that adds no
+information and no leverage, and one that can never drive the maximum — and the
+count is printed; `--index-missing drop` removes the recording from the index
+instead, leaving it unscored. `--index-alpha` sets the family-wise level
+(default `0.05`), `--index-tau` sets the cut directly instead, and
 `--skip-abnormality-index` omits the block.
 
 Outputs: `abnormality_index.csv` (per recording: the four raw endpoints, their
-z-scores, `PC1`, the index in SDs of the normal cohort, and the flag),
-`feature_matrix.npz` (the cached `38 × 4` matrix) and the `abnormality_index`
-figure.
+z-scores and signed z-scores, the index `T(x)`, the driving construct and its
+assessment period, `τ` and the flag), `feature_matrix.npz` (the cached `38 × 4`
+matrix) and the `abnormality_index` figure.
 
 **Rescoring without rerunning.** `feature_matrix.npz` is the point of the
-cache: the pipeline takes half an hour, the index takes a second, so the band
-width and the missing-value policy can be varied as often as you like.
+cache: the pipeline takes half an hour, the index takes a second, so the
+threshold and the missing-value policy can be varied as often as you like.
 
 ```python
 import a11_index as IX
@@ -452,7 +483,8 @@ fm = IX.feature_matrix("rvi38_out")     # or the results dict, or results.json
 IX.save_feature_matrix(fm, "rvi38_out/feature_matrix.npz")
 
 ix = IX.abnormality_index(fm["X"], fm["labels"], directions=fm["directions"],
-                          names=fm["names"], n_sd=2.0)
+                          names=fm["names"], keys=fm["keys"],
+                          periods=fm["periods"], alpha=0.05)
 print(IX.describe(fm, ix))
 IX.index_frame(fm, ix)                  # the per-recording table
 ```

@@ -42,9 +42,11 @@ PRIMARY   = None      # e.g. "AR-HMM K=14" to make that one primary instead
 FAST      = False     # True = smoke run (coarse p-values, ~20x fewer draws)
 SYNCHRONY = True      # WCLR-PP inter-limb coordination; the slow block
 FIDGETY   = True      # FidgetyFind, the literature's detector
-INDEX     = True      # the abnormality index: PC1 of the four endpoints, cut
-                      # at the normal cohort's own +/-2 SD band (the screening
-                      # readout). Costs a second; needs >= 2 of the endpoints.
+INDEX     = True      # the abnormality index: the largest signed deviation
+                      # across the four endpoints, standardised on the normal
+                      # cohort and flagged above the Bonferroni normal quantile
+                      # (the screening readout). Costs a second; needs >= 2 of
+                      # the endpoints.
 SHOW      = "main"    # "main" | "all" (adds the per-recording panels) | False
 FPS       = 25.0
 STREAM    = "auto"    # "delta" | "pose" | "auto" (infer from stored lengths)
@@ -100,25 +102,33 @@ if not s["fidgetyfind"].get("skipped"):
         line(nm, s["fidgetyfind"]["endpoints"][key])
     print("             (below 0.5 is the expected direction for FidgetyFind)")
 
-# The screening readout: PC1 of the four endpoints against the normal cohort's
-# own band. No parameter in it is fitted against the label; the band is built
-# from the normal recordings and then applied to them, so the specificity is
-# in-sample (a leave-one-out one is reported beside it) while the sensitivity
-# is not, since no abnormal recording enters the band.
+# The screening readout: the largest signed deviation across the four
+# endpoints, T(x) = max_j d_j z(x)_j, flagged above tau. The maximum because
+# the assessment needs only one abnormal pattern -- a poor repertoire, OR
+# cramped-synchronised movement, OR absent fidgety movement. No parameter in it
+# is fitted against the label; mu and s are estimated on the normal recordings
+# and the index is then applied to them, so the specificity is in-sample (a
+# leave-one-out one is reported beside it) while the sensitivity is not, since
+# no abnormal recording enters the reference.
 ai = s.get("abnormality_index", {})
 if not ai.get("skipped"):
-    r, b = ai["readout"], ai["band"]
-    print("\nabnormality index  PC1 of %d endpoints, %.0f%% of their variance"
-          % (len(ai["features"]), 100 * ai["pc1_explained"]))
-    print("             band [%.3f, %.3f] = %.3f +- %g x %.3f (n=%d normal)"
-          % (b["lo"], b["hi"], b["mu0"], b["n_sd"], b["sd0"], b["n_normal"]))
+    r, th, ce = ai["readout"], ai["threshold"], ai["ceiling"]
+    print("\nabnormality index  T(x) = max_j d_j z(x)_j over %d endpoints, "
+          "standardised on %d normals"
+          % (len(ai["features"]), ai["reference"]["n_normal"]))
+    print("             tau %.3f = the 1 - %g/%d normal quantile (Bonferroni)"
+          % (th["tau"], th["alpha"], th["n_constructs"]))
     print("             flagged %d/%d: sensitivity %.3f (%d/%d), specificity "
           "%.3f (%d/%d), Fisher p %.4g"
           % (r["n_flagged"], r["n"], r["sensitivity"], r["tp"],
              r["tp"] + r["fn"], r["specificity"], r["tn"], r["tn"] + r["fp"],
              r["fisher_p"]))
-    print("             leave-one-out specificity %.3f"
-          % ai["loo_specificity"])
+    if ai.get("drivers"):
+        print("             the construct attaining the maximum, per flag: "
+              + ", ".join("%s %d" % (k, v) for k, v in ai["drivers"].items()))
+    print("             leave-one-out specificity %.3f; ceiling %d/%d "
+          "(the rest lie inside the normal range on every construct)"
+          % (ai["loo_specificity"], ce["n_reachable"], ce["n_abnormal"]))
     line("  ... as AUC", ai["group"])
 
 # To rescore the index at a different band width in a second, without rerunning

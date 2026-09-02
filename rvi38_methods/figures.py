@@ -15,6 +15,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt   # noqa: E402
+import matplotlib.ticker as mticker   # noqa: E402
 import numpy as np                # noqa: E402
 
 import a10_fidgetyfind as FF          # noqa: E402
@@ -708,59 +709,108 @@ def fidgetyfind_panels(results, outdir):
 # the composite readout
 # ---------------------------------------------------------------------------
 def fig_abnormality_index(res, results, outdir):
-    """The abnormality index per recording, against the normal cohort's band.
+    """The composite index per recording, by label, against the flag threshold.
 
-    Left: every recording's ``PC1`` of the four standardised endpoints, sorted,
-    with the normative band shaded -- outside it is the flag. Right: the
-    loadings, which say what the index is made of and in which direction each
-    endpoint pushes it.
+    Left: every recording's ``T(x) = max_j d_j z(x)_j``, the largest signed
+    deviation across the four standardised endpoints, split by label, with the
+    threshold ``tau`` drawn dashed -- above it is the flag. Right: which
+    construct attained that maximum for each flagged recording, so the axis of
+    deviation stays visible rather than being folded into one number.
     """
     ai = results.get("abnormality_index")
     if not ai:
         return None
-    pc1 = np.asarray(ai["pc1"], float)
+    T = np.asarray(ai.get("index", ai.get("T")), float)
     y = np.asarray(results["labels"], int)
-    b, r = ai["band"], ai["readout"]
+    th, r, ce = ai["threshold"], ai["readout"], ai.get("ceiling", {})
     names = list(ai.get("feature_names", ai.get("names", [])))
-    w = np.asarray(ai["loadings"], float)
+    flag = np.asarray(ai["flag"], float)
+    driver = np.asarray(ai["driver"], int)
+    tau = float(th["tau"])
 
     fig, (ax, ax2) = plt.subplots(
-        1, 2, figsize=(8.6, 3.6), gridspec_kw={"width_ratios": [2.5, 1.0]})
-    o = np.argsort(np.where(np.isfinite(pc1), pc1, -np.inf))
-    x = np.arange(len(pc1))
-    ax.axhspan(b["lo"], b["hi"], color=GREY, alpha=.16, lw=0,
-               label=f"normal cohort $\\pm${b['n_sd']:g} SD")
-    ax.axhline(b["mu0"], color=GREY, lw=.9, ls="--")
-    for side in ("lo", "hi"):
-        ax.axhline(b[side], color="k", lw=.8)
-    ax.scatter(x, pc1[o], s=26, zorder=3,
-               c=[POS if y[i] else NEG for i in o],
-               edgecolors="k", linewidths=.4)
-    ax.set_xlabel("recording (sorted by index)")
-    ax.set_ylabel("abnormality index (PC1)")
-    ax.plot([], [], "o", color=POS, label=f"abnormal (n={int(y.sum())})")
-    ax.plot([], [], "o", color=NEG, label=f"normal (n={int((1 - y).sum())})")
-    # the points are sorted, so the upper left is free of markers; the box
-    # is opaque so the band edges do not read through the legend text.
-    ax.legend(fontsize=7, loc="upper left", frameon=True, framealpha=.95,
-              edgecolor="none")
-    ax.set_title(f"Abnormality index against the normative band\n"
-                 f"sensitivity {r['sensitivity']:.2f} "
-                 f"({r['tp']}/{r['tp'] + r['fn']}), specificity "
-                 f"{r['specificity']:.2f} ({r['tn']}/{r['tn'] + r['fp']}), "
+        1, 2, figsize=(8.6, 3.8), gridspec_kw={"width_ratios": [2.2, 1.3]})
+
+    # ---- left: the index by label, with the threshold ---------------------
+    # No legend: the x axis already names the two groups, and red/blue mean
+    # abnormal/normal throughout these figures. A legend box here would have to
+    # sit somewhere, and on a cohort with one very extreme recording every
+    # corner is occupied.
+    rng = np.random.default_rng(0)
+    counts = []
+    for g, col in ((0, NEG), (1, POS)):
+        m = (y == g) & np.isfinite(T)
+        counts.append(int(m.sum()))
+        x = g + rng.uniform(-.16, .16, int(m.sum()))
+        ax.scatter(x, T[m], s=30, c=col, edgecolors="k", linewidths=.4,
+                   zorder=3)
+    ax.axhline(tau, color="k", lw=1.1, ls="--", zorder=2)
+    ax.axhline(0.0, color=GREY, lw=.8, zorder=1)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels([f"normal\n(n={counts[0]})",
+                        f"abnormal\n(n={counts[1]})"])
+    ax.set_xlim(-0.5, 1.5)
+    ax.set_ylabel("abnormality index $T(x)$  (SDs of the normal cohort)")
+    ax.margins(y=0.12)
+    # One near-perfectly separated endpoint puts an abnormal recording a
+    # hundred SDs out and squashes the threshold and the whole normal cloud
+    # onto one line. Compress the tail rather than lose the part being read;
+    # the region around zero and tau stays linear, and the axis says so.
+    hi = float(np.nanmax(np.abs(T))) if np.isfinite(T).any() else 0.0
+    squashed = hi > 10 * tau
+    if squashed:
+        ax.set_yscale("symlog", linthresh=2 * tau, linscale=1.4)
+    ax.text(0.99, tau, f"$\\tau$ = {tau:.2f}", fontsize=7.5, va="bottom",
+            ha="right", color="k", transform=ax.get_yaxis_transform(),
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.0,
+                      alpha=.85))
+    ax.set_title(f"Composite index against the flag threshold\n"
+                 f"flagged {r['tp']}/{r['tp'] + r['fn']} abnormal and "
+                 f"{r['fp']}/{r['fp'] + r['tn']} normal; "
                  f"Fisher $p$ = {r['fisher_p']:.3g}", loc="left", fontsize=9.5)
 
-    # one colour: red/blue already mean abnormal/normal in the left panel,
-    # and a loading's direction is carried by which side of zero it sits on.
-    ax2.barh(range(len(w)), w, color=BLUE, height=.62)
-    ax2.axvline(0, color="k", lw=.7)
-    ax2.set_yticks(range(len(w)))
+    # ---- right: which construct drove each flag ---------------------------
+    fl = np.isfinite(flag) & (flag == 1)
+    pos = np.array([int(np.sum(fl & (y == 1) & (driver == j)))
+                    for j in range(len(names))])
+    neg = np.array([int(np.sum(fl & (y == 0) & (driver == j)))
+                    for j in range(len(names))])
+    rowy = np.arange(len(names))
+    ax2.barh(rowy, pos, color=POS, height=.62, label="abnormal")
+    ax2.barh(rowy, neg, left=pos, color=NEG, height=.62, label="normal")
+    ax2.set_yticks(rowy)
     ax2.set_yticklabels(names, fontsize=7.5)
     ax2.invert_yaxis()
-    ax2.set_xlabel("PC1 loading")
-    ax2.set_title(f"{ai['pc1_explained']:.0%} of the standardised\nvariance; "
-                  f"higher = more abnormal", loc="left", fontsize=9)
-    fig.tight_layout()
+    ax2.set_xlabel("flagged recordings the construct drives")
+    top = int((pos + neg).max()) if len(names) else 0
+    ax2.set_xlim(0, max(top + 1.6, 2))
+    ax2.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    if pos.sum() or neg.sum():
+        # which corner is free depends on how the flags fall across the
+        # constructs, so let matplotlib place it against the bars.
+        ax2.legend(fontsize=7, frameon=True, framealpha=.95, edgecolor="none",
+                   loc="best")
+    ax2.set_title("The construct attaining the maximum\n"
+                  "(the axis each flag deviates on)", loc="left", fontsize=9)
+
+    sub = [f"$T(x) = \\max_j d_j z(x)_j$ over {th['n_constructs']} constructs, "
+           f"standardised on the normal recordings; "
+           f"$\\tau$ = {tau:.3f} at $\\alpha$/{th['n_constructs']} "
+           f"= {th['per_construct_alpha']:.4g} (Bonferroni)"]
+    if ce.get("n_abnormal"):
+        sub.append(f"ceiling: {ce['n_reachable']}/{ce['n_abnormal']} abnormal "
+                   f"recordings clear the largest normal index "
+                   f"({ce['max_normal_index']:+.2f}), so no threshold on this "
+                   f"statistic reaches the other "
+                   f"{ce['n_inside_normal_range']}")
+    if squashed:
+        sub.append(f"one recording sits {hi:.0f} SDs out, so the index axis is "
+                   f"linear to $\\pm${2 * tau:.1f} and logarithmic beyond -- "
+                   f"otherwise the threshold and the whole normal cloud "
+                   f"collapse onto one line")
+    fig.text(0.008, 0.012, "\n".join(sub), fontsize=7.5, ha="left",
+             va="bottom", color="#444444")
+    fig.tight_layout(rect=(0, 0.055 + 0.035 * (len(sub) - 1), 1, 1))
     return _save(fig, outdir, "abnormality_index")
 
 

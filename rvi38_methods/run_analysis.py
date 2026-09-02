@@ -565,28 +565,36 @@ def fidgetyfind(results, pose, vids, labels, geom, cfg, outdir):
 
 
 # ---------------------------------------------------------------------------
-# the composite readout: PC1 of the endpoints against a normative band
+# the composite readout: the largest signed deviation across the endpoints
 # ---------------------------------------------------------------------------
 def abnormality_index(results, cfg, outdir):
-    """The four endpoints reduced to one index, cut at the healthy cohort's SD.
+    """The four endpoints reduced to one index by the maximum, cut at ``tau``.
 
     This is the screening readout, and the only place in the run where the four
     constructs are combined rather than reported side by side. The four
-    per-recording scalars are standardised, PCA gives ``PC1`` as a continuous
-    *abnormality index*, and a recording is flagged when that index falls
-    outside ``mu0 +- 2 sd0`` of the **normal** recordings' own distribution.
+    per-recording scalars are standardised against the **normal** recordings
+    alone, signed by each construct's stated pathological pole, and reduced to
+    ``T(x) = max_j d_j z(x)_j``; a recording is flagged when that maximum clears
+    ``tau``, the ``1 - alpha/p`` normal quantile.
 
-    Nothing is fitted against the label: the standardisation and the component
-    never see it, PC1's sign is fixed from the endpoints' stated pathological
-    poles, and the label enters only in choosing which recordings define the
-    normative band. With six positives that is the whole point -- a classifier
-    with free parameters has more freedom than six events can constrain, and
-    its in-sample accuracy would say nothing.
+    The maximum, rather than a mean or a component, because the assessment needs
+    only one abnormal pattern: a recording is called abnormal on a poor
+    repertoire, *or* on cramped-synchronised movement, *or* on absent fidgety
+    movement. The four constructs target those patterns across both periods, so
+    the score has to fire when any single one signals abnormality rather than
+    only when several agree.
+
+    Nothing is fitted against the label: the signs come from the constructs'
+    definitions, the cut is a normal quantile, and the label enters only in
+    choosing which recordings define the reference mean and SD. With six
+    positives that is the whole point -- a classifier with free parameters has
+    more freedom than six events can constrain, and its in-sample accuracy would
+    say nothing.
 
     Populates ``results['abnormality_index']`` and writes
     ``<outdir>/abnormality_index.csv`` and ``<outdir>/feature_matrix.npz``.
     """
-    section("Abnormality index: PC1 of the endpoints, against a normative band")
+    section("Abnormality index: the largest signed deviation across the endpoints")
     fm = IX.feature_matrix(results)
     if fm["X"].shape[1] < 2:
         print(f"  only {fm['X'].shape[1]} endpoint(s) available "
@@ -595,13 +603,16 @@ def abnormality_index(results, cfg, outdir):
         return None
     ix = IX.abnormality_index(
         fm["X"], fm["labels"], directions=fm["directions"], names=fm["names"],
-        n_sd=cfg["index_sd"], side=cfg["index_side"],
-        missing=cfg["index_missing"], boot=cfg["n_boot_auc"])
+        keys=fm["keys"], periods=fm["periods"], alpha=cfg["index_alpha"],
+        tau=cfg["index_tau"], missing=cfg["index_missing"],
+        boot=cfg["n_boot_auc"])
     print(IX.describe(fm, ix))
-    print("  the band is built from the normal recordings and then applied to "
-          "them, so the\n  specificity above is in-sample; the sensitivity is "
-          "not, since no abnormal\n  recording enters the band. Nothing here "
-          "is corrected for multiplicity.")
+    print("  mu and s are estimated on the normal recordings and the index is "
+          "then applied to\n  them, so the specificity above is in-sample; the "
+          "sensitivity is not, since no\n  abnormal recording enters the "
+          "reference. The maximum buys sensitivity to a\n  single-axis "
+          "deviation at the price of false positives, which the alpha/p level "
+          "holds\n  in check but does not remove.")
 
     IX.index_frame(fm, ix).to_csv(
         os.path.join(outdir, "abnormality_index.csv"), index=False)
@@ -629,6 +640,10 @@ def correlation_analysis(results, primary, cfg):
     holds them longer"; log recording length says how much is just "this
     recording is longer".
 
+    The rows are the *constructs*, not the composite: the abnormality index is
+    the maximum of the four signed and standardised endpoints, so it has no
+    nuisance dependence of its own and is left out of the table.
+
     Populates ``results['correlations']``.
     """
     section("Correlation analysis (endpoints against entropy, dwell, length)")
@@ -647,9 +662,11 @@ def correlation_analysis(results, primary, cfg):
                       ("FF_dist", "FidgetyFind limbs")):
             if g in ff:
                 endpoints[nm] = np.asarray(ff[g], float)
-    ai = results.get("abnormality_index")
-    if ai:
-        endpoints["abnormality index"] = np.asarray(ai["pc1"], float)
+    # The abnormality index is deliberately absent. It is a function of the
+    # four endpoints above and of nothing else, so its correlation with a
+    # nuisance is theirs restated -- a fifth row that carries no information the
+    # four do not already carry, and reads as though the composite had been
+    # checked independently of its parts.
 
     covariates = {
         "occupancy entropy": np.asarray(cl["occupancy_entropy"], float),
@@ -850,20 +867,23 @@ def build_parser() -> argparse.ArgumentParser:
                          "reads the keypoints only and is fast; skipping it "
                          "loses the external comparison construct.")
     ap.add_argument("--skip-abnormality-index", action="store_true",
-                    help="skip the composite readout: PC1 of the four "
-                         "standardised endpoints, flagged against the normal "
-                         "cohort's own +/-2 SD band. It needs at least two of "
-                         "the four endpoints, so it is also skipped when both "
-                         "--skip-raw-kinematics and --skip-fidgetyfind are on.")
-    ap.add_argument("--index-sd", type=float, default=2.0,
-                    help="half-width of the normative band, in SDs of the "
-                         "normal recordings' index (default 2.0).")
-    ap.add_argument("--index-side", choices=("two", "upper", "lower"),
-                    default="two",
-                    help="which tail counts as abnormal: 'two' (the reported "
-                         "readout -- outside the healthy range in either "
-                         "direction, and the only choice that does not depend "
-                         "on PC1's sign), 'upper' or 'lower'.")
+                    help="skip the composite readout: the largest signed "
+                         "deviation across the four standardised endpoints, "
+                         "flagged above the Bonferroni normal quantile. It "
+                         "needs at least two of the four endpoints, so it is "
+                         "also skipped when both --skip-raw-kinematics and "
+                         "--skip-fidgetyfind are on.")
+    ap.add_argument("--index-alpha", type=float, default=IX.ALPHA,
+                    help="family-wise level behind the index threshold "
+                         "(default 0.05). The cut is the 1 - alpha/p normal "
+                         "quantile, p being the number of constructs the "
+                         "maximum ranges over: a Bonferroni correction for the "
+                         "p chances the maximum gives each recording. "
+                         "alpha = 0.05 over four constructs gives tau = 2.241.")
+    ap.add_argument("--index-tau", type=float, default=None,
+                    help="set the index threshold directly, overriding "
+                         "--index-alpha. Given in standard deviations of the "
+                         "normal cohort, since that is what the index is.")
     ap.add_argument("--index-missing", choices=("impute", "drop"),
                     default="impute",
                     help="what to do with a recording an endpoint declined to "
@@ -914,7 +934,7 @@ def main(argv=None):
         "fluency_shape_state_term": not args.fluency_drop_state_term,
         "skip_raw_kinematics": args.skip_raw_kinematics,
         "skip_abnormality_index": args.skip_abnormality_index,
-        "index_sd": args.index_sd, "index_side": args.index_side,
+        "index_alpha": args.index_alpha, "index_tau": args.index_tau,
         "index_missing": args.index_missing,
     }
     if not 0.0 <= cfg["fluency_omega"] <= 1.0:
@@ -1077,10 +1097,11 @@ def main(argv=None):
     else:
         fidgetyfind(results, pose, vids, labels, geom, cfg, args.outdir)
 
-    # ---- the composite readout: the four endpoints reduced to one index and
-    # cut at the normal cohort's own +/-2 SD band. The screening statement the
-    # run ends on; the per-endpoint contrasts above are unaffected by it. It
-    # runs before the correlation analysis so the nuisance table covers it too.
+    # ---- the composite readout: the four endpoints signed by their
+    # pathological poles, standardised against the normal cohort and reduced by
+    # the maximum. The screening statement the run ends on; the per-endpoint
+    # contrasts above are unaffected by it, and it stays out of the correlation
+    # table below, being a function of those endpoints and of nothing else.
     if cfg["skip_abnormality_index"]:
         section("Abnormality index: skipped (--skip-abnormality-index)")
         print("  the composite screening readout is omitted; every "
@@ -1127,8 +1148,10 @@ def main(argv=None):
     ai = results.get("abnormality_index")
     if ai:
         rows.append(("Does the composite abnormality index separate the "
-                     "groups?", "PC1 of the four standardised endpoints",
-                     ai["group"]))
+                     "groups?",
+                     "the largest signed deviation across the "
+                     f"{ai['threshold']['n_constructs']} standardised "
+                     "endpoints", ai["group"]))
     for q, meth, r in rows:
         pv = r.get("p")
         pstr = ("n/a" if pv is None or not np.isfinite(pv) else f"{pv:.4g}")
@@ -1152,20 +1175,38 @@ def main(argv=None):
           "admission gate to be reported; the\n  nuisances are reported as "
           "correlations, where the label enters no fit.")
     if ai:
-        rd, bd = ai["readout"], ai["band"]
+        rd, th, ce = ai["readout"], ai["threshold"], ai["ceiling"]
+        drv = ai["drivers"]["flagged"]["by_period"]
         print(f"\n  Screening readout (the binary one): a recording is "
-              f"flagged when the composite\n  index falls outside the normal "
-              f"cohort's {bd['n_sd']:g} SD band. That gives sensitivity "
-              f"{rd['sensitivity']:.3f}\n  ({rd['tp']}/{rd['tp'] + rd['fn']}) "
-              f"and specificity {rd['specificity']:.3f} "
-              f"({rd['tn']}/{rd['tn'] + rd['fp']}), Fisher exact p = "
-              f"{rd['fisher_p']:.4g}.\n  The band is built from the normal "
-              f"recordings, so that specificity is in-sample"
+              f"flagged when the largest of its\n  "
+              f"{th['n_constructs']} signed deviations clears tau = "
+              f"{th['tau']:.3f}, the 1 - alpha/{th['n_constructs']} normal "
+              f"quantile\n  (alpha = {th['alpha']:g}, Bonferroni for the "
+              f"{th['n_constructs']} chances the maximum gives each "
+              f"recording).\n  That gives sensitivity {rd['sensitivity']:.3f} "
+              f"({rd['tp']}/{rd['tp'] + rd['fn']}) and specificity "
+              f"{rd['specificity']:.3f} ({rd['tn']}/{rd['tn'] + rd['fp']}), "
+              f"Fisher exact\n  p = {rd['fisher_p']:.4g}. mu and s are "
+              f"estimated on the normal recordings, so that specificity is "
+              f"in-sample"
               + (f" ({ai['loo']['specificity']:.3f} leave-one-out)"
                  if ai.get("loo") else "")
               + ";\n  the sensitivity is not, since no abnormal recording "
-              "enters the band. No parameter\n  anywhere in the index is "
+              "enters the reference. No\n  parameter anywhere in the index is "
               "fitted against the label.")
+        if drv:
+            print("  The flagged recordings deviate for distinct reasons, read "
+                  "off the construct that\n  attains the maximum: "
+                  + ",  ".join(f"{n} through the {k} period"
+                               for k, n in drv.items() if n) + ".")
+        if ce["n_abnormal"]:
+            print(f"  Ceiling: {ce['n_inside_normal_range']} of the "
+                  f"{ce['n_abnormal']} abnormal recordings lie inside the "
+                  f"normal range on\n  every construct, so no threshold on "
+                  f"this statistic reaches them; "
+                  f"{ce['n_reachable']}/{ce['n_abnormal']} is the most any cut "
+                  f"could\n  get at full specificity, rather than a threshold "
+                  f"artefact.")
 
     # ---- outputs ----
     section("Outputs")

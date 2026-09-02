@@ -20,10 +20,12 @@ Five constructs, in the order they are reported:
 5. **FidgetyFind** -- the published detector (Morais et al., 2023) of the
    fidgety movements the GMA label is about, computed from the keypoints alone.
    It is the external yardstick the four constructs above are read against.
-6. **The abnormality index** -- the four endpoints standardised, reduced to
-   ``PC1``, and cut at two SDs of the *normal* recordings' own distribution.
-   The composite screening readout, and the only place the constructs are
-   combined rather than reported side by side.
+6. **The abnormality index** -- the four endpoints standardised against the
+   *normal* recordings, signed by their pathological poles and reduced to the
+   largest of them, ``T(x) = max_j d_j z(x)_j``, flagged above the Bonferroni
+   normal quantile. The composite screening readout, and the only place the
+   constructs are combined rather than reported side by side. The maximum,
+   because the assessment needs only one abnormal pattern.
 
 Everything is computed by :mod:`run_analysis`; this module chooses the settings
 that produce the full picture (the fluency curve and the per-recording
@@ -258,32 +260,47 @@ def summarise(results: dict, outdir: str) -> dict:
     # 6. the composite readout ----------------------------------------------
     ai = results.get("abnormality_index")
     if ai:
-        r, b = ai.get("readout", {}), ai.get("band", {})
+        r = ai.get("readout", {})
+        th = ai.get("threshold", {})
+        ce = ai.get("ceiling", {})
+        drv = (ai.get("drivers") or {}).get("flagged", {})
         out["abnormality_index"] = {
             "features": list(ai.get("feature_names", [])),
             "features_missing": list(ai.get("features_missing", [])),
-            "pc1_explained": _f(ai.get("pc1_explained")),
-            "loadings": dict(zip(ai.get("feature_names", []),
-                                 [_f(v) for v in ai.get("loadings", [])])),
-            "orientation": (ai.get("orientation") or {}).get("method", ""),
-            "band": {"mu0": _f(b.get("mu0")), "sd0": _f(b.get("sd0")),
-                     "n_sd": _f(b.get("n_sd")), "lo": _f(b.get("lo")),
-                     "hi": _f(b.get("hi")), "side": b.get("side", ""),
-                     "n_normal": int(b.get("n_normal", 0))},
+            "directions": dict(zip(ai.get("feature_names", []),
+                                   [int(v) for v in ai.get("directions", [])])),
+            "threshold": {"tau": _f(th.get("tau")),
+                          "alpha": _f(th.get("alpha")),
+                          "n_constructs": int(th.get("n_constructs", 0)),
+                          "per_construct_alpha":
+                              _f(th.get("per_construct_alpha")),
+                          "method": th.get("method", "")},
+            "reference": {"n_normal": int((ai.get("reference") or {})
+                                          .get("n_normal", 0))},
             "readout": {k: (_f(r.get(k)) if isinstance(r.get(k), float)
                             else r.get(k))
                         for k in ("tp", "fp", "fn", "tn", "sensitivity",
                                   "specificity", "ppv", "npv", "accuracy",
                                   "balanced_accuracy", "youden_j", "fisher_p",
                                   "n_flagged", "n")},
+            "drivers": {k: v["n"] for k, v in
+                        (drv.get("by_construct") or {}).items() if v["n"]},
+            "drivers_by_period": dict(drv.get("by_period") or {}),
+            "ceiling": {"n_abnormal": int(ce.get("n_abnormal", 0)),
+                        "n_reachable": int(ce.get("n_reachable", 0)),
+                        "n_inside_normal_range":
+                            int(ce.get("n_inside_normal_range", 0)),
+                        "max_normal_index": _f(ce.get("max_normal_index"))},
+            "plain_cut": {k: v for k, v in (ai.get("plain_cut") or {}).items()
+                          if k != "note"},
             "loo_specificity": _f((ai.get("loo") or {}).get("specificity")),
             "n_scored": int(ai.get("n_scored", 0)),
             "n_imputed": int(ai.get("n_imputed", 0)),
             "missing_policy": ai.get("missing_policy", ""),
             "group": _auc_row(ai.get("group")),
-            "note": ("no parameter is fitted against the label: the band is "
-                     "the normal cohort's own spread, so the specificity is "
-                     "in-sample and the sensitivity is not")}
+            "note": ("no parameter is fitted against the label: mu and s are "
+                     "the normal cohort's own, so the specificity is in-sample "
+                     "and the sensitivity is not")}
     else:
         out["abnormality_index"] = {"skipped": True}
 
@@ -465,35 +482,68 @@ def summary_markdown(s: dict) -> str:
     if ai.get("skipped"):
         L += ["- skipped", ""]
     else:
-        b, r = ai["band"], ai["readout"]
+        th, r, ce = ai["threshold"], ai["readout"], ai["ceiling"]
         g = ai.get("group", {})
         ci = g.get("auc_ci", [np.nan, np.nan])
-        L += [f"- `PC1` of {len(ai['features'])} standardised endpoints "
-              f"({', '.join(ai['features'])}), keeping "
-              f"{_fmt(ai['pc1_explained'] * 100, 1)}% of their variance"
+        poles = ", ".join(f"{k} {'+' if v > 0 else '-'}"
+                          for k, v in ai["directions"].items())
+        L += [f"- `T(x) = max_j d_j z(x)_j`: the largest signed deviation "
+              f"across {len(ai['features'])} standardised endpoints "
+              f"({', '.join(ai['features'])})"
               + (f"; not available, so not in the index: "
                  f"{', '.join(ai['features_missing'])}"
                  if ai.get("features_missing") else ""),
-              "- loadings: " + ", ".join(f"{k} {_fmt(v, 2)}"
-                                         for k, v in ai["loadings"].items())
-              + f" (sign fixed by {ai['orientation']}; higher = more abnormal)",
-              f"- normative band from the {b['n_normal']} normal recordings: "
-              f"{_fmt(b['mu0'])} +- {_fmt(b['n_sd'], 0)} x {_fmt(b['sd0'])} = "
-              f"[{_fmt(b['lo'])}, {_fmt(b['hi'])}], {b['side']}-sided",
+              f"- standardised against the "
+              f"{ai['reference']['n_normal']} normal recordings (their mean "
+              f"and sample SD, per endpoint); pathological poles {poles} "
+              f"(+ = higher is abnormal)",
+              "- the maximum, not a mean or a component: the assessment calls "
+              "a recording abnormal on a poor repertoire, *or* on "
+              "cramped-synchronised movement, *or* on absent fidgety "
+              "movement, so the score has to fire when any single construct "
+              "signals abnormality",
+              f"- threshold tau = {_fmt(th['tau'])}: the "
+              f"1 - alpha/{th['n_constructs']} normal quantile with alpha = "
+              f"{_fmt(th['alpha'], 2)}, a Bonferroni correction for the "
+              f"{th['n_constructs']} chances the maximum gives each recording",
               f"- **flagged {r['n_flagged']}/{r['n']}: sensitivity "
               f"{_fmt(r['sensitivity'])} ({r['tp']}/{r['tp'] + r['fn']}), "
               f"specificity {_fmt(r['specificity'])} "
               f"({r['tn']}/{r['tn'] + r['fp']})**; PPV {_fmt(r['ppv'])}, NPV "
               f"{_fmt(r['npv'])}, balanced accuracy "
               f"{_fmt(r['balanced_accuracy'])}, Fisher exact p = "
-              f"{_fmt_p(r['fisher_p'])}",
-              f"- leave-one-out specificity {_fmt(ai.get('loo_specificity'))}: "
-              f"the band is built from the normal cohort and then applied to "
-              f"it, so the specificity above is in-sample. The sensitivity is "
-              f"not -- no abnormal recording enters the band.",
-              f"- as a continuous endpoint: AUC {_fmt(g.get('auc'))} "
-              f"[{_fmt(ci[0])}, {_fmt(ci[1])}], p = {_fmt_p(g.get('p'))}",
-              f"- {ai['note']}", ""]
+              f"{_fmt_p(r['fisher_p'])}"]
+        if ai.get("drivers"):
+            L += ["- the construct attaining the maximum, per flag: "
+                  + ", ".join(f"{k} {v}" for k, v in ai["drivers"].items())
+                  + (" (by period: "
+                     + ", ".join(f"{k} {v}" for k, v
+                                 in ai["drivers_by_period"].items() if v)
+                     + ")" if ai.get("drivers_by_period") else "")]
+        L += [f"- leave-one-out specificity {_fmt(ai.get('loo_specificity'))}: "
+              f"mu and s are estimated on the normal cohort and the index is "
+              f"then applied to it, so the specificity above is in-sample. The "
+              f"sensitivity is not -- no abnormal recording enters the "
+              f"reference."]
+        if ce.get("n_abnormal"):
+            L += [f"- ceiling: {ce['n_inside_normal_range']} of the "
+                  f"{ce['n_abnormal']} abnormal recordings lie at or below the "
+                  f"largest normal index ({_fmt(ce['max_normal_index'])}), so "
+                  f"no threshold on this statistic reaches them; "
+                  f"{ce['n_reachable']}/{ce['n_abnormal']} is the most any cut "
+                  f"could get at full specificity"]
+        L += [f"- as a continuous endpoint: AUC {_fmt(g.get('auc'))} "
+              f"[{_fmt(ci[0])}, {_fmt(ci[1])}], p = {_fmt_p(g.get('p'))}"]
+        pc = ai.get("plain_cut") or {}
+        if pc and _f(th["tau"]) > _f(pc.get("tau")):
+            L += [f"- the maximum buys sensitivity to a single-axis deviation "
+                  f"at the price of false positives; the "
+                  f"alpha/{th['n_constructs']} level holds this in check -- a "
+                  f"plain {_fmt(pc['tau'], 0)} SD cut on the same index would "
+                  f"flag {pc['n_normal_flagged']} of the "
+                  f"{ai['reference']['n_normal']} normal recordings against "
+                  f"{r['fp']} here"]
+        L += [f"- {ai['note']}", ""]
 
     co = s.get("correlations") or {}
     if co.get("table"):
@@ -667,10 +717,11 @@ def run_report(csv: str = "rvi38_analysis.csv",
     ``"synchrony"``, ``"fidgetyfind"``, ``"abnormality_index"``,
     ``"clinical"``).
 
-    ``abnormality_index=False`` drops the composite screening readout; the band
-    width, its side and the missing-value policy are ``index_sd=2.0``,
-    ``index_side="two"`` and ``index_missing="impute"``, passed through like
-    any other override.
+    ``abnormality_index=False`` drops the composite screening readout; its
+    family-wise level and the missing-value policy are ``index_alpha=0.05`` and
+    ``index_missing="impute"``, passed through like any other override, and
+    ``index_tau=`` sets the threshold directly instead of deriving it from
+    ``alpha``.
 
     Any further keyword goes straight through to the runner:
     ``fluency_omega=0.7`` becomes ``--fluency-omega 0.7`` and

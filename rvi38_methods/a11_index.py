@@ -1,60 +1,79 @@
-"""The abnormality index: PC1 of the four endpoints, against a normative band.
+"""The abnormality index: the largest signed deviation across the four endpoints.
 
-Every construct upstream ends in one scalar per recording, and each is
-contrasted with the group on its own. This module is the **composite readout**:
-the four endpoints are put in one ``N x 4`` matrix, standardised, reduced by PCA
-to the first principal component -- a continuous *abnormality index* carrying
-the largest single share of the variance the four share -- and turned into a
-binary flag by a **normative reference range** rather than by a fitted
-classifier.
+Read alone, each of the four endpoints is null. This module is the **composite
+readout**: the four constructs are put in one ``N x 4`` matrix, standardised
+against the normal recordings alone, signed by each construct's stated
+pathological pole, and reduced to one scalar per recording by taking the
+**maximum**.
 
-Why a reference range and not a classifier. With ``n1 = 6`` positives, any
-model with free parameters fitted against the label -- logistic regression, a
-tree, an SVM, a tuned cut-off -- has more freedom than the positives can
-constrain, and its in-sample accuracy says almost nothing. The normative
-approach fits nothing to the outcome: the healthy cohort defines a range, and a
-recording is flagged when it falls outside it. That is a screening instrument,
-"this infant is unlike healthy development", not a prediction of the label.
+**Why the maximum, and not an average or a component.** The four constructs
+span both periods of the assessment. Fluency, mixing and synchrony read the
+writhing period, from term to about two months, whose abnormal forms are a poor
+repertoire and cramped-synchronised movement; FidgetyFind reads the fidgety
+period, from about two to five months. The pipeline is a general representation
+of infant motion, not a detector for one pattern -- a poor repertoire early and
+absent fidgety movement later both reflect reduced movement variety, so an
+abnormal recording may deviate on any of the four constructs, not only the one
+its label names.
+
+The assessment itself needs only one abnormal pattern: a clinician calls a
+recording abnormal on a poor repertoire, *or* on cramped-synchronised movement,
+*or* on absent fidgety movement, and the other patterns need not appear. A score
+that follows the assessment must therefore fire when any single construct
+signals abnormality, not only when several agree. The maximum reads the one most
+abnormal construct and ignores the rest, which is what the assessment does. An
+average or a principal component would instead ask the constructs to agree, and
+would dilute a single-axis deviation against three quiet ones.
 
 **The procedure**, in the order it runs:
 
 1. **Matrix.** ``X`` is ``N x p``, one row per recording, one column per
    endpoint (:data:`FEATURES`: fluency ``Phi``, Kemeny ``K``, synchrony
    ``mean F``, FidgetyFind ``FF``).
-2. **Standardise.** ``Z = (X - mean) / sd`` column-wise over the whole cohort,
-   labels not consulted. The four endpoints live on incomparable scales, so PCA
-   on the raw matrix would be PCA on whichever column happens to have the
-   largest variance.
-3. **PCA.** The SVD of the centred ``Z``; ``PC1 = Z w1`` with ``w1`` the
-   leading right singular vector. Its explained-variance ratio says how much of
-   the four-endpoint structure one number keeps.
-4. **Orient.** A principal component's sign is arbitrary. It is fixed here by
-   the *stated* pathological directions of the endpoints (:data:`DIRECTIONS`):
-   ``sign(w1 . d)``, so a larger index means more abnormal. Only the two
-   endpoints whose pole METHODS actually states get a vote -- high WCLR-PP
-   coupling is the cramped-synchronised pole, high FidgetyFind is normal --
-   and the other two abstain. **No label enters this**, and the two-sided
-   readout below does not depend on it at all.
-5. **Normative band.** ``mu0`` and ``sd0`` are the mean and sample SD of the
-   index over the ``label == 0`` recordings alone. The band is
-   ``mu0 +- n_sd * sd0`` (``n_sd = 2``).
-6. **Flag.** ``1`` when the index falls strictly outside the band, ``0`` inside.
-   Two-sided by default -- "unlike the healthy distribution", in either
-   direction -- which is also what makes the readout invariant to step 4.
+2. **Standardise against the normal cohort.** Writing ``N`` for the normal
+   recordings, ``z(x)_j = (x_j - mu_j) / s_j`` with ``mu_j`` and ``s_j`` the
+   mean and sample SD of endpoint ``j`` **over the normal recordings alone**.
+   The four endpoints live on incomparable scales, so the raw columns cannot be
+   compared, let alone maximised over.
+3. **Sign by the pathological pole.** Each construct carries a pole fixed by its
+   definition, not by the label. Ordering the endpoints
+   ``(Phi, K, mean F, FF)``, :data:`DIRECTIONS` is ``d = (+1, +1, +1, -1)``:
+   higher ``Phi`` (more similar consecutive movements), higher ``K`` (slower
+   mixing) and higher ``mean F`` (more inter-limb coupling) are abnormal, and
+   lower ``FF`` (less direction variety) is abnormal. The signed deviation
+   ``d_j z(x)_j`` is large when construct ``j`` points toward its abnormal pole.
+4. **Index.** ``T(x) = max_j d_j z(x)_j`` -- the number of standard deviations
+   by which the *most extreme* construct sits toward its abnormal pole. The
+   construct attaining the maximum is recorded as the recording's **driver**, so
+   the axis of deviation stays visible.
+5. **Flag.** ``y(x) = 1[T(x) > tau]`` with ``Pr(Z <= tau) = 1 - alpha/p``,
+   ``Z ~ Normal(0, 1)``. The ``alpha/p`` level is a **Bonferroni** correction for
+   taking the maximum over ``p`` constructs: each recording gets ``p`` chances to
+   clear the cut. With ``alpha = 0.05`` and ``p = 4`` this gives
+   ``tau ~ 2.24``.
 
-**What the numbers mean, and what they do not.** The band is built from the
-healthy recordings and then applied to them, so the **specificity is in-sample**
-and is a description of the fit, not an estimate of out-of-sample specificity.
-:func:`abnormality_index` therefore also reports a leave-one-out specificity,
-where each healthy recording is scored against a band computed from the other
-31. The sensitivity needs no such correction: no abnormal recording enters the
-band, so it is already out-of-sample. The standardisation and the PCA see all
-``N`` rows, which is transductive but label-free.
+**What the numbers mean, and what they do not.** ``mu_j`` and ``s_j`` are
+estimated from the normal recordings and the index is then applied to them, so
+the **specificity is in-sample** and is a description of the fit, not an
+estimate of out-of-sample specificity. :func:`abnormality_index` therefore also
+reports a leave-one-out specificity, where each normal recording is scored
+against a reference computed from the other ``n0 - 1``. The sensitivity needs no
+such correction: no abnormal recording enters the reference, so it is already
+out-of-sample.
 
-Nothing here is corrected for multiplicity, in keeping with the rest of the
-reported inference: the index is one more endpoint, contrasted by the same
-exact Mann-Whitney permutation null as the four it is built from, and the 2x2
-table carries Fisher's exact p.
+Two limits govern the reading, and both are reported. First, the maximum buys
+sensitivity to a single-axis deviation at the price of false positives -- each
+recording has ``p`` chances to clear the cut, which the ``alpha/p`` level holds
+in check but does not remove. Second, an abnormal recording that lies inside the
+normal range on *every* construct cannot be reached by any threshold on this
+statistic; :func:`abnormality_index` counts those separately as the **ceiling**,
+so a missed recording is not read as a threshold artefact.
+
+Nothing here is fitted against the label: the standardisation sees only which
+recordings are normal, the signs come from the constructs' definitions, and the
+threshold is a normal quantile. The index is contrasted by the same exact
+Mann-Whitney permutation null as the four endpoints it is built from, and the
+2x2 table carries Fisher's exact p.
 """
 
 from __future__ import annotations
@@ -76,32 +95,64 @@ import a1_stats as ST
 class Feature:
     """One endpoint of the pipeline, and where it lives in a results object.
 
-    ``direction`` is the *stated* pathological pole: ``+1`` when a larger value
-    is the abnormal one, ``-1`` when a smaller one is, and ``0`` when METHODS
-    states no direction for it -- in which case the feature abstains from
-    orienting PC1 (it still enters the matrix, the standardisation and the
-    component like any other).
+    ``direction`` is the pathological pole: ``+1`` when a larger value is the
+    abnormal one, ``-1`` when a smaller one is. It is a property of the
+    construct's definition, never of the label, and every construct entering the
+    index must state one -- a maximum over signed deviations has no meaning for
+    a column whose abnormal direction is undeclared.
+
+    ``period`` is the assessment period the construct reads: ``"writhing"``
+    (term to about two months; poor repertoire and cramped-synchronised
+    movement) or ``"fidgety"`` (about two to five months; absent fidgety
+    movement).
     """
 
     key: str
     label: str
     direction: int
+    period: str
     block: str          # results key holding it ("" = the primary model)
     path: tuple         # keys to walk from that block to the vector
 
 
 FEATURES: tuple[Feature, ...] = (
-    Feature("phi", "fluency Phi", 0, "", ("phi", "excess")),
-    Feature("kemeny", "Kemeny (jumps)", 0, "", ("kemeny_per_subject",)),
-    Feature("mean_F", "synchrony (mean F)", +1, "wclrpp", ("mean_F",)),
-    Feature("FF", "FidgetyFind FF", -1, "fidgetyfind", ("FF",)),
+    Feature("phi", "fluency Phi", +1, "writhing", "", ("phi", "excess")),
+    Feature("kemeny", "Kemeny (jumps)", +1, "writhing", "",
+            ("kemeny_per_subject",)),
+    Feature("mean_F", "synchrony (mean F)", +1, "writhing", "wclrpp",
+            ("mean_F",)),
+    Feature("FF", "FidgetyFind FF", -1, "fidgety", "fidgetyfind", ("FF",)),
 )
 
-#: The stated pathological pole of each endpoint, as used to orient PC1.
+#: The pathological pole of each endpoint, as used to sign its deviation.
+#: ``Phi``: more similar consecutive movements is the poor-repertoire pole.
+#: ``Kemeny``: slower mixing is the poor-repertoire pole.
 #: ``mean F``: high inter-limb coupling is the cramped-synchronised pole.
-#: ``FF``: higher is normal, so the abnormal group is expected below.
-#: ``Phi`` and ``Kemeny`` have no stated pole and abstain.
+#: ``FF``: higher is normal, so the abnormal recordings are expected below.
 DIRECTIONS: dict[str, int] = {f.key: f.direction for f in FEATURES}
+
+#: Which assessment period each endpoint reads.
+PERIODS: dict[str, str] = {f.key: f.period for f in FEATURES}
+
+#: Default family-wise level the threshold is set at, before the Bonferroni
+#: division by the number of constructs the maximum ranges over.
+ALPHA: float = 0.05
+
+
+def threshold(alpha: float = ALPHA, n_constructs: int = 4) -> float:
+    """``tau`` with ``Pr(Z <= tau) = 1 - alpha / n_constructs``, ``Z`` standard normal.
+
+    The Bonferroni correction for taking a maximum over ``n_constructs``
+    deviations: under the null each is standard normal, so the chance that *any*
+    of them clears ``tau`` is at most ``alpha``. ``alpha = 0.05`` over four
+    constructs gives ``tau = 2.2414``.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha}")
+    if n_constructs < 1:
+        raise ValueError(f"there must be at least one construct, got "
+                         f"{n_constructs}")
+    return float(stats.norm.ppf(1.0 - alpha / n_constructs))
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +225,7 @@ def feature_matrix(source, features: tuple[Feature, ...] = FEATURES) -> dict:
             "features": tuple(kept), "names": [f.label for f in kept],
             "keys": [f.key for f in kept],
             "directions": np.array([f.direction for f in kept], float),
+            "periods": [f.period for f in kept],
             "missing": missing, "primary": primary, "n": n}
 
 
@@ -190,7 +242,13 @@ def save_feature_matrix(fm: dict, path: str) -> str:
 
 
 def load_feature_matrix(path: str) -> dict:
-    """Read back what :func:`save_feature_matrix` wrote."""
+    """Read back what :func:`save_feature_matrix` wrote.
+
+    The poles are refreshed from :data:`DIRECTIONS` for every key the current
+    :data:`FEATURES` knows, so a matrix cached by an earlier version scores
+    against today's declared poles rather than against whatever was written into
+    the file. The matrix itself is data and is read back unchanged.
+    """
     with np.load(path, allow_pickle=True) as z:
         fm = {"X": z["X"].astype(float),
               "labels": z["labels"].astype(int),
@@ -198,6 +256,10 @@ def load_feature_matrix(path: str) -> dict:
               "names": [str(v) for v in z["names"]],
               "keys": [str(v) for v in z["keys"]],
               "directions": z["directions"].astype(float)}
+    fm["directions"] = np.array(
+        [DIRECTIONS.get(k, d) for k, d in zip(fm["keys"], fm["directions"])],
+        float)
+    fm["periods"] = [PERIODS.get(k, "") for k in fm["keys"]]
     fm["n"] = len(fm["labels"])
     fm["missing"] = []
     fm["features"] = tuple(f for f in FEATURES if f.key in fm["keys"])
@@ -207,47 +269,43 @@ def load_feature_matrix(path: str) -> dict:
 # ---------------------------------------------------------------------------
 # the index
 # ---------------------------------------------------------------------------
-def _standardise(X, missing="impute"):
-    """Column z-scores over the whole cohort; how NaNs are handled is declared.
+def _standardise(X, ref, missing="impute"):
+    """Column z-scores against the reference rows; how NaNs are handled is declared.
 
-    ``impute`` keeps every recording and sets a missing entry to its column
-    mean, i.e. ``z = 0``: the value that adds no information and no leverage,
-    which is the honest stand-in when one endpoint declined to score a
-    recording the others did score. ``drop`` removes the row from the fit and
-    from the readout entirely, leaving its index NaN.
+    ``ref`` is the boolean mask of the recordings that define the reference --
+    the normal cohort. ``mu_j`` and ``s_j`` are that subset's mean and *sample*
+    SD (``ddof = 1``, the reference being a sample rather than the population),
+    so a reference recording's z-scores have mean 0 and SD 1 by construction and
+    an abnormal recording is read in units of the normal spread.
+
+    ``impute`` keeps every recording and sets a missing entry to ``z = 0``, the
+    reference mean: the value that adds no information and no leverage, which is
+    the honest stand-in when one endpoint declined to score a recording the
+    others did score. Under the maximum it also means a declined construct never
+    drives the flag. ``drop`` removes the row from the reference and from the
+    readout entirely, leaving its index NaN.
     """
     X = np.asarray(X, float)
+    ref = np.asarray(ref, bool)
     ok_row = np.isfinite(X).all(1)
-    fit = X if missing == "impute" else X[ok_row]
+    use = ref if missing == "impute" else (ref & ok_row)
+    fit = X[use]
+    if len(fit) < 2:
+        raise ValueError(f"the reference needs at least two normal recordings, "
+                         f"got {len(fit)}")
     mean = np.array([np.nanmean(c) if np.isfinite(c).any() else np.nan
                      for c in fit.T])
-    sd = np.array([np.nanstd(c) if np.isfinite(c).any() else np.nan
+    sd = np.array([np.nanstd(c, ddof=1) if np.isfinite(c).sum() > 1 else np.nan
                    for c in fit.T])
     bad = [j for j, s in enumerate(sd) if not np.isfinite(s) or s <= 0]
     if bad:
-        raise ValueError(f"endpoint column(s) {bad} have no usable spread "
-                         f"(all missing, or constant across the cohort), so "
-                         f"they cannot be standardised")
+        raise ValueError(f"endpoint column(s) {bad} have no usable spread over "
+                         f"the normal recordings (all missing, or constant), "
+                         f"so they cannot be standardised")
     imputed = ~np.isfinite(X)
     Z = np.where(imputed, 0.0, (X - mean) / sd)
     scored = np.ones(len(X), bool) if missing == "impute" else ok_row
     return Z, mean, sd, scored, imputed
-
-
-def _orient(w, directions):
-    """Fix PC1's arbitrary sign from the stated pathological poles, not the label.
-
-    ``sign(w . d)`` points the component at the abnormal pole of the endpoints
-    that have one. If the two abstain and the other two cancel exactly, the
-    largest loading is made positive instead, which is at least deterministic;
-    the returned ``method`` says which happened.
-    """
-    d = np.asarray(directions, float)
-    vote = float(np.dot(w, d))
-    if abs(vote) > 1e-12:
-        return (1.0 if vote > 0 else -1.0), vote, "stated pathological poles"
-    j = int(np.argmax(np.abs(w)))
-    return (1.0 if w[j] >= 0 else -1.0), vote, "largest loading made positive"
 
 
 def _confusion(flag, labels):
@@ -274,23 +332,41 @@ def _confusion(flag, labels):
     return out
 
 
-def abnormality_index(X, labels, directions=None, names=None, n_sd: float = 2.0,
-                      side: str = "two", missing: str = "impute",
+def _driver_counts(driver, keys, names, periods, mask):
+    """Which construct attains the maximum, over the recordings in ``mask``."""
+    by_construct, by_period = {}, {}
+    for j, k in enumerate(keys):
+        n = int(np.sum(mask & (driver == j)))
+        by_construct[k] = {"name": names[j], "period": periods[j], "n": n}
+        pd_ = periods[j] or "unstated"
+        by_period[pd_] = by_period.get(pd_, 0) + n
+    return {"by_construct": by_construct, "by_period": by_period}
+
+
+def abnormality_index(X, labels, directions=None, names=None, keys=None,
+                      periods=None, alpha: float = ALPHA,
+                      tau: float | None = None, missing: str = "impute",
                       boot: int = 10_000) -> dict:
-    """PC1 of the standardised endpoints, cut at ``n_sd`` SD of the healthy cohort.
+    """``T(x) = max_j d_j z(x)_j``, cut at the Bonferroni normal quantile.
 
     ``X`` is ``N x p`` (rows = recordings, columns = endpoints), ``labels`` is
     ``1`` for abnormal and ``0`` for normal. ``directions`` gives each column's
-    stated pathological pole (``+1`` / ``-1`` / ``0`` to abstain) and is used
-    only to orient PC1, never the label.
+    pathological pole (``+1`` when large is abnormal, ``-1`` when small is);
+    every column must state one, since a maximum over signed deviations has no
+    meaning for an undeclared direction.
 
-    ``side`` is ``"two"`` (the reported readout: outside the band in either
-    direction), ``"upper"`` or ``"lower"``. ``missing`` is ``"impute"`` or
-    ``"drop"``; see :func:`_standardise`.
+    The columns are standardised against the **normal recordings alone**, signed
+    by ``directions``, and reduced by the maximum. A recording is flagged when
+    that maximum clears ``tau``, which defaults to the ``1 - alpha/p`` normal
+    quantile -- the Bonferroni correction for the ``p`` chances the maximum
+    gives each recording. Pass ``tau`` to set the cut directly instead.
 
-    Returns the index, the band, the flag and the readout. The AUC of the
-    continuous index is the same exact Mann-Whitney contrast every other
-    endpoint gets; the 2x2 table of the binary flag carries Fisher's exact p.
+    ``missing`` is ``"impute"`` or ``"drop"``; see :func:`_standardise`.
+
+    Returns the index, the threshold, the flag, the driving construct per
+    recording and the readout. The AUC of the continuous index is the same exact
+    Mann-Whitney contrast every other endpoint gets; the 2x2 table of the binary
+    flag carries Fisher's exact p.
     """
     X = np.atleast_2d(np.asarray(X, float))
     y = np.asarray(labels, int)
@@ -299,105 +375,159 @@ def abnormality_index(X, labels, directions=None, names=None, n_sd: float = 2.0,
         raise ValueError(f"X has {n} rows but there are {len(y)} labels")
     if p < 2:
         raise ValueError(f"the index needs at least two endpoints, got {p}")
-    if side not in ("two", "upper", "lower"):
-        raise ValueError(f"side must be 'two', 'upper' or 'lower', got {side!r}")
     if missing not in ("impute", "drop"):
         raise ValueError(f"missing must be 'impute' or 'drop', got {missing!r}")
     if directions is None:
-        directions = np.zeros(p)
+        raise ValueError("every endpoint must state its pathological pole; "
+                         "pass directions of +1 (large is abnormal) or -1 "
+                         "(small is abnormal), one per column")
+    d = np.asarray(directions, float).ravel()
+    if d.size != p:
+        raise ValueError(f"directions has {d.size} entries but X has {p} "
+                         f"columns")
+    if not np.all(np.isin(d, (-1.0, 1.0))):
+        raise ValueError(f"every direction must be +1 or -1; got "
+                         f"{d.tolist()}. A construct with no stated "
+                         f"pathological pole cannot enter a maximum over "
+                         f"signed deviations")
     names = list(names) if names is not None else [f"x{j}" for j in range(p)]
+    keys = list(keys) if keys is not None else list(names)
+    periods = list(periods) if periods is not None else [""] * p
 
-    Z, mean, sd, scored, imputed = _standardise(X, missing)
-    Zc = Z - Z[scored].mean(0)
-    _, S, Vt = np.linalg.svd(Zc[scored], full_matrices=False)
-    ev = S ** 2 / max(len(np.flatnonzero(scored)) - 1, 1)
-    tot = float((S ** 2).sum())
-    ratio = S ** 2 / tot if tot > 0 else np.full(len(S), np.nan)
+    normal = (y == 0)
+    Z, mean, sd, scored, imputed = _standardise(X, normal, missing)
 
-    w = Vt[0]
-    sign, vote, how = _orient(w, directions)
-    w = w * sign
-    pc1 = np.where(scored, Zc @ w, np.nan)
+    # the signed deviation of every construct, and the largest of them
+    signed = Z * d
+    T = np.where(scored, signed.max(1), np.nan)
+    driver = np.where(scored, signed.argmax(1), -1)
 
-    # normative band: the healthy cohort alone, which is the whole of what the
-    # label is used for here.
-    healthy = (y == 0) & scored
-    n0 = int(healthy.sum())
-    if n0 < 2:
-        raise ValueError(f"the normative band needs at least two normal "
-                         f"recordings, got {n0}")
-    mu0 = float(np.mean(pc1[healthy]))
-    sd0 = float(np.std(pc1[healthy], ddof=1))
-    if not np.isfinite(sd0) or sd0 <= 0:
-        raise ValueError("the normal recordings' index has zero spread, so no "
-                         "normative band can be built from it")
-    lo, hi = mu0 - n_sd * sd0, mu0 + n_sd * sd0
-    dev = (pc1 - mu0) / sd0
-
-    def _flag(v, m, s):
-        h, l = m + n_sd * s, m - n_sd * s
-        if side == "upper":
-            return v > h
-        if side == "lower":
-            return v < l
-        return (v > h) | (v < l)
-
-    flag = np.where(scored, _flag(pc1, mu0, sd0), np.nan)
+    tau = threshold(alpha, p) if tau is None else float(tau)
+    flag = np.where(scored, T > tau, np.nan)
     fin = scored & np.isfinite(flag)
     readout = _confusion(flag[fin].astype(int), y[fin])
 
-    # Leave-one-out: each healthy recording scored against a band built from
-    # the other n0-1, which is what its specificity would be if it had not
-    # helped define the band. The abnormal recordings never enter the band, so
-    # their sensitivity is already out-of-sample and is repeated unchanged.
+    ref = normal & scored
+    n0 = int(ref.sum())
+
+    # Leave-one-out: each normal recording standardised against the other
+    # n0 - 1, which is what its specificity would be if it had not helped set
+    # mu and s. The abnormal recordings never enter the reference, so their
+    # sensitivity is already out-of-sample and needs no such correction.
     loo = {}
     if n0 >= 3:
-        idx = np.flatnonzero(healthy)
-        f_loo = np.zeros(len(idx), bool)
+        idx = np.flatnonzero(ref)
+        T_loo = np.empty(len(idx))
         for i, k in enumerate(idx):
-            rest = pc1[np.setdiff1d(idx, [k])]
-            f_loo[i] = bool(_flag(pc1[k], float(np.mean(rest)),
-                                  float(np.std(rest, ddof=1))))
+            rest = np.zeros(n, bool)
+            rest[np.setdiff1d(idx, [k])] = True
+            Zk, *_ = _standardise(X, rest, missing)
+            T_loo[i] = float((Zk[k] * d).max())
+        f_loo = T_loo > tau
         loo = {"n": int(len(idx)), "n_flagged": int(f_loo.sum()),
                "specificity": float(1.0 - f_loo.mean()),
-               "note": ("each normal recording scored against a band built "
-                        "from the other normal recordings; the sensitivity "
-                        "needs no such correction, as no abnormal recording "
-                        "enters the band")}
+               "index": T_loo,
+               "note": ("each normal recording standardised against the other "
+                        "normal recordings; the sensitivity needs no such "
+                        "correction, as no abnormal recording enters the "
+                        "reference")}
 
-    group = ST.mannwhitney(pc1[(y == 1) & scored], pc1[healthy], boot=boot)
+    # The ceiling: an abnormal recording whose index does not clear the largest
+    # index among the normal recordings cannot be separated by ANY threshold on
+    # this statistic without flagging every normal one. Counting these keeps a
+    # missed recording from being read as an artefact of where tau was put.
+    ab = (y == 1) & scored
+    T_ref_max = float(np.max(T[ref])) if n0 else float("nan")
+    reachable = ab & (T > T_ref_max)
+    inside = ab & ~reachable
+    ceiling = {
+        "n_abnormal": int(ab.sum()),
+        "max_normal_index": T_ref_max,
+        "n_reachable": int(reachable.sum()),
+        "n_inside_normal_range": int(inside.sum()),
+        "max_sensitivity_at_full_specificity":
+            float(reachable.sum() / ab.sum()) if ab.sum() else float("nan"),
+        "note": ("an abnormal recording whose index sits at or below the "
+                 "largest index among the normal recordings lies inside the "
+                 "normal range on every construct; no threshold on this "
+                 "statistic reaches it, so it is a ceiling rather than a "
+                 "threshold artefact"),
+    }
+
+    # The price of the maximum, made checkable rather than asserted: the same
+    # statistic cut at a plain 2 SD, which is what tau would be without the
+    # Bonferroni division. It flags a superset, and how much larger a superset
+    # is the size of the correction on this cohort.
+    plain = 2.0
+    plain_flag = scored & (T > plain)
+    plain_cut = {"tau": plain,
+                 "n_flagged": int(plain_flag.sum()),
+                 "n_normal_flagged": int((plain_flag & ref).sum()),
+                 "n_abnormal_flagged": int((plain_flag & ab).sum()),
+                 "note": ("the same index cut at a plain 2 SD instead of the "
+                          "Bonferroni tau; it flags a superset, and the "
+                          "difference is what the alpha/p level holds in "
+                          "check")}
+
+    drivers = {
+        "all": _driver_counts(driver, keys, names, periods, scored),
+        "flagged": _driver_counts(driver, keys, names, periods,
+                                  fin & (flag == 1)),
+        "flagged_abnormal": _driver_counts(driver, keys, names, periods,
+                                           fin & (flag == 1) & (y == 1)),
+        "flagged_normal": _driver_counts(driver, keys, names, periods,
+                                         fin & (flag == 1) & (y == 0)),
+    }
+
+    group = ST.mannwhitney(T[ab], T[ref], boot=boot)
 
     return {
-        "pc1": pc1, "deviation": dev, "flag": flag, "scored": scored,
+        "index": T, "T": T, "signed": signed, "flag": flag, "scored": scored,
+        "driver": driver,
+        "driver_key": [keys[j] if j >= 0 else "" for j in driver],
+        "driver_name": [names[j] if j >= 0 else "" for j in driver],
+        "driver_period": [periods[j] if j >= 0 else "" for j in driver],
         "z": Z, "mean": mean, "sd": sd, "imputed": imputed,
         "n_imputed": int(imputed.sum()), "n_scored": int(scored.sum()),
-        "n": n, "names": names, "keys": list(names),
-        "loadings": w, "explained_variance": ev,
-        "explained_ratio": ratio, "pc1_explained": float(ratio[0]),
-        "orientation": {"sign": float(sign), "vote": vote, "method": how,
-                        "directions": np.asarray(directions, float).tolist()},
-        "band": {"mu0": mu0, "sd0": sd0, "n_sd": float(n_sd), "lo": lo,
-                 "hi": hi, "side": side, "n_normal": n0},
-        "readout": readout, "loo": loo, "group": group,
-        "missing_policy": missing,
-        "note": ("PC1 of the standardised endpoints, cut at "
-                 f"{n_sd:g} SD of the normal cohort's own distribution; "
+        "n": n, "names": names, "keys": keys, "periods": periods,
+        "directions": d.tolist(),
+        "threshold": {"tau": tau, "alpha": float(alpha),
+                      "n_constructs": int(p),
+                      "per_construct_alpha": float(alpha) / p,
+                      "method": ("Bonferroni over the constructs the maximum "
+                                 "ranges over: Pr(Z <= tau) = 1 - alpha/p")},
+        "reference": {"n_normal": n0, "mean": mean.tolist(), "sd": sd.tolist(),
+                      "ddof": 1,
+                      "note": ("mu and s are the normal recordings' mean and "
+                               "sample SD, so the index is in units of the "
+                               "normal spread")},
+        "readout": readout, "loo": loo, "ceiling": ceiling, "drivers": drivers,
+        "plain_cut": plain_cut,
+        "group": group, "missing_policy": missing,
+        "note": ("the largest signed deviation across the standardised "
+                 f"endpoints, flagged above tau = {tau:.4g} "
+                 f"(Bonferroni, alpha = {alpha:g} over {p} constructs); "
                  "no parameter is fitted against the label"),
     }
 
 
 def index_frame(fm: dict, ix: dict):
-    """The per-recording table: raw endpoints, z-scores, index, band and flag."""
+    """The per-recording table: raw endpoints, signed z-scores, index and flag."""
     import pandas as pd
     X, Z = np.asarray(fm["X"], float), np.asarray(ix["z"], float)
+    S = np.asarray(ix["signed"], float)
     rows = {"subject": np.arange(1, fm["n"] + 1), "video": fm["videos"],
             "label": np.asarray(fm["labels"], int)}
     for j, k in enumerate(fm["keys"]):
         rows[k] = X[:, j]
     for j, k in enumerate(fm["keys"]):
         rows[f"z_{k}"] = np.where(ix["imputed"][:, j], np.nan, Z[:, j])
-    rows["pc1"] = ix["pc1"]
-    rows["normative_z"] = ix["deviation"]
+    for j, k in enumerate(fm["keys"]):
+        rows[f"signed_z_{k}"] = np.where(ix["imputed"][:, j], np.nan, S[:, j])
+    rows["index"] = ix["index"]
+    rows["driver"] = ix["driver_key"]
+    rows["driver_period"] = ix["driver_period"]
+    rows["tau"] = np.full(fm["n"], ix["threshold"]["tau"])
     rows["flag"] = ix["flag"]
     rows["correct"] = np.where(np.isfinite(ix["flag"]),
                                ix["flag"] == np.asarray(fm["labels"], float),
@@ -407,7 +537,7 @@ def index_frame(fm: dict, ix: dict):
 
 def describe(fm: dict, ix: dict) -> str:
     """The readout as lines of text, for the run log and for a notebook."""
-    r, b, L = ix["readout"], ix["band"], []
+    r, th, L = ix["readout"], ix["threshold"], []
     L.append(f"  matrix: {ix['n']} recordings x {len(fm['keys'])} endpoints "
              f"({', '.join(fm['names'])})")
     if fm.get("missing"):
@@ -415,23 +545,20 @@ def describe(fm: dict, ix: dict) -> str:
                  f"{', '.join(fm['missing'])}")
     if ix["n_imputed"]:
         L.append(f"     {ix['n_imputed']} endpoint value(s) did not score and "
-                 f"were set to their column mean (z = 0)"
+                 f"were set to the normal mean (z = 0)"
                  if ix["missing_policy"] == "impute" else
                  f"     {ix['n'] - ix['n_scored']} recording(s) dropped for a "
                  f"missing endpoint")
-    L.append(f"  PC1 keeps {ix['pc1_explained']:.1%} of the standardised "
-             f"variance"
-             + (f" (PC2 {ix['explained_ratio'][1]:.1%})"
-                if len(ix["explained_ratio"]) > 1 else ""))
-    L.append("     loadings: " + ",  ".join(
-        f"{nm} {wj:+.3f}" for nm, wj in zip(fm["names"], ix["loadings"])))
-    L.append(f"     sign fixed by {ix['orientation']['method']} "
-             f"(higher index = more abnormal); the two-sided readout does not "
-             f"depend on it")
-    L.append(f"  normative band from the {b['n_normal']} normal recordings: "
-             f"mean {b['mu0']:+.3f}, SD {b['sd0']:.3f}, so "
-             f"{b['n_sd']:g} SD gives [{b['lo']:+.3f}, {b['hi']:+.3f}] "
-             f"({b['side']}-sided)")
+    L.append(f"  standardised against the {ix['reference']['n_normal']} normal "
+             f"recordings (their mean and sample SD, per endpoint)")
+    L.append("     pathological poles: " + ",  ".join(
+        f"{nm} {'+' if dj > 0 else '-'}"
+        for nm, dj in zip(fm["names"], ix["directions"]))
+        + "   (+ = higher is abnormal)")
+    L.append(f"  index T(x) = max_j d_j z_j, flagged above tau = "
+             f"{th['tau']:.4f} "
+             f"(alpha = {th['alpha']:g} / {th['n_constructs']} constructs, "
+             f"Bonferroni)")
     L.append(f"  flagged {r['n_flagged']}/{r['n']} recordings: "
              f"sensitivity {r['sensitivity']:.3f} ({r['tp']}/{r['tp'] + r['fn']}"
              f"), specificity {r['specificity']:.3f} "
@@ -439,12 +566,35 @@ def describe(fm: dict, ix: dict) -> str:
     L.append(f"     PPV {r['ppv']:.3f}, NPV {r['npv']:.3f}, balanced accuracy "
              f"{r['balanced_accuracy']:.3f}, Youden J {r['youden_j']:+.3f}; "
              f"Fisher exact p = {r['fisher_p']:.4g}")
+    drv = ix["drivers"]["flagged"]
+    driving = ",  ".join(f"{v['name']} {v['n']}"
+                         for v in drv["by_construct"].values() if v["n"])
+    if driving:
+        per = ",  ".join(f"{k} {v}" for k, v in drv["by_period"].items() if v)
+        L.append(f"     the construct attaining the maximum, per flag: "
+                 f"{driving}   (by period: {per})")
     if ix.get("loo"):
         lo = ix["loo"]
         L.append(f"     leave-one-out specificity {lo['specificity']:.3f} "
-                 f"({lo['n'] - lo['n_flagged']}/{lo['n']}): the band is built "
-                 f"from the normal cohort and then applied to it, so the "
-                 f"in-sample specificity above is a description of the fit")
+                 f"({lo['n'] - lo['n_flagged']}/{lo['n']}): mu and s are "
+                 f"estimated on the normal cohort and then applied to it, so "
+                 f"the in-sample specificity above is a description of the fit")
+    pc = ix.get("plain_cut")
+    if pc and th["tau"] > pc["tau"]:
+        L.append(f"     the price of the maximum: a plain "
+                 f"{pc['tau']:g} SD cut on the same index would flag "
+                 f"{pc['n_normal_flagged']} of the "
+                 f"{ix['reference']['n_normal']} normal recordings against "
+                 f"{r['fp']} here, which is the size of the alpha/"
+                 f"{th['n_constructs']} correction on this cohort")
+    c = ix["ceiling"]
+    if c["n_abnormal"]:
+        L.append(f"     ceiling: {c['n_inside_normal_range']}/"
+                 f"{c['n_abnormal']} abnormal recording(s) sit at or below the "
+                 f"largest normal index ({c['max_normal_index']:+.3f}), so no "
+                 f"threshold on this statistic reaches them; the most any cut "
+                 f"could get at full specificity is {c['n_reachable']}/"
+                 f"{c['n_abnormal']}")
     g = ix["group"]
     L.append(f"  the index as a continuous endpoint: AUC {g['auc']:.3f} "
              f"[{g.get('auc_lo', float('nan')):.3f}, "

@@ -7,11 +7,11 @@ the numbers in [ARCH §6.1].
 
 import numpy as np
 
-from vae_training import (TrainingConfig, NoMask, UniformMask, LimbMask,
+from architectures import (TrainingConfig, NoMask, UniformMask, LimbMask,
                           TopKSpeedMask, SoftmaxSpeedMask, PerFrameSpeedMask,
                           build_policy)
-from vae_training.data import slice_video, build_clips, train_val_split
-from vae_training.param_counts import conv_param_count, transformer_param_count
+from architectures.data import slice_video, build_clips, train_val_split
+from architectures.param_counts import conv_param_count, transformer_param_count
 
 
 rng = np.random.default_rng(0)
@@ -145,7 +145,7 @@ counts = conv_param_count(cfg_conv)
 expected = {"encoder_block_1": 28224, "encoder_block_2": 24704,
             "encoder_block_3": 49280, "bottleneck_heads": 65600,
             "decoder_lift": 33792, "decoder_block_3": 49280,
-            "decoder_block_2": 24640, "decoder_output": 21186}
+            "decoder_block_2": 24640, "decoder_output_full": 21186}
 print("\nconv parameter counts vs ARCH §6.1:")
 for k, exp in expected.items():
     got = counts[k]

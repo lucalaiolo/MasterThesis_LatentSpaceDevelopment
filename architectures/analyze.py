@@ -35,15 +35,20 @@ def load_checkpoint(path: str | Path, device: str = "cpu"):
 
     The training loop dumps `{"model": state_dict, "config": dict,
     "epoch": int}`. We reconstruct the `TrainingConfig`, rebuild the
-    architecture, and load the weights.
+    architecture, and load the weights. The config dict is filtered to the
+    fields `TrainingConfig` declares, so a checkpoint carrying settings this
+    version does not define still rebuilds instead of raising.
 
     Returns:
         (model, config): the model on `device` in eval mode, and the
         TrainingConfig it was trained with.
     """
     import torch
+    import dataclasses
     ckpt = torch.load(path, map_location=device)
-    config = TrainingConfig(**ckpt["config"])
+    fields = {f.name for f in dataclasses.fields(TrainingConfig)}
+    config = TrainingConfig(**{k: v for k, v in ckpt["config"].items()
+                               if k in fields})
     model = build_model(config).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()

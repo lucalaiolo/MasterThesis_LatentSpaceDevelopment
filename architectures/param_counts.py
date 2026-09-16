@@ -128,8 +128,7 @@ def temporal_transformer_param_count(config: TrainingConfig) -> dict[str, int]:
 
     Frame-token embed ``(D+1)J -> d_model``; ``n_layers`` transformer blocks in
     each of the encoder and decoder; per-window posterior heads and lift
-    (``d_model <-> d_z``); a ``d_model -> D*J`` output head. Excludes LayerNorm
-    and assumes ``n_cond == 0``.
+    (``d_model <-> d_z``); a ``d_model -> D*J`` output head. Excludes LayerNorm.
     """
     J = config.n_joints
     D = getattr(config, "n_dims", 3)
@@ -167,8 +166,7 @@ def spatiotemporal_param_count(config: TrainingConfig) -> dict[str, int]:
     joint (spatial) embedding of J*d_model is added on each of the encoder and
     decoder, and every factorised block holds *two* transformer sub-layers
     (spatial + temporal), so the stacks cost ``2 * n_layers`` blocks. Like the
-    frame-token count, this excludes LayerNorm scales/biases and assumes
-    ``n_cond == 0``.
+    frame-token count, this excludes LayerNorm scales/biases.
     """
     J = config.n_joints
     D = getattr(config, "n_dims", 3)
@@ -206,99 +204,6 @@ def spatiotemporal_param_count(config: TrainingConfig) -> dict[str, int]:
     return parts
 
 
-def anchored_param_count(config: TrainingConfig) -> dict[str, int]:
-    """Anchored residual space-time transformer parameter counts.
-
-    The factorised backbone (``2 * n_layers`` sub-layer blocks per stack) plus:
-    a shared conditioning MLP ``(D*J + 1) -> d_model -> d_model``; a learned
-    mask token and one FiLM site in the encoder; a FiLM site before each of the
-    two sub-attentions of every decoder block. Each FiLM is a
-    ``d_model -> 2*d_model`` linear. The residual token embed is ``D -> d_model``
-    and the output head is ``d_model -> D``. Excludes LayerNorm scales/biases
-    and assumes ``n_cond == 0`` (the model has no cohort path).
-    """
-    J = config.n_joints
-    D = getattr(config, "n_dims", 3)
-    d_z = config.latent_dim
-    dm = config.d_model
-    L = config.n_layers
-    ffn = config.ffn_ratio * dm
-
-    def linear(inp, out):
-        return inp * out + out
-
-    def transformer_block():
-        attn = 3 * dm * dm + 3 * dm + dm * dm + dm
-        ff = dm * ffn + ffn + ffn * dm + dm
-        return attn + ff
-
-    film = linear(dm, 2 * dm)
-
-    parts = {
-        "cond_mlp": linear(D * J + 1, dm) + linear(dm, dm),
-        "encoder_token_embed": linear(D, dm),
-        "encoder_mask_token": dm,
-        "encoder_joint_pos": J * dm,
-        "encoder_film": film,                           # single encoder site
-        "encoder_stack": L * 2 * transformer_block(),
-        "bottleneck_heads": 2 * linear(dm, d_z),
-        "decoder_query_lift": linear(d_z, dm),
-        "decoder_joint_pos": J * dm,
-        "decoder_stack": L * 2 * transformer_block(),
-        "decoder_film": L * 2 * film,                   # one per sub-attention
-        "decoder_output_full": linear(dm, D),
-    }
-    if config.recipe == 3:
-        parts["decoder_output_inp"] = linear(dm + 1, D)
-    parts["total"] = sum(parts.values())
-    return parts
-
-
-def anchored_temporal_param_count(config: TrainingConfig) -> dict[str, int]:
-    """Anchored frame-token transformer parameter counts.
-
-    The frame-token backbone (``n_layers`` single-axis blocks per stack, a class
-    token, terminal norms) plus the anchor machinery: a conditioning MLP
-    ``(D*J + 1) -> d_model -> d_model``; one encoder FiLM site; a FiLM site
-    before every decoder layer. The residual frame token embeds ``(D+1)*J`` and
-    the output head is ``d_model -> D*J``. Excludes LayerNorm scales/biases and
-    assumes ``n_cond == 0``.
-    """
-    J = config.n_joints
-    D = getattr(config, "n_dims", 3)
-    d_z = config.latent_dim
-    dm = config.d_model
-    L = config.n_layers
-    ffn = config.ffn_ratio * dm
-
-    def linear(inp, out):
-        return inp * out + out
-
-    def transformer_block():
-        attn = 3 * dm * dm + 3 * dm + dm * dm + dm
-        ff = dm * ffn + ffn + ffn * dm + dm
-        return attn + ff
-
-    film = linear(dm, 2 * dm)
-
-    parts = {
-        "cond_mlp": linear(D * J + 1, dm) + linear(dm, dm),
-        "encoder_token_embed": linear((D + 1) * J, dm),
-        "encoder_class_token": dm,
-        "encoder_film": film,                           # single encoder site
-        "encoder_stack": L * transformer_block(),
-        "bottleneck_heads": 2 * linear(dm, d_z),
-        "decoder_query_lift": linear(d_z, dm),
-        "decoder_stack": L * transformer_block(),
-        "decoder_film": L * film,                       # one per decoder layer
-        "decoder_output_full": linear(dm, D * J),
-    }
-    if config.recipe == 3:
-        parts["decoder_output_inp"] = linear(dm + J, D * J)
-    parts["total"] = sum(parts.values())
-    return parts
-
-
 def summarise(config: TrainingConfig) -> dict[str, int]:
     """One entry point: return the counts for whichever architecture is set."""
     if config.architecture == "conv":
@@ -308,11 +213,7 @@ def summarise(config: TrainingConfig) -> dict[str, int]:
     if config.architecture == "temporal_transformer":
         return temporal_transformer_param_count(config)
     if config.architecture == "transformer":
-        attention = getattr(config, "transformer_attention", "temporal")
-        if getattr(config, "anchored_residual", False):
-            return (anchored_param_count(config) if attention == "factorized"
-                    else anchored_temporal_param_count(config))
-        if attention == "factorized":
+        if getattr(config, "transformer_attention", "temporal") == "factorized":
             return spatiotemporal_param_count(config)
         return transformer_param_count(config)
     raise ValueError(f"unknown architecture: {config.architecture!r}")

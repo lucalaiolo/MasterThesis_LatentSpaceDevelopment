@@ -48,14 +48,9 @@ class TemporalTransformerVAE(nn.Module):
                  d_model: int = 96, n_heads: int = 4, n_layers: int = 3,
                  ffn_ratio: int = 4, dropout: float = 0.1,
                  inpainting: bool = False,
-                 n_cond: int = 0, cond_dim: int = 8,
-                 cond_dropout: float = 0.0, n_dims: int = 3,
+                 n_dims: int = 3,
                  downsample: int = 4, attention: str = "temporal"):
         super().__init__()
-        if n_cond > 0:
-            raise NotImplementedError(
-                "TemporalTransformerVAE does not implement cohort conditioning "
-                "yet; use n_cond=0.")
         if attention not in ("temporal", "factorized"):
             raise ValueError(
                 f"attention must be 'temporal' or 'factorized', got {attention!r}.")
@@ -146,7 +141,7 @@ class TemporalTransformerVAE(nn.Module):
         return w.reshape(B, -1)
 
     # ---- Encoder ---------------------------------------------------------
-    def encode(self, X, M, c=None):
+    def encode(self, X, M):
         """Map (clip, mask) to per-window (mu, logvar), flattened.
 
         Returns:
@@ -196,7 +191,7 @@ class TemporalTransformerVAE(nn.Module):
         q = q + self.dec_pos.unsqueeze(0)
         return self.decoder(q)                        # (B, T, d_model)
 
-    def decode_full(self, z, c=None):
+    def decode_full(self, z):
         """Full-clip reconstruction from the per-window latent."""
         B = z.shape[0]
         h = self._decode_trunk(z)
@@ -205,7 +200,7 @@ class TemporalTransformerVAE(nn.Module):
         x_hat = self.dec_output_full(h)               # (B, T, DJ)
         return x_hat.reshape(B, self.T, self.J, self.n_dims)
 
-    def decode_inp(self, z, M, c=None):
+    def decode_inp(self, z, M):
         """Mask-conditioned inpainting head (Recipe 3 only)."""
         if not self.inpainting:
             raise RuntimeError("Model was built without the inpainting head.")
@@ -225,7 +220,7 @@ class TemporalTransformerVAE(nn.Module):
         return z.view(B, self.n_win, self.d_z).mean(dim=1)
 
     # ---- Combined --------------------------------------------------------
-    def forward(self, X, M, c=None):
+    def forward(self, X, M):
         """Encode, sample, decode."""
         mu, logvar = self.encode(X, M)
         z = reparameterise(mu, logvar)

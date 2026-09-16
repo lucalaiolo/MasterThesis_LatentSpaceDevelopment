@@ -998,7 +998,8 @@ these are reported quantities, not adjustments.
   driver); `vae_analysis/` (`hmm_pipeline` — stitcher, seam diagnostic, HMM fit,
   dwell-time summary, movement-dynamics computation; `arhmm` — the ssm AR-HMM;
   `hmm_report` — the one-call report and all figures; plus the latent-geometry
-  toolkit).
+  toolkit); `rvi38_methods/` (the four clinical endpoints, the inference layer,
+  and the abnormality index that combines them).
 - **One-call report.** `run_hmm_report(adapter, videos, ..., model="hmm"|"arhmm",
   stream="pose"|"delta", velocity_grouping="regions"|"lateral"|"side")` runs
   stitch → seam check → fit → dwell times → phenotype features → all figures
@@ -1045,9 +1046,11 @@ these are reported quantities, not adjustments.
   introducing paper are cited at preparation-time confidence — verify before the
   bibliography. Verify also the page ranges of the older speech-recognition
   references (Rabiner; Gales).
-- **Deprecated paths** not used in the final pipeline: the GM-VAE / GM-CVAE
-  (component collapse) and the anchored/FiLM residual model (drove the residual to
-  zero); retained in the code for the record.
+- **Two model variants were tried and rejected**, and neither carries a result
+  here: a Gaussian-mixture prior (GM-VAE), which collapses its components when
+  the latent is not cleanly multimodal, and an anchored/FiLM residual
+  transformer, which drove the residual to zero. The reported pipeline is the
+  plain temporal-latent VAE throughout.
 
 ---
 

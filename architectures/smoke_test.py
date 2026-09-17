@@ -8,12 +8,12 @@ steps, and the parameter counts match the analytical predictions.
 import numpy as np
 import torch
 
-from vae_training import TrainingConfig
-from vae_training.models import build_model
-from vae_training.param_counts import summarise
-from vae_training.mask_policies import UniformMask, LimbMask, NoMask
-from vae_training.train import train
-from vae_training.evaluate import evaluate
+from architectures import TrainingConfig
+from architectures.models import build_model
+from architectures.param_counts import summarise
+from architectures.mask_policies import UniformMask, LimbMask, NoMask
+from architectures.train import train
+from architectures.evaluate import evaluate
 
 
 def synthetic_videos(n_videos: int = 3, frames: int = 300, J: int = 17):
@@ -21,10 +21,11 @@ def synthetic_videos(n_videos: int = 3, frames: int = 300, J: int = 17):
     rng = np.random.default_rng(0)
     videos = []
     for _ in range(n_videos):
-        t = np.arange(frames)[:, None, None]
-        base = np.stack([
-            0.5 * np.sin(t.squeeze(-1) * 0.05 + i) for i in range(J)
-        ], axis=1)[..., None].repeat(3, axis=-1)
+        t = np.arange(frames)
+        # One phase-shifted sinusoid per joint -> (frames, J), broadcast
+        # across the three coordinates -> (frames, J, 3).
+        base = np.stack([0.5 * np.sin(t * 0.05 + i) for i in range(J)],
+                        axis=1)[..., None].repeat(3, axis=-1)
         noise = rng.standard_normal((frames, J, 3)) * 0.05
         videos.append(base + noise)
     return videos

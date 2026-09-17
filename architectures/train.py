@@ -34,7 +34,7 @@ from .losses import (kl_gaussian, kl_gaussian_free_bits,
                      reconstruction_velocity_mse,
                      beta_schedule, delayed_warmup_schedule)
 from .mask_policies import build_policy
-from .models import build_model, build_mixture
+from .models import build_model
 
 
 ALL_RECIPES: tuple[int, ...] = (1, 2, 3)
@@ -56,7 +56,6 @@ def train(config: TrainingConfig,
           videos: list[np.ndarray],
           limbs: dict[str, list[int]] | None = None,
           stride: int | None = None,
-          cohort_per_video: np.ndarray | list[int] | None = None,
           init_state: dict | None = None,
           val_fraction: float | None = None) -> dict:
     """Run a full training loop.
@@ -72,36 +71,20 @@ def train(config: TrainingConfig,
             validation curve and no val-picked ``best.pt`` (the returned model
             is the final epoch and a ``final.pt`` is written). Use ``0.0`` for a
             committed full-data pretrain after the config is already selected.
-        cohort_per_video: optional length-``len(videos)`` array of integer
-            conditioning ids (e.g. cohort index, [CARE-PD §6]). Required
-            when ``config.n_cond > 0``; the per-video id is broadcast to
-            every clip cut from that video and fed to the model as ``c``.
         init_state: optional model ``state_dict`` to warm-start from before the
             loop (fine-tuning). Must match the config's architecture / J / D.
             Loaded with ``strict=True`` so a shape mismatch fails loudly rather
             than silently training from scratch. Pair with a lowered
             ``learning_rate`` to fine-tune a pretrained checkpoint on new data.
     Returns:
-        Dict with the trained model, the loss history, the fitted mixture
-        prior (or None), and the path of the last checkpoint written.
+        Dict with the trained model, the loss history, and the path of the
+        last checkpoint written.
     """
     torch = _torch()
 
     config.validate()
     if stride is None:
         stride = config.clip_length // 2
-    if config.n_cond > 0 and cohort_per_video is None:
-        raise ValueError(
-            "config.n_cond > 0 but no cohort_per_video was passed; the "
-            "CVAE / GM-CVAE needs a conditioning id per video."
-        )
-    if config.site_adv_lambda_max > 0 and cohort_per_video is None:
-        raise ValueError(
-            "config.site_adv_lambda_max > 0 but no cohort_per_video was "
-            "passed; the site adversary needs a cohort label per video "
-            "(the labels are used only as the adversary's target, not fed "
-            "into the encoder/decoder)."
-        )
 
     # ---- Reproducibility ----------------------------------------------
     torch.manual_seed(config.seed)
@@ -122,29 +105,14 @@ def train(config: TrainingConfig,
     print(f"[data] {len(clips)} clips, {train_mask.sum()} train, {val_mask.sum()} val"
           + ("  (training on ALL data; no val split)" if not has_val else ""))
 
-    # Broadcast the per-video conditioning id to a per-clip id.
-    clip_cohort = None
-    if cohort_per_video is not None:
-        cpv = np.asarray(cohort_per_video, dtype=np.int64)
-        if len(cpv) != len(videos):
-            raise ValueError(
-                f"cohort_per_video length ({len(cpv)}) must match the "
-                f"video count ({len(videos)})."
-            )
-        clip_cohort = cpv[video_id]
-
     policy = build_policy(config, limbs=limbs)
-    train_loader = make_loader(
-        clips[train_mask], policy, config.batch_size, shuffle=True,
-        seed=config.seed,
-        cohort=None if clip_cohort is None else clip_cohort[train_mask])
-    val_loader = (make_loader(
-        clips[val_mask], policy, config.batch_size, shuffle=False,
-        seed=config.seed + 1,
-        cohort=None if clip_cohort is None else clip_cohort[val_mask])
-        if has_val else None)
+    train_loader = make_loader(clips[train_mask], policy, config.batch_size,
+                               shuffle=True, seed=config.seed)
+    val_loader = (make_loader(clips[val_mask], policy, config.batch_size,
+                              shuffle=False, seed=config.seed + 1)
+                  if has_val else None)
 
-    # ---- Model, mixture, optimiser ------------------------------------
+    # ---- Model and optimiser ------------------------------------------
     device = torch.device(config.device if torch.cuda.is_available()
                           or config.device == "cpu" else "cpu")
     model = build_model(config).to(device)
@@ -154,60 +122,17 @@ def train(config: TrainingConfig,
         model.load_state_dict(init_state)
         print("[model] warm-started from a pretrained state_dict (fine-tuning)")
     n_params = sum(p.numel() for p in model.parameters())
-    kind = _model_kind(config)
-    print(f"[model] {kind} ({config.architecture}), {n_params:,} parameters")
+    print(f"[model] VAE ({config.architecture}), {n_params:,} parameters")
 
-    mixture = build_mixture(config)
-    opt_params = list(model.parameters())
-    if mixture is not None:
-        mixture = mixture.to(device)
-        if mixture.trainable:
-            # Regular / VaDE regime: the mixture parameters are optimised
-            # jointly with the networks by the same optimiser.
-            opt_params += list(mixture.parameters())
-            print(f"[mixture] {config.n_components} components, "
-                  f"gradient-trained (regular GM-VAE)")
-        else:
-            print(f"[mixture] {config.n_components} components, "
-                  f"EM {config.gm_em_steps} step(s)/epoch")
-
-    # Site adversary ([Phase 2c]): trained jointly, gradient reversed into
-    # the encoder. Its parameters join the same optimiser and the same
-    # single backward pass — it minimises the cohort cross-entropy while the
-    # reversal makes the encoder maximise it (drive cohort out of z).
-    adversary = None
-    if config.site_adv_lambda_max > 0:
-        from .models.common import SiteAdversary
-        n_site = int(np.asarray(cohort_per_video).max()) + 1
-        adversary = SiteAdversary(config.latent_dim, n_site,
-                                  hidden=config.site_adv_hidden).to(device)
-        opt_params += list(adversary.parameters())
-        cond_note = "conditioned" if config.n_cond > 0 else "unconditional"
-        print(f"[adversary] site adversary over {n_site} cohorts on a "
-              f"{cond_note} encoder, lambda_max={config.site_adv_lambda_max}, "
-              f"warmup={config.site_adv_warmup_epochs} epoch(s)")
-
-    opt = torch.optim.AdamW(opt_params,
+    opt = torch.optim.AdamW(model.parameters(),
                             lr=config.learning_rate,
                             weight_decay=config.weight_decay)
-
-    # In the gradient regime, seed the mixture on the pre-trained
-    # autoencoder's latents once, right before the KL warm-up begins — a
-    # VaDE run clusters far better from a data-driven GMM init than from
-    # noise. Chosen as the last delay epoch (or epoch 0 without a delay).
-    gm_init_epoch = -1
-    if mixture is not None and mixture.trainable:
-        gm_init_epoch = (max(0, config.delay_epochs - 1)
-                         if config.beta_mode == "delayed_warmup" else 0)
-    gm_seeded = False
 
     # ---- Output directory ---------------------------------------------
     out = Path(config.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     history: dict[str, list] = {"train": [], "val": []}
-    if mixture is not None:
-        history["gm_occupancy"] = []
     best_val = float("inf")
     best_ckpt = None
     best_epoch = -1
@@ -223,33 +148,14 @@ def train(config: TrainingConfig,
         t0 = time.time()
 
         model.train()
-        train_stats, cached = _run_epoch(model, train_loader, config, epoch,
-                                         kl_state, opt, device, train=True,
-                                         mixture=mixture, adversary=adversary)
-        # Mixture bookkeeping after the gradient epoch.
-        if mixture is not None and cached is not None:
-            mu_all, logvar_all = cached
-            if mixture.trainable:
-                # Gradient regime: parameters already moved via the
-                # optimiser. One-time data-driven seeding at gm_init_epoch,
-                # then just record occupancy from the current mixture.
-                if not gm_seeded and epoch >= gm_init_epoch:
-                    mixture.init_from_latents(mu_all)
-                    gm_seeded = True
-                with torch.no_grad():
-                    rho = mixture.responsibilities(mu_all).mean(dim=0)
-            else:
-                # EM regime: closed-form M-step with the networks frozen.
-                rho = mixture.em_update(mu_all, logvar_all,
-                                        n_steps=config.gm_em_steps)
-            history["gm_occupancy"].append([round(float(r), 5) for r in rho])
+        train_stats = _run_epoch(model, train_loader, config, epoch,
+                                 kl_state, opt, device, train=True)
 
         if has_val:
             model.eval()
             with torch.no_grad():
-                val_stats, _ = _run_epoch(model, val_loader, config, epoch,
-                                          kl_state, None, device, train=False,
-                                          mixture=mixture, adversary=adversary)
+                val_stats = _run_epoch(model, val_loader, config, epoch,
+                                       kl_state, None, device, train=False)
         else:
             val_stats = {}                       # no held-out data this run
 
@@ -267,21 +173,11 @@ def train(config: TrainingConfig,
                 best_val = val_score
                 best_epoch = epoch
                 best_ckpt = out / "best.pt"
-                _save_ckpt(best_ckpt, model, mixture, config, epoch, adversary)
+                _save_ckpt(best_ckpt, model, config, epoch)
                 last_ckpt = best_ckpt
 
         dt = time.time() - t0
         extra = ""
-        if mixture is not None:
-            occ = history["gm_occupancy"][-1]
-            extra = (f" klz={train_stats['kl_z']:.3f} kly={train_stats['kl_y']:.3f}"
-                     f" occ=[{', '.join(f'{o:.2f}' for o in occ)}]")
-        if adversary is not None:
-            # Adversary accuracy should fall toward chance as invariance
-            # takes hold; if it pins at chance instantly, lambda is too high.
-            extra += (f" advAcc={train_stats['adv_acc']:.2f}"
-                      f" (chance {1.0 / adversary.net[-1].out_features:.2f})"
-                      f" lam={_site_adv_lambda(config, epoch):.2f}")
         # Train/val pairs in the log, or train-only when there is no val split.
         def _tv(key):
             t = train_stats[key]
@@ -297,7 +193,7 @@ def train(config: TrainingConfig,
 
         if config.save_every and epoch and epoch % config.save_every == 0:
             ck = out / f"epoch_{epoch:04d}.pt"
-            _save_ckpt(ck, model, mixture, config, epoch, adversary)
+            _save_ckpt(ck, model, config, epoch)
             last_ckpt = ck
 
     with open(out / "history.json", "w") as f:
@@ -310,7 +206,7 @@ def train(config: TrainingConfig,
     elif not has_val:
         # No val split: there is no best.pt, so persist the final-epoch model.
         best_ckpt = out / "final.pt"
-        _save_ckpt(best_ckpt, model, mixture, config, config.n_epochs - 1, adversary)
+        _save_ckpt(best_ckpt, model, config, config.n_epochs - 1)
         last_ckpt = best_ckpt
         print(f"[ckpt] final.pt = last epoch -> {best_ckpt}")
 
@@ -332,9 +228,8 @@ def train(config: TrainingConfig,
         print(f"[plots] skipped (plotting error): {e}")
         traceback.print_exc()
 
-    return {"model": model, "mixture": mixture, "site_adversary": adversary,
-            "history": history, "checkpoint": best_ckpt or last_ckpt,
-            "best_epoch": best_epoch}
+    return {"model": model, "history": history,
+            "checkpoint": best_ckpt or last_ckpt, "best_epoch": best_epoch}
 
 
 def _val_selection_score(config, val_stats) -> float:
@@ -358,144 +253,45 @@ def _val_selection_score(config, val_stats) -> float:
             score += config.lambda_aux * float(val_stats["rec_aux"])
         if getattr(config, "lambda_velocity", 0.0) > 0:
             score += config.lambda_velocity * float(val_stats.get("rec_vel", 0.0))
-        if config.n_components > 0:
-            score += (config.gm_beta_z * float(val_stats["kl_z"])
-                      + config.gm_beta_y * float(val_stats["kl_y"]))
         return score
     return float(val_stats["rec_full"])          # "rec_full" (default)
 
 
-def _model_kind(config) -> str:
-    """Human-readable name of the model class the config selects."""
-    gm = config.n_components > 0
-    cond = config.n_cond > 0
-    if gm and cond:
-        return f"GM-CVAE (K={config.n_components})"
-    if gm:
-        return f"GM-VAE (K={config.n_components})"
-    if cond:
-        return "CVAE"
-    return "VAE"
-
-
-def _save_ckpt(path, model, mixture, config, epoch, adversary=None):
-    """Checkpoint the model, plus mixture / adversary parameters when present.
-
-    The site adversary is a training-time module (not needed to encode), but
-    it is saved so a run is fully reproducible. ``load_checkpoint`` rebuilds
-    only the VAE, so its presence in the blob is harmless downstream.
-    """
+def _save_ckpt(path, model, config, epoch):
+    """Write the model state, the config that built it, and the epoch."""
     torch = _torch()
-    blob = {"model": model.state_dict(),
-            "config": config.__dict__,
-            "epoch": epoch}
-    if mixture is not None:
-        blob["mixture"] = mixture.state_dict()
-    if adversary is not None:
-        blob["site_adversary"] = adversary.state_dict()
-    torch.save(blob, path)
-
-
-def _kl_warmup_factor(config, epoch: int) -> float:
-    """A [0, 1] ramp for the mixture KL, matching the beta schedule shape.
-
-    Reproduces the "learn first, apply KL later" recipe for the GM terms:
-    0 during a ``delayed_warmup`` delay, then a linear ramp to 1 over
-    ``warmup_epochs`` (or a plain 0->1 ramp in ``warmup`` mode). Returns 1
-    when warm-up is disabled or in ``computed`` mode. Unlike ``beta`` this
-    is a pure fraction, so ``gm_beta_z`` / ``gm_beta_y`` reach their full
-    configured strength rather than being scaled by ``beta_max``.
-    """
-    if not config.gm_kl_warmup:
-        return 1.0
-    if config.beta_mode == "delayed_warmup":
-        if epoch < config.delay_epochs:
-            return 0.0
-        if config.warmup_epochs <= 0:
-            return 1.0
-        return min(1.0, (epoch - config.delay_epochs) / config.warmup_epochs)
-    if config.beta_mode == "warmup":
-        if config.warmup_epochs <= 0:
-            return 1.0
-        return min(1.0, epoch / config.warmup_epochs)
-    return 1.0
-
-
-def _site_adv_lambda(config, epoch: int) -> float:
-    """Gradient-reversal strength for this epoch ([Phase 2c]).
-
-    Linear ramp from 0 to ``site_adv_lambda_max`` over
-    ``site_adv_warmup_epochs``, then held. Starting at full strength
-    destabilises training, so the adversary is allowed to learn cohort
-    first and the encoder only gradually pressured to unlearn it.
-    """
-    lam_max = getattr(config, "site_adv_lambda_max", 0.0)
-    if lam_max <= 0:
-        return 0.0
-    warm = getattr(config, "site_adv_warmup_epochs", 0)
-    if warm <= 0:
-        return lam_max
-    return lam_max * min(1.0, epoch / warm)
-
-
-def _entropy_weight(config, epoch: int) -> float:
-    """Decaying weight of the assignment-entropy bonus ([CARE-PD §10]).
-
-    Linearly anneals from ``gm_entropy_weight`` to 0 across
-    ``gm_entropy_epochs`` epochs, then stays at 0. Rewards near-uniform
-    q(y|x) early so components do not die before the latent organises.
-    """
-    if config.gm_entropy_weight <= 0 or config.gm_entropy_epochs <= 0:
-        return 0.0
-    frac = max(0.0, 1.0 - epoch / config.gm_entropy_epochs)
-    return config.gm_entropy_weight * frac
+    torch.save({"model": model.state_dict(),
+                "config": config.__dict__,
+                "epoch": epoch}, path)
 
 
 def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
-               train: bool, mixture=None, adversary=None):
-    """Run one epoch and return (mean losses, cached latents or None).
+               train: bool):
+    """Run one epoch and return the mean of each loss component.
 
     `rec_full` is the full-clip reconstruction (primary MSE for Recipes
     1, 2, 3). `rec_aux` is the auxiliary MSE — Recipe 2's masked-pass
     reconstruction, or Recipe 3's hidden-only inpainting MSE. Recipe 1
-    leaves `rec_aux` at zero. `kl` is the N(0, I) KL (the sole prior term
-    for a plain VAE, and the auxiliary regulariser for a GM run). `kl_z`
-    and `kl_y` are the mixture terms, zero without a mixture. `beta` is
-    the effective N(0, I) KL weight, averaged over the epoch.
-
-    For a GM training epoch the posterior means and log-variances are
-    cached and returned as ``(mu_all, logvar_all)`` so the caller can run
-    the EM M-step; ``None`` otherwise.
+    leaves `rec_aux` at zero. `kl` is the KL against the N(0, I) prior and
+    `beta` its effective weight, averaged over the epoch.
     """
     totals = {"loss": 0.0, "rec_full": 0.0, "rec_aux": 0.0, "rec_vel": 0.0,
-              "kl": 0.0, "kl_z": 0.0, "kl_y": 0.0, "entropy": 0.0,
-              "beta": 0.0, "adv_loss": 0.0, "adv_acc": 0.0}
+              "kl": 0.0, "beta": 0.0}
     n_batches = 0
-    ent_w = _entropy_weight(config, epoch)
-    site_lambda = _site_adv_lambda(config, epoch)
-    cache_mu, cache_logvar = [], []
-    caching = train and mixture is not None
 
     for step, batch in enumerate(loader):
-        X, M, c = _unpack_batch(batch, device)
+        X, M = (t.to(device, non_blocking=True) for t in batch)
 
         loss, parts = _step_loss(model, X, M, config, epoch, kl_state,
-                                 update=train, mixture=mixture, c=c,
-                                 entropy_weight=ent_w, adversary=adversary,
-                                 site_lambda=site_lambda)
+                                 update=train)
 
         if train:
             opt.zero_grad()
             loss.backward()
             opt.step()
 
-        if caching:
-            cache_mu.append(parts["mu"].detach())
-            cache_logvar.append(parts["logvar"].detach())
-
-        totals["loss"] += float(loss)
-        for key in ("rec_full", "rec_aux", "rec_vel", "kl", "kl_z", "kl_y",
-                    "entropy", "beta", "adv_loss", "adv_acc"):
+        totals["loss"] += float(loss.detach())
+        for key in ("rec_full", "rec_aux", "rec_vel", "kl", "beta"):
             totals[key] += float(parts[key])
         n_batches += 1
 
@@ -504,34 +300,9 @@ def _run_epoch(model, loader, config, epoch, kl_state, opt, device,
                   f"rec_full={float(parts['rec_full']):.4f}  "
                   f"rec_aux={float(parts['rec_aux']):.4f}  "
                   f"kl={float(parts['kl']):.3f}  "
-                  f"kl_z={float(parts['kl_z']):.3f}  "
-                  f"kl_y={float(parts['kl_y']):.3f}  "
                   f"beta={float(parts['beta']):.4f}")
 
-    means = {k: v / max(n_batches, 1) for k, v in totals.items()}
-    cached = None
-    if caching and cache_mu:
-        cached = (_torch().cat(cache_mu, dim=0),
-                  _torch().cat(cache_logvar, dim=0))
-    return means, cached
-
-
-def _unpack_batch(batch, device):
-    """Split a loader batch into (X, M, c), moving tensors to the device.
-
-    Batches are ``(X, M)`` for a plain / GM-VAE run and ``(X, M, c)`` when
-    the loader carries conditioning ids. ``c`` is ``None`` in the first
-    case so the models fall back to their unconditional path.
-    """
-    if len(batch) == 3:
-        X, M, c = batch
-        c = c.to(device, non_blocking=True)
-    else:
-        X, M = batch
-        c = None
-    X = X.to(device, non_blocking=True)
-    M = M.to(device, non_blocking=True)
-    return X, M, c
+    return {k: v / max(n_batches, 1) for k, v in totals.items()}
 
 
 def _kl_term(mu, logvar, config):
@@ -582,9 +353,7 @@ def _resolve_beta(config, epoch: int, kl_state: dict, rec_full,
 
 
 def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
-               update: bool = True, mixture=None, c=None,
-               entropy_weight: float = 0.0, adversary=None,
-               site_lambda: float = 0.0):
+               update: bool = True):
     """Compute the loss for one batch under the configured recipe.
 
     Recipe 1 ([MVAE §3.6]):
@@ -605,34 +374,14 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     to every recipe, scoring the reconstruction's frame-to-frame motion
     (temporal-smoothness regulariser); it is 0 otherwise.
 
-    When a ``mixture`` is supplied the prior term changes ([CARE-PD §7.3],
-    [GM-VAE §3.3]). The standard-normal KL becomes an auxiliary
-    regulariser (weight ``beta``), and two mixture terms are added:
-
-        + gm_beta_z * E_q(y)[ KL(q(z|x) || p(z|y)) ]
-        + gm_beta_y * KL(q(y|x) || p(y))
-        - entropy_weight * H(q(y|x)).
-
-    The responsibilities q(y|x) are the exact posterior p(c|z) under the
-    current (EM-frozen) mixture, evaluated at the posterior mean ``mu``.
-    Gradients flow into the encoder through ``mu``/``logvar`` and through
-    the responsibilities; the mixture parameters are updated separately by
-    EM in the M-step, so this step is pure network optimisation.
-
-    ``c`` is the per-clip cohort id. For a CVAE / GM-CVAE it is the
-    conditioning input; for the plain / adversarial VAE the networks ignore
-    it. When an ``adversary`` is supplied ([Phase 2c]) it also serves as the
-    adversary's target: the site cross-entropy on ``mu`` (through the
-    gradient-reversal layer, strength ``site_lambda``) is added to the loss,
-    so a single backward both trains the adversary and pushes cohort out of
-    the encoder. All routes go through `_kl_term` (vanilla or free-bits KL)
-    and `_resolve_beta` (linear warmup or Asperti-Trentin computed).
+    All routes go through `_kl_term` (vanilla or free-bits KL) and
+    `_resolve_beta` (linear warmup or Asperti-Trentin computed).
     """
     torch = _torch()
     zero = torch.zeros((), device=X.device)
 
     if config.recipe == 1:
-        X_hat, mu, logvar = model(X, M, c)
+        X_hat, mu, logvar = model(X, M)
         x_hat_full = X_hat
         rec_full = reconstruction_mse(X_hat, X)
         rec_aux = zero
@@ -641,18 +390,18 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     elif config.recipe == 2:
         # Primary pass: clean clip in, full-clip MSE + KL.
         M_ones = torch.ones_like(M)
-        X_hat_primary, mu, logvar = model(X, M_ones, c)
+        X_hat_primary, mu, logvar = model(X, M_ones)
         x_hat_full = X_hat_primary
         rec_full = reconstruction_mse(X_hat_primary, X)
         kl = _kl_term(mu, logvar, config)
 
         # Auxiliary pass: masked clip in, full-clip MSE, no KL.
-        X_hat_aux, _, _ = model(X, M, c)
+        X_hat_aux, _, _ = model(X, M)
         rec_aux = reconstruction_mse(X_hat_aux, X)
 
     elif config.recipe == 3:
         # Single masked pass; two decoder heads.
-        X_hat_full, X_hat_inp, mu, logvar = model(X, M, c)
+        X_hat_full, X_hat_inp, mu, logvar = model(X, M)
         x_hat_full = X_hat_full
         rec_full = reconstruction_mse(X_hat_full, X)
         rec_aux = reconstruction_mse_hidden(X_hat_inp, X, M)
@@ -673,56 +422,12 @@ def _step_loss(model, X, M, config, epoch: int, kl_state: dict,
     if lambda_vel > 0:
         loss = loss + lambda_vel * rec_vel
 
-    kl_z = zero
-    kl_y = zero
-    entropy = zero
-
-    if mixture is None:
-        # Plain VAE / CVAE: the N(0,I) KL *is* the prior; beta is its
-        # scheduled weight.
-        beta = _resolve_beta(config, epoch, kl_state, rec_full, update=update)
-        loss = loss + beta * kl
-    else:
-        # GM-VAE / GM-CVAE ([CARE-PD §7.3], [GM-VAE §3.3]): the mixture is
-        # the prior. The N(0,I) KL is only an optional safety tether,
-        # weighted by `gm_aux_beta` (default 0 → removed), not the beta
-        # schedule.
-        beta = config.gm_aux_beta
-        if beta != 0.0:
-            loss = loss + beta * kl
-        resp = mixture.responsibilities(mu)
-        kl_z = mixture.kl_z_given_y(mu, logvar, resp).mean()
-        kl_y = mixture.kl_y(resp).mean()
-        entropy = mixture.assignment_entropy(resp).mean()
-        # Ramp the mixture KL by the warm-up shape so the "learn first"
-        # delay covers the mixture terms too ([GM-VAE §6]).
-        kl_ramp = _kl_warmup_factor(config, epoch)
-        loss = loss + kl_ramp * (config.gm_beta_z * kl_z
-                                 + config.gm_beta_y * kl_y)
-        if entropy_weight > 0:
-            loss = loss - entropy_weight * entropy
-
-    # ---- Site adversary ([Phase 2c]) ----------------------------------
-    # Cross-entropy of cohort predicted from mu, with the gradient reversed
-    # into the encoder (via the GRL inside `adversary`). The adversary's own
-    # parameters minimise this term; the encoder maximises it, i.e. removes
-    # cohort from mu. Added with unit weight — the strength knob is the
-    # reversal `site_lambda`, ramped by the caller.
-    adv_loss = zero
-    adv_acc = zero
-    if adversary is not None and c is not None:
-        adv_logits = adversary(mu, site_lambda)
-        adv_loss = torch.nn.functional.cross_entropy(adv_logits, c)
-        adv_acc = (adv_logits.argmax(dim=-1) == c).float().mean()
-        loss = loss + adv_loss
+    beta = _resolve_beta(config, epoch, kl_state, rec_full, update=update)
+    loss = loss + beta * kl
 
     beta_tensor = torch.as_tensor(beta, device=X.device, dtype=rec_full.dtype)
     return loss, {"rec_full": rec_full, "rec_aux": rec_aux,
-                  "rec_vel": rec_vel,
-                  "kl": kl, "kl_z": kl_z, "kl_y": kl_y,
-                  "entropy": entropy, "beta": beta_tensor,
-                  "adv_loss": adv_loss, "adv_acc": adv_acc,
-                  "mu": mu, "logvar": logvar}
+                  "rec_vel": rec_vel, "kl": kl, "beta": beta_tensor}
 
 
 def train_sweep(base_config: TrainingConfig,
@@ -731,7 +436,6 @@ def train_sweep(base_config: TrainingConfig,
                 stride: int | None = None,
                 recipes: tuple[int, ...] = ALL_RECIPES,
                 mask_policies: tuple[str, ...] = ALL_MASK_POLICIES,
-                cohort_per_video: np.ndarray | list[int] | None = None,
                 n_layers_grid: tuple[int, ...] | None = None,
                 ) -> dict[tuple, dict]:
     """Run `train` across every valid (recipe, mask_policy) combination.
@@ -804,17 +508,14 @@ def train_sweep(base_config: TrainingConfig,
                                           **overrides)
                 print(f"\n[sweep] === {tag}recipe={recipe} policy={policy!r} "
                       f"-> {sub} ===")
-                results[key] = train(
-                    cfg, videos, limbs=limbs, stride=stride,
-                    cohort_per_video=cohort_per_video,
-                )
+                results[key] = train(cfg, videos, limbs=limbs,
+                                     stride=stride)
 
     return results
 
 
 def model_selection(base_config: TrainingConfig,
                     videos: list[np.ndarray],
-                    cohort_per_video: np.ndarray | list[int] | None = None,
                     recipes: tuple[int, ...] = ALL_RECIPES,
                     mask_policies: tuple[str, ...] = ALL_MASK_POLICIES,
                     limbs: dict[str, list[int]] | None = None,
@@ -824,13 +525,11 @@ def model_selection(base_config: TrainingConfig,
                     n_layers_grid: tuple[int, ...] | None = None) -> dict:
     """Sweep (recipe × mask policy) and pick the best by held-out reconstruction.
 
-    Model selection ([CARE-PD §4.9]): the masking recipe and policy are
-    means, not ends — one default pair carries the model progression, and it
-    is chosen by reconstruction on the held-out split rather than guessed.
-    Trains one run per valid (recipe, mask_policy) combination via
-    :func:`train_sweep` — conditioned on cohort when ``cohort_per_video`` is
-    given, i.e. a **CVAE** sweep — then scores every run on the *same*
-    time-based validation split with the cohort-aware
+    The masking recipe and policy are means, not ends — one default pair
+    carries the model progression, and it is chosen by reconstruction on the
+    held-out split rather than guessed. Trains one run per valid
+    (recipe, mask_policy) combination via :func:`train_sweep`, scores every
+    run on the *same* time-based validation split with
     :func:`architectures.evaluate.evaluate`, and returns the winner.
 
     ``metric="mpjpe_all"`` (default) selects on the unmasked-input
@@ -844,8 +543,6 @@ def model_selection(base_config: TrainingConfig,
             backbone) is held fixed — sweep it by calling this once per
             backbone if you want that axis too.
         videos: forwarded to :func:`train_sweep`.
-        cohort_per_video: per-video conditioning ids; pass
-            ``bundle.cohort_ids`` to select the CVAE, or None for a plain VAE.
         recipes, mask_policies: the grid. Defaults to all three recipes and
             all six policies (``limb`` is skipped unless ``limbs`` is given,
             and recipes 2/3 skip ``"none"``).
@@ -876,7 +573,6 @@ def model_selection(base_config: TrainingConfig,
 
     runs = train_sweep(base_config, videos, limbs=limbs, stride=stride,
                        recipes=recipes, mask_policies=mask_policies,
-                       cohort_per_video=cohort_per_video,
                        n_layers_grid=n_layers_grid)
 
     # Rebuild the exact video-wise val split train() used internally, so the
@@ -884,10 +580,6 @@ def model_selection(base_config: TrainingConfig,
     clips, video_id, _ = build_clips(videos, base_config.clip_length, stride)
     _, val_mask = train_val_split(clips, video_id)
     val_clips = clips[val_mask]
-    val_cohort = None
-    if cohort_per_video is not None:
-        cpv = np.asarray(cohort_per_video, dtype=np.int64)
-        val_cohort = cpv[video_id][val_mask]
 
     device = torch.device(base_config.device if torch.cuda.is_available()
                           or base_config.device == "cpu" else "cpu")
@@ -910,8 +602,7 @@ def model_selection(base_config: TrainingConfig,
         pol = build_policy(cfg, limbs=limbs)
         table[key] = evaluate(
             run["model"], val_clips, pol, batch_size=base_config.batch_size,
-            device=str(device), seed=eval_seed, recipe=recipe,
-            cohort=val_cohort)
+            device=str(device), seed=eval_seed, recipe=recipe)
 
     if not table:
         raise ValueError(

@@ -19,7 +19,7 @@ analysis unchanged. Generic in the coordinate dimension ``n_dims``.
 
 from __future__ import annotations
 
-from .common import (torch, nn, BottleneckHeads, ConditioningEmbedding,
+from .common import (torch, nn, BottleneckHeads,
                      reparameterise, sinusoidal_positional_encoding)
 
 
@@ -68,17 +68,13 @@ class SpatioTemporalTransformerVAE(nn.Module):
     factorised blocks, and projected per token to ``n_dims`` coordinates. The
     Recipe-3 inpainting head concatenates the per-joint mask bit before the
     projection.
-
-    ``n_cond > 0`` turns it into a CVAE exactly as the other models
-    ([CARE-PD §6]); ``n_cond == 0`` (default) is the plain VAE.
     """
 
     def __init__(self, T: int, J: int, d_z: int = 32,
                  d_model: int = 96, n_heads: int = 4, n_layers: int = 3,
                  ffn_ratio: int = 4, dropout: float = 0.1,
                  inpainting: bool = False,
-                 n_cond: int = 0, cond_dim: int = 8,
-                 cond_dropout: float = 0.0, n_dims: int = 3):
+                 n_dims: int = 3):
         super().__init__()
         self.T = T
         self.J = J
@@ -87,10 +83,6 @@ class SpatioTemporalTransformerVAE(nn.Module):
         self.d_model = d_model
         self.inpainting = inpainting
 
-        self.n_cond = n_cond
-        d_c = cond_dim if n_cond > 0 else 0
-        self.cond = (ConditioningEmbedding(n_cond, cond_dim, cond_dropout)
-                     if n_cond > 0 else None)
 
         ff = d_model * ffn_ratio
 
@@ -111,10 +103,10 @@ class SpatioTemporalTransformerVAE(nn.Module):
         # T*J tokens averages the clip signal away at init — the encoder then
         # maps every clip to nearly the same latent and cannot bootstrap — so
         # the per-joint structure is preserved and every joint is read.
-        self.heads = BottleneckHeads(J * d_model + d_c, d_z)
+        self.heads = BottleneckHeads(J * d_model, d_z)
 
         # ---- Decoder ------------------------------------------------------
-        self.query_lift = nn.Linear(d_z + d_c, d_model)
+        self.query_lift = nn.Linear(d_z, d_model)
         self.dec_joint = nn.Parameter(torch.zeros(1, 1, J, d_model))
         self.register_buffer(
             "dec_time", sinusoidal_positional_encoding(T, d_model),
@@ -133,13 +125,12 @@ class SpatioTemporalTransformerVAE(nn.Module):
         nn.init.normal_(self.dec_joint, std=0.02)
 
     # ---- Encoder ---------------------------------------------------------
-    def encode(self, X, M, c=None):
-        """Map (clip, mask[, cohort]) to (mu, logvar).
+    def encode(self, X, M):
+        """Map (clip, mask) to (mu, logvar).
 
         Args:
             X: (B, T, J, D).
             M: (B, T, J), 1 for visible.
-            c: optional (B,) conditioning ids; ignored for a plain VAE.
         Returns:
             (mu, logvar), each (B, d_z).
         """
@@ -152,17 +143,11 @@ class SpatioTemporalTransformerVAE(nn.Module):
             h = blk(h)
         h = self.enc_norm(h)                              # terminal pre-norm
         h = h.mean(dim=1).reshape(B, self.J * self.d_model)  # pool time, keep joints
-        if self.cond is not None:
-            e = self.cond.encoder_vector(c, B, h.device)
-            h = torch.cat([h, e], dim=1)
         return self.heads(h)
 
     # ---- Decoder ---------------------------------------------------------
-    def _decode_trunk(self, z, c=None):
+    def _decode_trunk(self, z):
         B = z.shape[0]
-        if self.cond is not None:
-            e = self.cond.decoder_vector(c, B, z.device, self.training)
-            z = torch.cat([z, e], dim=1)
         q = self.query_lift(z)                            # (B, d_model)
         q = q[:, None, None, :].expand(B, self.T, self.J, self.d_model)
         q = q + self.dec_joint + self.dec_time[None, :, None, :]
@@ -172,30 +157,30 @@ class SpatioTemporalTransformerVAE(nn.Module):
         h = self.dec_norm(h)                              # terminal pre-norm
         return h                                          # (B, T, J, d_model)
 
-    def decode_full(self, z, c=None):
+    def decode_full(self, z):
         """Full-clip reconstruction head, ignoring the mask."""
-        h = self._decode_trunk(z, c)
+        h = self._decode_trunk(z)
         return self.dec_output_full(h)                    # (B, T, J, D)
 
-    def decode_inp(self, z, M, c=None):
+    def decode_inp(self, z, M):
         """Mask-conditioned inpainting head (Recipe 3 only)."""
         if not self.inpainting:
             raise RuntimeError("Model was built without the inpainting head.")
-        h = self._decode_trunk(z, c)
+        h = self._decode_trunk(z)
         h = torch.cat([h, M.unsqueeze(-1)], dim=-1)       # (B, T, J, d_model + 1)
         return self.dec_output_inp(h)                     # (B, T, J, D)
 
     # ---- Combined --------------------------------------------------------
-    def forward(self, X, M, c=None):
+    def forward(self, X, M):
         """Encode, sample, decode.
 
         Returns:
             (X_hat_full, mu, logvar) without the inpainting head, or
             (X_hat_full, X_hat_inp, mu, logvar) for Recipe 3.
         """
-        mu, logvar = self.encode(X, M, c)
+        mu, logvar = self.encode(X, M)
         z = reparameterise(mu, logvar)
-        X_hat_full = self.decode_full(z, c)
+        X_hat_full = self.decode_full(z)
         if self.inpainting:
-            return X_hat_full, self.decode_inp(z, M, c), mu, logvar
+            return X_hat_full, self.decode_inp(z, M), mu, logvar
         return X_hat_full, mu, logvar

@@ -1,4 +1,4 @@
-# vae_training
+# architectures
 
 Training code for the masked neonate-motion VAE. Two architectures from
 the design note ([ARCH §3, §4]) and the three recipes from the masked
@@ -17,8 +17,8 @@ shape `(F_v, J, 3)`: F_v frames of J joints in 3D. The training loop
 slices them into overlapping clips of length T at a stride you choose.
 
 ```python
-from vae_training import TrainingConfig
-from vae_training.train import train
+from architectures import TrainingConfig
+from architectures.train import train
 
 config = TrainingConfig(
     architecture="conv",       # or "transformer"
@@ -93,6 +93,8 @@ ablation ([MVAE §8]).
 | `models/conv_vae.py`         | 1D temporal convolutional VAE ([ARCH §3]) |
 | `models/transformer_vae.py`  | frame-token transformer VAE, temporal attention only ([ARCH §4.1, §4.2]) |
 | `models/spatiotemporal_vae.py` | factorised space-time transformer VAE — alternating spatial + temporal attention ([ARCH §4.3]) |
+| `models/temporal_conv_vae.py` | conv VAE with a per-window latent ([ARCH §4.5]) |
+| `models/temporal_transformer_vae.py` | transformer VAE with a per-window latent, either attention pattern ([ARCH §4.6]) |
 | `train.py`          | end-to-end loop, per-epoch validation, checkpoints |
 | `evaluate.py`       | MPJPE reconstruction, MPJPE inpainting ([MVAE §7]) |
 | `visualize.py`      | loss curves, latent diagnostics, pose reconstructions, mask previews |
@@ -120,16 +122,13 @@ and its MPJPE numbers on record.
 
 To pick the recipe and masking policy by data instead of by argument, use
 `train.model_selection`: it runs `train_sweep` over every (recipe,
-mask_policy) combination — conditioned on cohort when you pass
-`cohort_per_video`, i.e. a CVAE sweep — scores each on the held-out split
-with the cohort-aware `evaluate` (reconstruction MPJPE by default), and
-returns the winning `best_config` to carry the final model progression
-([CARE-PD §4.9]).
+mask_policy) combination, scores each on the held-out split with
+`evaluate` (reconstruction MPJPE by default), and returns the winning
+`best_config` to carry the final model progression.
 
 ```python
 from architectures.train import model_selection
-sel = model_selection(base_cfg, bundle.videos,
-                      cohort_per_video=bundle.cohort_ids)   # CVAE sweep
+sel = model_selection(base_cfg, videos)
 best_cfg = sel["best_config"]      # recipe + mask_policy chosen by reconstruction
 ```
 
@@ -186,131 +185,6 @@ of the latent to the prior. Three knobs to fight this:
   get activated one at a time as the decoder starts to need them.
   `beta_max` and `warmup_epochs` are ignored in this mode; look at
   `beta_trajectory.png` for the curve that actually ran.
-
-## CARE-PD extension
-
-The stack carries the CARE-PD Parkinsonian-gait plan on top of the neonate
-recipes: cohort conditioning, the CARE-PD data adapter, and the evaluation
-battery. All of it is additive — with `n_cond=0` the config is the original
-plain VAE and the parameter counts are unchanged.
-
-> **GM-VAE / GM-CVAE deprecated** ([post-hoc plan §0]). The mixture-prior
-> models were removed from the active pipeline: they suffer component
-> collapse when the latent is not cleanly multimodal. The source is kept for
-> the record (`models/gaussian_mixture.py`) but guarded — building a mixture
-> (`n_components > 0`) now raises `DeprecationWarning` unless
-> `TrainingConfig(allow_deprecated_gmvae=True)` is set, and the four-model
-> smoke test runs only VAE + CVAE by default. **Phenotype structure is now
-> recovered post hoc** on the plain VAE / CVAE latents — see
-> `vae_analysis/posthoc/` and its `run_posthoc` entry point. Any GM
-> checkpoints go to `checkpoints/deprecated_gmvae/`.
-
-### The models
-
-| `n_cond` | `site_adv_lambda_max` | `n_components` | Model | Status | What it adds |
-|:---:|:---:|:---:|:---|:---|:---|
-| 0 | 0 | 0 | VAE | **active (baseline)** | reconstruction floor, N(0, I) prior |
-| 0 | >0 | 0 | AVAE | **active (target)** | gradient-reversal site adversary — the explicit `z ⊥ cohort` term |
-| >0 | 0 | 0 | CVAE | superseded | cohort embedding e(c) into encoder + decoder — conditioning alone does **not** enforce invariance (it raised the site probe in practice) |
-| 0/>0 | 0 | ≥2 | GM-(C)VAE | deprecated | K-component mixture prior (guarded, `allow_deprecated_gmvae`) |
-
-### Adversarial VAE (Phase 2c) — the invariance mechanism
-
-Conditioning a CVAE on cohort does not force the latent to be cohort-free:
-feeding the encoder `c` lets it copy cohort into `z` as easily as subtract
-it, and with a linear leak channel + near-zero KL the site probe can even
-*rise*. The fix is an explicit adversary. Set `site_adv_lambda_max > 0`
-(with `n_cond=0` for the pure adversarial VAE — "goodbye to the CVAE"):
-
-```python
-cfg = TrainingConfig(
-    architecture="conv", clip_length=60, n_joints=17, latent_dim=16,
-    n_cond=0,                       # unconditional encoder z = f(x); no leak channel
-    site_adv_lambda_max=1.0,        # gradient-reversal strength ceiling
-    site_adv_warmup_epochs=30,      # ramp lambda from 0 (starting at full strength destabilises)
-    beta_max=1e-2,                  # a real KL, not 1e-4
-)
-out = train(cfg, videos, cohort_per_video=cohort_ids)   # cohort = adversary LABEL, not a network input
-```
-
-A `SiteAdversary` MLP predicts cohort from the posterior mean `mu`; a
-gradient-reversal layer (`grad_reverse`) flips its gradient into the
-encoder, so the encoder is trained to make cohort *un*predictable. It joins
-the same optimiser and a single backward pass. Watch the printed
-`advAcc` — it should sit near chance (a healthy minimax equilibrium); if it
-pins *below* chance immediately, `lambda` is too high. `cohort_per_video`
-is required (the labels are the adversary's target), but cohort is **never
-fed into the networks**, so at inference the encoder needs no `c` and the
-latent is cohort-invariant by construction. In the post-hoc analysis this
-model is named **AVAE** and is the target (`primary`).
-
-```python
-cfg = TrainingConfig(
-    architecture="conv", clip_length=60, n_joints=17, latent_dim=32,
-    n_cond=3, cond_dim=8, cond_dropout=0.15,        # CVAE / GM-CVAE
-    n_components=5, gm_beta_z=1e-2, gm_beta_y=0.5,   # GM-VAE / GM-CVAE
-    gm_train="gradient",             # regular VaDE regime (default); "em" also available
-    gm_entropy_weight=1.0, gm_entropy_epochs=5,
-    # No N(0,I) term for GM runs — the mixture is the prior. gm_aux_beta
-    # defaults to 0; the beta schedule (beta_max) does not weight anything
-    # here, though delay_epochs/warmup_epochs still shape the mixture ramp.
-)
-out = train(cfg, videos, cohort_per_video=cohort_ids)
-model, mixture = out["model"], out["mixture"]
-```
-
-### How the GM prior is trained ([GM-VAE §3.3]) — *deprecated*
-
-_Retained for the record only; not on the active path ([post-hoc plan §0])._
-Following Fan et al., the mixture is trained by an EM-inspired
-block-coordinate scheme rather than gradient descent on the component
-parameters. Each epoch does a normal gradient pass over the
-encoder/decoder with the mixture **frozen**, then an EM M-step over the
-epoch's cached posterior means updates `(pi, mu, sigma^2)` in closed form
-(`GaussianMixturePrior.em_update`); it can re-add the N(0,I) safety tether
-via `gm_aux_beta`. The EM regime is more faithful to the paper but prone to
-component collapse, which is why gradient is the default. The soft
-assignment of a latent point
-is the exact posterior `p(c | z)` under the current mixture — there is no
-amortised `q(y|x)` head. Per-component occupancy is logged every epoch
-(`history["gm_occupancy"]`) so component collapse ([CARE-PD §10]) is
-visible from epoch 0; `gm_entropy_weight` adds a decaying entropy bonus to
-counter it.
-
-### Data adapter ([CARE-PD §8], `care_pd.py`)
-
-Maps the CARE-PD `h36m/` release into the clip iterator. The release is
-what `bash scripts/preprocess_smpl2h36m.sh` emits: one subdirectory per
-cohort with `h36m_3d_world_*.npz` plus four camera-projected variants;
-each `.npz` is a **flat** dict `{ "subject__walkid": (F, 17, 3) }`.
-`load_cohorts` picks the world file (skipping `world2cam*` and
-`world2cam2img*`) and splits the `subject__walkid` key so LOSO works.
-Preprocessing runs per-frame root-centring (the plan §8 step);
-`resample_fps` and `align_direction` are kept but early-return on the
-already-canonical release. Windowing is delegated to `build_clips`.
-
-Note **the h36m release carries no labels** — `smpl2h36m.py` exports only
-pose arrays. Pass `source_dir=` (or `source_pkl=`) to `load_cohorts` to
-attach UPDRS / medication / freezer / `other` from the sibling raw SMPL
-`.pkl` (chumpy-free — only the label fields are read). `Walk` gains a
-`walk_id` field to match against the source pickle. Training does not
-need labels; only the §11 analysis does.
-
-Use **`n_joints=17`** in `TrainingConfig` for the h36m release (the H36M
-regressor is the 17-joint standard).
-
-### Metrics ([CARE-PD §11], `metrics.py`)
-
-Frozen-latent evaluators, model-agnostic: `site_probe` (§11.1, two-layer
-MLP predicting cohort), `cluster_label_agreement` + `kmeans_labels` /
-`hdbscan_labels` (§11.2, ARI/NMI vs UPDRS / freezer / medication),
-`linear_probe` (§11.3, UPDRS R² and freezer/medication balanced
-accuracy), and `occupancy` (§10). scikit-learn is imported lazily.
-
-`gm_smoke_test.py` trains the two core models (VAE + CVAE) on synthetic
-multi-cohort data and runs the battery — read it as a worked example. The
-deprecated GM-VAE / GM-CVAE paths run only with
-`--include-deprecated-gmvae`, to keep the retained source exercised.
 
 ## Two small warnings
 

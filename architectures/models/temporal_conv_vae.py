@@ -55,13 +55,8 @@ class TemporalConvVAE(nn.Module):
                  kernels: tuple[int, int, int] = (5, 3, 3),
                  strides: tuple[int, int, int] = (1, 2, 2),
                  inpainting: bool = False,
-                 n_cond: int = 0, cond_dim: int = 8,
-                 cond_dropout: float = 0.0, n_dims: int = 3):
+                 n_dims: int = 3):
         super().__init__()
-        if n_cond > 0:
-            raise NotImplementedError(
-                "TemporalConvVAE does not implement cohort conditioning yet; "
-                "use n_cond=0.")
         self.T = T
         self.J = J
         self.d_z = d_z
@@ -127,7 +122,7 @@ class TemporalConvVAE(nn.Module):
         return w.transpose(1, 2).reshape(B, -1)
 
     # ---- Encoder ---------------------------------------------------------
-    def encode(self, X, M, c=None):
+    def encode(self, X, M):
         """Map (clip, mask) to per-window (mu, logvar), flattened.
 
         Returns:
@@ -149,14 +144,14 @@ class TemporalConvVAE(nn.Module):
         g = self.from_z(g)                           # (B, 2C, T/l)
         return self.dec_upsample(g)                  # (B, C, T)
 
-    def decode_full(self, z, c=None):
+    def decode_full(self, z):
         """Full-clip reconstruction from the per-window latent."""
         g = self._decode_trunk(z)
         x_hat = self.dec_output_full(g)              # (B, DJ, T)
         B = z.shape[0]
         return x_hat.transpose(1, 2).reshape(B, self.T, self.J, self.n_dims)
 
-    def decode_inp(self, z, M, c=None):
+    def decode_inp(self, z, M):
         """Mask-conditioned inpainting head (Recipe 3 only)."""
         if not self.inpainting:
             raise RuntimeError("Model was built without the inpainting head.")
@@ -177,7 +172,7 @@ class TemporalConvVAE(nn.Module):
         return z.view(B, self.d_z, self.T_bottleneck).mean(dim=2)
 
     # ---- Combined --------------------------------------------------------
-    def forward(self, X, M, c=None):
+    def forward(self, X, M):
         """Encode, sample, decode.
 
         Returns:

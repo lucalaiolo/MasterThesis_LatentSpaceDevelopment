@@ -65,28 +65,6 @@ class TrainingConfig:
             **temporal** attention (across frames within a joint), the
             divided space-time / PoseFormer construction. Ignored when
             ``architecture == "conv"``.
-        anchored_residual: when True, the transformer models the *residual*
-            ``r = (x - a) / s`` (mean pose ``a`` and torso scale ``s`` removed)
-            instead of the absolute pose, with ``(vec(a), s)`` fed in as FiLM
-            conditioning and the clip reassembled as ``x_hat = a + s * r_hat``
-            outside the network ([ARCH §4.4]). Forces the latent to encode
-            movement, not the mean pose — the fix for a decoder that reproduces
-            only the static average pose. **Orthogonal to
-            ``transformer_attention``**: combine it with ``"temporal"`` (the
-            frame-token anchored model) or ``"factorized"`` (the space-time
-            anchored model). Ignored when ``architecture == "conv"``. Uses
-            ``anchor_shoulder_joints`` / ``anchor_hip_joints`` for ``s``. (The
-            legacy value ``transformer_attention="anchored"`` still works and
-            is normalised to ``"factorized"`` + ``anchored_residual=True``.)
-        anchor_shoulder_joints: (left, right) shoulder joint indices whose
-            midpoint is the top of the torso segment used for the scale ``s``
-            when ``anchored_residual``. ``None`` (default) falls back to a
-            generic per-frame bounding-box diagonal. COCO-18: (5, 2).
-        anchor_hip_joints: (left, right) hip joint indices for the bottom of
-            the torso segment. COCO-18: (11, 8). Both anchor-joint fields must
-            be set together, or both left ``None``.
-        anchor_scale_eps: lower clamp on the scale ``s`` so a still clip never
-            divides the residual by ~0. Only used when ``anchored_residual``.
         batch_size: B in [MVAE §6.4].
         n_epochs: total training epochs.
         learning_rate: peak learning rate.
@@ -134,106 +112,6 @@ class TrainingConfig:
             reconstruction, so the generated motion — not just the per-
             frame pose — is scored against the target. Cheap regulariser
             against temporal jitter; applies to every recipe.
-        n_cond: number of conditioning categories for the CVAE arm
-            ([CARE-PD §6]). 0 (default) disables conditioning and gives a
-            plain VAE. Set to the cohort count to condition on cohort. The
-            data iterator must then yield a per-clip integer id in
-            ``[0, n_cond)``.
-        cond_dim: width of the learned conditioning embedding e(c)
-            ([CARE-PD §6], d_c in [4, 16]). Ignored when ``n_cond == 0``.
-        cond_dropout: conditioning-dropout rate ([CARE-PD §6, §10]). With
-            this probability the decoder's e(c) is replaced by zeros during
-            training so the decoder cannot degenerate into one sub-decoder
-            per cohort and must keep using z. Encoder always sees clean
-            e(c) so it can *stop* routing cohort into z. Ignored when
-            ``n_cond == 0``.
-        site_adv_lambda_max: strength ceiling of the gradient-reversal site
-            adversary ([Phase 2c]). 0 (default) disables it. When > 0, a
-            :class:`SiteAdversary` is trained to predict cohort from the
-            posterior mean and its gradient is reversed into the encoder, so
-            the encoder is driven to make cohort *un*predictable from the
-            latent — the explicit invariance term that conditioning alone
-            never provided. Needs ``cohort_per_video`` (the cohort labels)
-            at train time, but does **not** feed cohort into the networks:
-            set ``n_cond=0`` for the pure adversarial VAE ("goodbye to the
-            CVAE" — the encoder is z=f(x) with no cohort leak channel), or
-            keep ``n_cond>0`` to combine conditioning with the adversary.
-        site_adv_warmup_epochs: epochs over which the reversal strength
-            ramps linearly from 0 to ``site_adv_lambda_max``. Starting at
-            full strength destabilises training; ramping lets the adversary
-            learn cohort first, then the encoder unlearn it. Ignored when
-            ``site_adv_lambda_max == 0``.
-        site_adv_hidden: hidden width of the adversary MLP (two hidden
-            layers, matching the evaluation site probe). Ignored when
-            ``site_adv_lambda_max == 0``.
-        n_components: K, the number of Gaussian-mixture prior components
-            ([CARE-PD §7.3]). 0 (default) keeps the standard N(0, I) prior.
-            When > 0 the run trains a GM-VAE (or GM-CVAE if ``n_cond > 0``).
-        gm_train: how the mixture parameters are fit ([CARE-PD §7.3]).
-            "gradient" (default) — the regular / VaDE regime: the
-            component means, log-variances, and weights are trainable
-            parameters optimised jointly with the ELBO by the same
-            optimiser as the networks. Robust and the recommended default.
-            "em" — the EM-inspired block-coordinate scheme of
-            [GM-VAE §3.3]: the parameters are refreshed by closed-form EM
-            M-steps over the epoch's cached latents while the networks are
-            frozen. More faithful to the physics paper but less stable;
-            prone to component collapse. Ignored when ``n_components == 0``.
-        gm_beta_z: weight on the mixture KL E_q(y)[KL(q(z|x) || p(z|y))]
-            (the plan's beta_z, [CARE-PD §7.3]). Ignored when
-            ``n_components == 0``.
-        gm_beta_y: weight on the categorical KL KL(q(y|x) || p(y))
-            (the plan's beta_y). Ignored when ``n_components == 0``.
-        gm_aux_beta: weight of the auxiliary KL(q(z|x) || N(0, I)) term for
-            GM runs. 0 (default) removes it — in a GM-VAE the mixture *is*
-            the prior, so the N(0,I) term is redundant. A small positive
-            value re-adds it as the safety tether of [GM-VAE §3.3] (useful
-            mainly with ``gm_train="em"``). Note this replaces the beta
-            schedule for GM runs: ``beta_max`` and ``beta_mode`` no longer
-            weight any prior term when ``n_components > 0``, though
-            ``delay_epochs`` / ``warmup_epochs`` still shape the mixture-KL
-            ramp via ``gm_kl_warmup``.
-        gm_em_steps: number of EM iterations run over the cached epoch
-            latents to refresh the mixture parameters after each gradient
-            epoch ([GM-VAE Alg. 1], the N_EM inner loop). Ignored when
-            ``n_components == 0``.
-        gm_var_floor: lower clamp on the per-component variances during the
-            EM M-step, guarding against a component collapsing onto a
-            single point. Ignored when ``n_components == 0``.
-        gm_init_spread: standard deviation used to scatter the initial
-            component means, so components start distinguishable rather
-            than all at the origin. Ignored when ``n_components == 0``.
-        gm_entropy_weight: initial weight of an entropy bonus on the soft
-            assignments q(y|x), decayed linearly to zero over
-            ``gm_entropy_epochs`` ([CARE-PD §10], component-collapse
-            mitigation). Rewards near-uniform assignments early so no
-            component dies before the latent has organised. Ignored when
-            ``n_components == 0``.
-        gm_entropy_epochs: number of epochs over which the entropy bonus
-            decays to zero. Ignored when ``n_components == 0``.
-        gm_kl_warmup: when True (default), the mixture KL terms (gm_beta_z,
-            gm_beta_y) are ramped by the *same* [0, 1] warm-up shape as the
-            beta schedule — held at 0 during a ``delayed_warmup`` delay,
-            then ramped over ``warmup_epochs``. This lets the "learn to use
-            the latent first, apply KL pressure later" recipe cover the
-            mixture terms too, not just the N(0, I) regulariser, and echoes
-            the brief pre-training phase of [GM-VAE §6]. Set False to hold
-            the mixture KL at full strength from epoch 0. Ignored when
-            ``n_components == 0``.
-        allow_deprecated_gmvae: **DEPRECATED PATH GUARD** ([post-hoc plan
-            §0]). The mixture-prior models (GM-VAE / GM-CVAE) were removed
-            from the active pipeline: they suffer component collapse when
-            the latent is not cleanly multimodal, and the phenotype claim
-            is now made post hoc on the plain VAE / CVAE latents instead.
-            The source is kept for the record but ``train`` refuses to build
-            a mixture (``n_components > 0``) unless this flag is explicitly
-            set to True. Leave it False in every default run. Ignored when
-            ``n_components == 0``.
-        beta_max / warmup_epochs (GM runs): for a GM run the beta schedule
-            drives the auxiliary KL(q(z|x) || N(0, I)) regulariser that
-            [GM-VAE §3.3, Alg. 1] adds on top of the mixture terms to keep
-            the manifold well-conditioned. Keep it small (e.g. 1e-2) or
-            zero it out; the mixture KL does the main regularising.
         mask_policy: one of "none", "uniform", "top_k_speed",
             "softmax_speed", "per_frame_speed", "limb". See
             `mask_policies.py` for the definitions ([MVAE §2]).
@@ -276,10 +154,6 @@ class TrainingConfig:
     dropout: float = 0.1
     temporal_downsample: int = 4
     transformer_attention: Literal["temporal", "factorized"] = "temporal"
-    anchored_residual: bool = False
-    anchor_shoulder_joints: tuple[int, int] | None = None
-    anchor_hip_joints: tuple[int, int] | None = None
-    anchor_scale_eps: float = 1e-3
 
     # Training.
     batch_size: int = 64
@@ -299,33 +173,6 @@ class TrainingConfig:
     lambda_aux: float = 1.0
     lambda_velocity: float = 0.0
 
-    # Conditioning (CVAE / GM-CVAE arm, [CARE-PD §6]).
-    n_cond: int = 0
-    cond_dim: int = 8
-    cond_dropout: float = 0.15
-
-    # Site adversary (gradient-reversal cohort-invariance, [Phase 2c]).
-    site_adv_lambda_max: float = 0.0
-    site_adv_warmup_epochs: int = 30
-    site_adv_hidden: int = 128
-
-    # Gaussian-mixture prior (GM-VAE / GM-CVAE arm, [CARE-PD §7.3],
-    # trained with the EM scheme of [GM-VAE §3.3]).
-    n_components: int = 0
-    gm_train: Literal["gradient", "em"] = "gradient"
-    gm_beta_z: float = 1.0
-    gm_beta_y: float = 1.0
-    gm_aux_beta: float = 0.0
-    gm_em_steps: int = 1
-    gm_var_floor: float = 1e-4
-    gm_init_spread: float = 1.0
-    gm_entropy_weight: float = 0.0
-    gm_entropy_epochs: int = 5
-    gm_kl_warmup: bool = True
-    # Deprecated-path guard ([post-hoc plan §0]): the mixture-prior models
-    # are off the active path; training one requires opting in explicitly.
-    allow_deprecated_gmvae: bool = False
-
     # Masking.
     mask_policy: Literal["none", "uniform", "top_k_speed",
                          "softmax_speed", "per_frame_speed",
@@ -341,14 +188,6 @@ class TrainingConfig:
     log_every: int = 50
     save_every: int = 10
     out_dir: str = "checkpoints"
-
-    def __post_init__(self) -> None:
-        # Legacy alias: transformer_attention="anchored" was the factorized
-        # anchored model before anchoring became an orthogonal toggle. Normalise
-        # it so old configs / checkpoints keep working.
-        if getattr(self, "transformer_attention", None) == "anchored":
-            self.transformer_attention = "factorized"
-            self.anchored_residual = True
 
     def downsample_factor(self) -> int:
         """Product of the three encoder strides. The encoder divides T by this."""
@@ -390,33 +229,15 @@ class TrainingConfig:
                 f"n_layers={self.n_layers}, n_enc_layers={self.n_enc_layers}, "
                 f"n_dec_layers={self.n_dec_layers})."
             )
-        if ((self.transformer_attention == "factorized" or self.anchored_residual)
+        if (self.transformer_attention == "factorized"
                 and (self.n_enc_layers is not None
                      or self.n_dec_layers is not None)):
             raise ValueError(
                 "n_enc_layers / n_dec_layers have no effect with "
-                "transformer_attention='factorized' or anchored_residual=True: "
-                "these backbones share one n_layers across both stacks. Set "
-                "n_layers instead, or use transformer_attention='temporal' with "
-                "anchored_residual=False for per-side depth."
+                "transformer_attention='factorized': this backbone shares one "
+                "n_layers across both stacks. Set n_layers instead, or use "
+                "transformer_attention='temporal' for per-side depth."
             )
-        if self.anchored_residual:
-            sh, hp = self.anchor_shoulder_joints, self.anchor_hip_joints
-            if (sh is None) != (hp is None):
-                raise ValueError(
-                    "anchor_shoulder_joints and anchor_hip_joints must be set "
-                    "together (or both None for the generic bounding-box scale)."
-                )
-            for name, pair in (("anchor_shoulder_joints", sh),
-                               ("anchor_hip_joints", hp)):
-                if pair is not None:
-                    if len(pair) != 2:
-                        raise ValueError(f"{name} must be a (left, right) pair.")
-                    if not all(0 <= j < self.n_joints for j in pair):
-                        raise ValueError(
-                            f"{name}={pair} has an index outside "
-                            f"[0, n_joints={self.n_joints})."
-                        )
         if self.n_dims < 1:
             raise ValueError(
                 f"n_dims ({self.n_dims}) must be >= 1 (2 for 2D keypoints, "
@@ -432,48 +253,4 @@ class TrainingConfig:
             raise ValueError(
                 f"lambda_velocity ({self.lambda_velocity}) must be >= 0 "
                 f"(0 disables the velocity term)."
-            )
-        if self.n_cond < 0:
-            raise ValueError(f"n_cond ({self.n_cond}) must be >= 0.")
-        if self.n_cond > 0 and self.cond_dim <= 0:
-            raise ValueError(
-                f"cond_dim ({self.cond_dim}) must be positive when "
-                f"conditioning is enabled (n_cond={self.n_cond})."
-            )
-        if not 0.0 <= self.cond_dropout < 1.0:
-            raise ValueError(
-                f"cond_dropout ({self.cond_dropout}) must be in [0, 1)."
-            )
-        if self.site_adv_lambda_max < 0:
-            raise ValueError(
-                f"site_adv_lambda_max ({self.site_adv_lambda_max}) must be "
-                f">= 0 (0 disables the site adversary)."
-            )
-        if self.site_adv_lambda_max > 0 and self.site_adv_hidden <= 0:
-            raise ValueError(
-                f"site_adv_hidden ({self.site_adv_hidden}) must be positive "
-                f"when the site adversary is enabled."
-            )
-        if self.n_components < 0:
-            raise ValueError(
-                f"n_components ({self.n_components}) must be >= 0."
-            )
-        if self.n_components == 1:
-            raise ValueError(
-                "n_components == 1 is a plain VAE with a shifted prior; set "
-                "0 for the N(0, I) prior or >= 2 for a real mixture."
-            )
-        if self.n_components > 0 and not self.allow_deprecated_gmvae:
-            raise DeprecationWarning(
-                "GM-VAE / GM-CVAE (n_components > 0) is a DEPRECATED path "
-                "([post-hoc plan §0]): the mixture prior collapses when the "
-                "latent is not cleanly multimodal, and phenotype structure "
-                "is now recovered post hoc on the plain VAE / CVAE latents "
-                "(see vae_analysis.posthoc). The source is kept for the "
-                "record only. To run it anyway — against the plan — set "
-                "TrainingConfig(allow_deprecated_gmvae=True) explicitly."
-            )
-        if self.n_components > 0 and self.gm_em_steps < 1:
-            raise ValueError(
-                f"gm_em_steps ({self.gm_em_steps}) must be >= 1 for a GM run."
             )
